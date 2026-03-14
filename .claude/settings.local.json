@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python generate_synthetic.py)",
+      "Bash(ls synthetic_data/ | sort -t_ -k4 | head -2 && ls synthetic_data/ | sort -t_ -k4 | tail -2)",
+      "WebSearch",
+      "Bash(python train.py --epochs 2 --batch-size 4)",
+      "Bash(python -c \"\nfrom generate_synthetic import generate_image\nfor i, v in enumerate\\([45, 150, 270]\\):\n    generate_image\\(v, f'test_{i}.png', augment=True\\)\nprint\\('done'\\)\n\")",
+      "Bash(python -c \"\nfrom generate_synthetic import generate_image\ngenerate_image\\(45, 'test_0.png', augment=True\\)\ngenerate_image\\(200, 'test_1.png', augment=True\\)\ngenerate_image\\(90, 'test_clean.png', augment=False\\)\nprint\\('done'\\)\n\")",
+      "Bash(python -c \"\nfrom generate_synthetic import generate_image\ngenerate_image\\(120, 'test_infer.png', augment=False\\)\nprint\\('generated'\\)\n\" && python infer.py test_infer.png --save-heatmap test_heatmap.png)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:ai.google.dev)",
+      "Bash(cd C:/Users/Administrator/PycharmProjects/train_dial && .venv/Scripts/python.exe validate_pth_vs_tflite.py)",
+      "Bash(cd C:/Users/Administrator/PycharmProjects/train_dial && .venv/Scripts/python.exe -c \"\nfrom generate_synthetic import generate_image\ngenerate_image\\(45, 'test_dial.png'\\)\n\" && .venv/Scripts/python.exe infer_tflite.py test_dial.png --save-heatmap test_hm.png && rm test_dial.png test_hm.png)",
+      "Bash(cd C:/Users/Administrator/PycharmProjects/train_dial && .venv/Scripts/python.exe -c \"\nfrom generate_synthetic import generate_image\nimport random\nrandom.seed\\(42\\)\nfor angle in [0, 45, 90, 180, 270]:\n    generate_image\\(angle, f'test_gen_{angle}.png'\\)\nprint\\('Done'\\)\n\")"
+    ]
+  }
+}

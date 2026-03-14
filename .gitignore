@@ -1,0 +1,29 @@
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Model files
+*.pth
+*.tflite
+
+# Data directories
+synthetic_data/
+infer_data/
+
+# Images
+*.png
+*.jpg
+
+# IDE
+.idea/
+*.iml
+
+# OS
+Thumbs.db
+Desktop.ini
