@@ -13,7 +13,15 @@
       "WebFetch(domain:ai.google.dev)",
       "Bash(cd C:/Users/Administrator/PycharmProjects/train_dial && .venv/Scripts/python.exe validate_pth_vs_tflite.py)",
       "Bash(cd C:/Users/Administrator/PycharmProjects/train_dial && .venv/Scripts/python.exe -c \"\nfrom generate_synthetic import generate_image\ngenerate_image\\(45, 'test_dial.png'\\)\n\" && .venv/Scripts/python.exe infer_tflite.py test_dial.png --save-heatmap test_hm.png && rm test_dial.png test_hm.png)",
-      "Bash(cd C:/Users/Administrator/PycharmProjects/train_dial && .venv/Scripts/python.exe -c \"\nfrom generate_synthetic import generate_image\nimport random\nrandom.seed\\(42\\)\nfor angle in [0, 45, 90, 180, 270]:\n    generate_image\\(angle, f'test_gen_{angle}.png'\\)\nprint\\('Done'\\)\n\")"
+      "Bash(cd C:/Users/Administrator/PycharmProjects/train_dial && .venv/Scripts/python.exe -c \"\nfrom generate_synthetic import generate_image\nimport random\nrandom.seed\\(42\\)\nfor angle in [0, 45, 90, 180, 270]:\n    generate_image\\(angle, f'test_gen_{angle}.png'\\)\nprint\\('Done'\\)\n\")",
+      "WebFetch(domain:learnopencv.com)",
+      "WebFetch(domain:note.nkmk.me)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:forum.opencv.org)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:cs.brown.edu)",
+      "WebFetch(domain:www.programcreek.com)",
+      "Bash(python:*)"
     ]
   }
 }

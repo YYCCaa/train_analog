@@ -10,6 +10,8 @@ A very faint outer circle marks the dial boundary.  No scales or digits.
 Label = (tip_x, tip_y) pixel coordinates of the pointer apex.
 """
 
+import argparse
+import colorsys
 import csv
 import math
 import os
@@ -33,13 +35,21 @@ VALUE_MIN = 0.0
 VALUE_MAX = 9.0
 
 # Augmentation ranges
-SCALE_RANGE = (0.75, 1.0)
-HUB_RATIO_RANGE = (0.32, 0.38)
-CHORD_RATIO_RANGE = (0.8, 1.0)     # chord_length / hub_diameter
-TIP_VARIATION = 0.10
-DISPLACEMENT_RANGE = (3, 5)
+SCALE_RANGE = (0.9, 1.0)
+HUB_RATIO_RANGE = (0.4, 0.45)
+CHORD_RATIO_RANGE = (0.99, 1.0)     # chord_length / hub_diameter
+HOLE_RATIO_RANGE = (1.05, 1.1)    # mounting hole radius / hub_radius
+HOLE_DISP_RANGE = (0, 8)           # random displacement of mounting hole centre (px)
+TIP_VARIATION = 0.02
+DISPLACEMENT_RANGE = (0, 10)
 NOISE_INTENSITY = 12
-BLUR_RANGE = (0.3, 0.7)
+BLUR_RANGE = (1,3)
+STRETCH_H_RANGE = (0.98, 1.02)      # horizontal stretch factor inside dial
+STRETCH_V_RANGE = (0.98, 1.02)      # vertical stretch factor inside dial
+DIAL_CIRCLE_BLUR = True             # gaussian blur inside dial circle only
+DIAL_CIRCLE_BLUR_RADIUS = 3     # fixed blur radius inside dial circle
+CUT_TIP = True                      # erase pointer pixels near the apex
+CUT_TIP_RADIUS = 3                   # px radius around apex to erase
 
 # Shadow parameters (pointer cast shadow)
 SHADOW_OFFSET_RANGE = (10, 15)        # pixels
@@ -57,13 +67,8 @@ RIM_SHADOW_PRIMARY_OPACITY = (200, 200)      # alpha for key light shadow
 RIM_SHADOW_SECONDARY_OPACITY = (200, 200)     # alpha for fill light shadow
 RIM_SHADOW_BLUR_RANGE = (4.0, 8.0)          # blur radius for soft falloff
 
-# Glare parameters
-GLARE_RADIUS_RANGE = (15, 40)       # semi-axis range for the ellipse
-GLARE_OPACITY_RANGE = (40, 110)     # alpha (≈15-43%)
-GLARE_BLUR = 6.0                    # heavy blur for soft falloff
-
 # Color jitter ranges (ImageEnhance factor: 1.0 = original)
-BRIGHTNESS_RANGE = (0.85, 1.15)
+BRIGHTNESS_RANGE = (0.85, 1.35)
 CONTRAST_RANGE = (0.80, 1.20)
 SATURATION_RANGE = (0.75, 1.25)
 SHARPNESS_RANGE = (0.7, 1.5)
@@ -72,8 +77,13 @@ SHARPNESS_RANGE = (0.7, 1.5)
 BG_LOWFREQ_SIZE = 8                 # generate gradient at this resolution
 BG_VARIATION = 8                   # max pixel deviation from base colour
 
+# Pointer colour variation
+PTR_GRADIENT_RANGE = (-25, 25)      # lengthwise brightness shift hub→tip
+PTR_NOISE_RANGE = 5                 # fine per-pixel noise
+PTR_EDGE_THICKNESS_RANGE = (2, 3)   # edge band width in pixels
+PTR_EDGE_NOISE_RANGE = 5           # per-pixel random variation on edge
 # Canvas: dial is drawn on a tight canvas, then edge-mean-padded to IMG_SIZE
-CANVAS_MARGIN = 10                  # px beyond dial_radius in small canvas
+CANVAS_MARGIN = 30                  # px beyond dial_radius in small canvas
 
 
 # ── dial face ───────────────────────────────────────────────────────────
@@ -169,27 +179,13 @@ def draw_shadow(shadow_draw, apex, base_left, base_right,
 
 # ── pointer colour variation ───────────────────────────────────────────
 
-# Lengthwise gradient: brightness shift from hub to tip (positive = tip lighter)
-PTR_GRADIENT_RANGE = (-25, 25)
-# Edge darkening (bevel): max darkening at the edge of the pointer body
-PTR_EDGE_DARKEN_RANGE = (10, 35)
-# Specular highlight: bright streak along one side
-PTR_SPECULAR_STRENGTH_RANGE = (15, 50)
-PTR_SPECULAR_WIDTH_FRAC = (0.2, 0.5)   # fraction of pointer width
-# Fine per-pixel noise (on top of structured variation)
-PTR_NOISE_RANGE = 10
-
-
 def _pointer_color_variation(img, mask, base_rgb, cx, cy, angle_deg,
                              hub_radius, tip_dist):
     """Apply realistic structured colour variation to the pointer body.
 
     Layers (applied additively to brightness):
     1. Lengthwise gradient — smooth brightness ramp from hub to tip.
-    2. Edge darkening — darker near the silhouette edges (bevel effect).
-    3. Specular highlight — bright streak offset to one side of the
-       pointer axis, simulating a light reflection along the body.
-    4. Fine per-pixel noise — subtle texture.
+    2. Fine per-pixel noise — subtle texture.
     """
     arr = np.array(img).astype(np.int16)
     m = np.array(mask)
@@ -200,57 +196,22 @@ def _pointer_color_variation(img, mask, base_rgb, cx, cy, angle_deg,
     a = math.radians(angle_deg - 90)
     axis_dx = math.cos(a)   # unit vector along pointer (hub → tip)
     axis_dy = math.sin(a)
-    perp_dx = -axis_dy       # perpendicular (left of axis)
-    perp_dy = axis_dx
-
     # Signed distance along axis from centre, normalised to [-1, 1]
     rel_x = (xs - cx).astype(np.float32)
     rel_y = (ys - cy).astype(np.float32)
     along = rel_x * axis_dx + rel_y * axis_dy          # projection on axis
-    across = rel_x * perp_dx + rel_y * perp_dy         # projection on perp
     along_norm = along / max(tip_dist, 1)               # -1 .. +1 (hub .. tip)
 
     # ── 1. Lengthwise gradient ──
     grad_strength = random.uniform(*PTR_GRADIENT_RANGE)
     grad_shift = (along_norm * grad_strength).astype(np.int16)
 
-    # ── 2. Edge darkening (bevel) ──
-    # Approximate edge distance via successive erosions of the mask
-    eroded = m.copy()
-    edge_dist = np.zeros_like(m, dtype=np.float32)
-    for _ in range(int(hub_radius * 2)):
-        kernel_row = np.array([[0], [1], [0]], dtype=np.uint8)
-        kernel_col = np.array([[0, 1, 0]], dtype=np.uint8)
-        # Simple 4-connected erosion via min-filter
-        e1 = np.minimum(np.roll(eroded, 1, 0), np.roll(eroded, -1, 0))
-        e2 = np.minimum(np.roll(eroded, 1, 1), np.roll(eroded, -1, 1))
-        eroded = np.minimum(e1, e2) & eroded
-        edge_dist += (eroded > 0).astype(np.float32)
-        if eroded.sum() == 0:
-            break
-    max_edge = edge_dist.max() if edge_dist.max() > 0 else 1
-    edge_factor = edge_dist[ys, xs] / max_edge          # 0 at edge, 1 at centre
-    darken_strength = random.uniform(*PTR_EDGE_DARKEN_RANGE)
-    edge_shift = ((edge_factor - 1.0) * darken_strength).astype(np.int16)  # negative at edges
-
-    # ── 3. Specular highlight streak ──
-    spec_strength = random.uniform(*PTR_SPECULAR_STRENGTH_RANGE)
-    spec_width = random.uniform(*PTR_SPECULAR_WIDTH_FRAC) * hub_radius
-    # Offset the highlight to one side randomly
-    spec_side = random.choice([-1, 1])
-    spec_offset = random.uniform(0.1, 0.4) * hub_radius * spec_side
-    spec_dist = across - spec_offset
-    spec_profile = np.exp(-0.5 * (spec_dist / max(spec_width, 1)) ** 2)
-    # Taper specular toward the tip (strongest in middle section)
-    spec_taper = np.clip(1.0 - 0.6 * np.abs(along_norm), 0, 1)
-    spec_shift = (spec_profile * spec_taper * spec_strength).astype(np.int16)
-
-    # ── 4. Fine per-pixel noise ──
+    # ── 2. Fine per-pixel noise ──
     noise = np.random.randint(-PTR_NOISE_RANGE, PTR_NOISE_RANGE + 1,
                               size=len(ys), dtype=np.int16)
 
     # Combine all shifts
-    total_shift = grad_shift + edge_shift + spec_shift + noise
+    total_shift = grad_shift + noise
 
     for c in range(3):
         arr[ys, xs, c] = np.clip(arr[ys, xs, c] + total_shift, 0, 255)
@@ -258,10 +219,61 @@ def _pointer_color_variation(img, mask, base_rgb, cx, cy, angle_deg,
     return Image.fromarray(arr.astype(np.uint8), img.mode)
 
 
+def _draw_pointer_edge(img, mask, edge_color_rgb, bg_arr):
+    """Draw a variable-thickness edge on the boundary of the pointer mask.
+
+    Edge thickness is randomised per image.  Pixels in the outermost
+    erosion band are blended mostly toward the background (the actual
+    dial face colour from *bg_arr*, captured before the pointer was
+    drawn), while inner bands are mostly the edge colour.
+    Each pixel also gets independent random noise.
+    """
+    thickness = random.randint(*PTR_EDGE_THICKNESS_RANGE)
+    m = np.array(mask)
+    arr = np.array(img)
+
+    # Build per-pixel distance from the mask boundary (0 = outermost)
+    # by successive erosions.  distance[y,x] = how many erosion steps
+    # the pixel survives (0 for the outermost ring, 1 for the next, …).
+    dist = np.full(m.shape, thickness, dtype=np.float32)
+    current = m.copy()
+    for step in range(thickness):
+        e1 = np.minimum(np.roll(current, 1, 0), np.roll(current, -1, 0))
+        e2 = np.minimum(np.roll(current, 1, 1), np.roll(current, -1, 1))
+        eroded = np.minimum(e1, e2) & current
+        # Pixels that just disappeared are at this erosion depth
+        ring = (current > 0) & (eroded == 0)
+        dist[ring] = step
+        current = eroded
+
+    # Edge band = mask pixels within the thickness
+    edge_band = (m > 0) & (dist < thickness)
+    ys, xs = np.where(edge_band)
+    if len(ys) == 0:
+        return img
+
+    # Blend factor: 0.0 at outermost ring (= background), 1.0 at
+    # innermost ring (= full edge colour).  This makes the edge
+    # gradually assimilate into the background.
+    blend = dist[ys, xs] / max(thickness - 1, 1)
+
+    # Per-pixel random noise on each channel
+    noise = np.random.randint(-PTR_EDGE_NOISE_RANGE, PTR_EDGE_NOISE_RANGE + 1,
+                              size=(len(ys), 3), dtype=np.int16)
+
+    bg = bg_arr[ys, xs, :3].astype(np.int16)
+    ec = np.array(edge_color_rgb, dtype=np.int16)
+    blended = (bg + blend[:, None] * (ec - bg) + noise).astype(np.int16)
+    arr[ys, xs, :3] = np.clip(blended, 0, 255).astype(np.uint8)
+    if arr.shape[2] == 4:
+        arr[ys, xs, 3] = 255
+    return Image.fromarray(arr, img.mode)
+
+
 # ── pointer ─────────────────────────────────────────────────────────────
 
 def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist,
-                 chord_half, chord_dist, pointer_base_rgb):
+                 chord_half, chord_dist, pointer_base_rgb, edge_color_rgb=None):
     """Draw the pointer with realistic colour variation.  Return (apex, bl, br)."""
     a = math.radians(angle_deg - 90)
 
@@ -277,6 +289,8 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist,
     base_right = (base_mx - chord_half * perp[0],
                   base_my - chord_half * perp[1])
 
+    draw = ImageDraw.Draw(img)
+
     # Build a mask of the pointer shape
     mask = Image.new("L", img.size, 0)
     mdraw = ImageDraw.Draw(mask)
@@ -284,8 +298,10 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist,
     mdraw.ellipse([cx - hub_radius, cy - hub_radius,
                    cx + hub_radius, cy + hub_radius], fill=255)
 
+    # Snapshot background before painting (for edge blending outward)
+    bg_arr = np.array(img)
+
     # Fill pointer region with base colour
-    draw = ImageDraw.Draw(img)
     base_rgba = pointer_base_rgb + (255,)
     draw.polygon([apex, base_left, base_right], fill=base_rgba, outline=base_rgba)
     draw.ellipse([cx - hub_radius, cy - hub_radius,
@@ -296,57 +312,23 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist,
     img = _pointer_color_variation(img, mask, pointer_base_rgb, cx, cy,
                                    angle_deg, hub_radius, tip_dist)
 
+    # Draw edge in a colour from the luminance strip of the pointer colour
+    if edge_color_rgb is not None:
+        img = _draw_pointer_edge(img, mask, edge_color_rgb, bg_arr)
+
+    # Optionally erase the tip region (pointer drawn without its apex)
+    if CUT_TIP:
+        r = CUT_TIP_RADIUS
+        mask_arr = np.array(mask)
+        ys_t, xs_t = np.ogrid[:mask_arr.shape[0], :mask_arr.shape[1]]
+        tip_circle = (xs_t - apex[0]) ** 2 + (ys_t - apex[1]) ** 2 <= r ** 2
+        mask_arr[tip_circle] = 0
+        mask = Image.fromarray(mask_arr, "L")
+
     return img, apex, base_left, base_right, mask
 
 
 # ── glare ───────────────────────────────────────────────────────────────
-
-def draw_glare(img, pointer_mask):
-    """Add a soft elliptical glare highlight, masked to avoid the pointer.
-
-    The glare simulates light reflecting off the glass cover of the dial.
-    A random ellipse is drawn on a separate layer, heavily blurred for a
-    natural falloff, then zeroed wherever the pointer body is.
-    """
-    cs = img.size[0]  # canvas is square
-
-    # Random ellipse centre (biased toward image interior)
-    gx = random.randint(cs // 4, 3 * cs // 4)
-    gy = random.randint(cs // 4, 3 * cs // 4)
-
-    # Random semi-axes and rotation
-    ra = random.randint(*GLARE_RADIUS_RANGE)
-    rb = random.randint(*GLARE_RADIUS_RANGE)
-    opacity = random.randint(*GLARE_OPACITY_RANGE)
-
-    # Draw a white ellipse on an oversized layer (to survive blur at edges)
-    pad = int(GLARE_BLUR * 3)
-    layer_size = cs + 2 * pad
-    glare_big = Image.new("L", (layer_size, layer_size), 0)
-    gdraw = ImageDraw.Draw(glare_big)
-    gcx, gcy = gx + pad, gy + pad
-    gdraw.ellipse([gcx - ra, gcy - rb, gcx + ra, gcy + rb], fill=255)
-
-    # Blur then crop back to image size
-    glare_big = glare_big.filter(ImageFilter.GaussianBlur(radius=GLARE_BLUR))
-    glare_mask = glare_big.crop((pad, pad, pad + cs, pad + cs))
-
-    # Zero out pointer region so glare doesn't overlap the pointer body
-    glare_arr = np.array(glare_mask, dtype=np.int16)
-    ptr_arr = np.array(pointer_mask)
-    glare_arr[ptr_arr > 0] = 0
-    glare_arr = np.clip(glare_arr, 0, 255).astype(np.uint8)
-
-    # Build RGBA glare layer
-    glare_rgba = np.zeros((cs, cs, 4), dtype=np.uint8)
-    glare_rgba[:, :, 0] = 255  # white
-    glare_rgba[:, :, 1] = 255
-    glare_rgba[:, :, 2] = 255
-    glare_rgba[:, :, 3] = (glare_arr.astype(np.float32) * opacity / 255).astype(np.uint8)
-
-    glare_layer = Image.fromarray(glare_rgba, "RGBA")
-    return Image.alpha_composite(img, glare_layer)
-
 
 # ── rim shadow (bowl cavity) ───────────────────────────────────────────
 
@@ -467,10 +449,26 @@ def value_to_angle(value):
 
 def _random_red_rgb():
     """Return a random reddish (R, G, B) tuple as the pointer base."""
-    r = random.randint(180, 230)
-    g = random.randint(15, 55)
-    b = random.randint(10, 50)
+    r = random.randint(170, 190)
+    g = random.randint(80, 90)
+    b = random.randint(80, 90)
     return (r, g, b)
+
+
+def _luminance_strip_color(base_rgb, darker_only=False):
+    """Pick a random colour from the lighter/darker strip of *base_rgb*.
+
+    Same hue and saturation, random brightness -- like the vertical
+    luminance strip in the Windows colour-picker dialog.
+
+    If *darker_only* is True, the brightness is capped at the base
+    colour's own value so the result is never brighter than the input.
+    """
+    r, g, b = [c / 255.0 for c in base_rgb]
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    new_v = random.uniform(0.7*v, 0.8*v) if darker_only else random.random()
+    nr, ng, nb = colorsys.hsv_to_rgb(h, s, new_v)
+    return (int(nr * 255), int(ng * 255), int(nb * 255))
 
 
 # ── main generation ────────────────────────────────────────────────────
@@ -515,7 +513,7 @@ def generate_image(angle_deg, path, augment=True):
     chord_dist = random.uniform(0, max_d) if (augment and max_d > 0) else 0.0
 
     # --- tip distance ---
-    tick_inner = int(dial_radius * 0.85)
+    tick_inner = int(dial_radius)
     base_tip_dist = tick_inner - 2
     tip_var = random.uniform(-TIP_VARIATION, TIP_VARIATION) if augment else 0.0
     tip_dist = base_tip_dist * (1 + tip_var)
@@ -605,20 +603,56 @@ def generate_image(angle_deg, path, augment=True):
         shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=2.5))
         img = Image.alpha_composite(img, shadow_layer)
 
-    # --- pointer with non-uniform colour ---
+    # --- pointer with non-uniform colour + feathered edges ---
+    hole_ratio = random.uniform(*HOLE_RATIO_RANGE) if augment else 1.25
+    hole_r = hub_radius * hole_ratio
     ptr_rgb = _random_red_rgb() if augment else (210, 30, 30)
+
+    # Draw mounting hole BEFORE saving pre-pointer background so it
+    # survives the CUT_TIP restoration (fixes hole-invisible bug).
+    hole_color = _luminance_strip_color(ptr_rgb, darker_only=True) + (255,)
+    if augment:
+        hd_mag = random.uniform(*HOLE_DISP_RANGE)
+        hd_ang = random.uniform(0, 2 * math.pi)
+        hole_cx = cx + hd_mag * math.cos(hd_ang)
+        hole_cy = cy + hd_mag * math.sin(hd_ang)
+    else:
+        hole_cx, hole_cy = cx, cy
+    hole_draw = ImageDraw.Draw(img)
+    hole_draw.ellipse([hole_cx - hole_r, hole_cy - hole_r,
+                       hole_cx + hole_r, hole_cy + hole_r],
+                      fill=hole_color)
+
+    bg_pre_ptr = img.copy() if CUT_TIP else None
+    edge_color = _luminance_strip_color(ptr_rgb, darker_only=True)
     img, apex, bl, br, ptr_mask = draw_pointer(
         img, cx, cy, angle_deg,
-        hub_radius=hub_radius,
-        tip_dist=tip_dist,
-        chord_half=chord_half,
-        chord_dist=chord_dist,
-        pointer_base_rgb=ptr_rgb,
+        hub_radius=hub_radius, tip_dist=tip_dist,
+        chord_half=chord_half, chord_dist=chord_dist,
+        pointer_base_rgb=ptr_rgb, edge_color_rgb=edge_color,
     )
+    if CUT_TIP and bg_pre_ptr is not None:
+        inv_mask = Image.fromarray(255 - np.array(ptr_mask), "L")
+        img.paste(bg_pre_ptr, mask=inv_mask)
 
-    # --- glare (after pointer, before final blur) ---
+    # --- random horizontal / vertical stretch inside dial ---
     if augment:
-        img = draw_glare(img, ptr_mask)
+        stretch_h = random.uniform(*STRETCH_H_RANGE)
+        stretch_v = random.uniform(*STRETCH_V_RANGE)
+        img = img.transform(
+            (canvas_size, canvas_size),
+            Image.AFFINE,
+            (1.0 / stretch_h, 0, cx * (1 - 1.0 / stretch_h),
+             0, 1.0 / stretch_v, cy * (1 - 1.0 / stretch_v)),
+            resample=Image.BICUBIC,
+        )
+        apex = (cx + (apex[0] - cx) * stretch_h,
+                cy + (apex[1] - cy) * stretch_v)
+        dial_rx = dial_radius * stretch_h
+        dial_ry = dial_radius * stretch_v
+    else:
+        dial_rx = dial_radius
+        dial_ry = dial_radius
 
     # --- convert to RGB ---
     img = img.convert("RGB")
@@ -631,9 +665,25 @@ def generate_image(angle_deg, path, augment=True):
         img = ImageEnhance.Sharpness(img).enhance(random.uniform(*SHARPNESS_RANGE))
 
     # --- final gaussian blur ---
-    if augment:
-        blur_r = random.uniform(*BLUR_RANGE)
-        img = img.filter(ImageFilter.GaussianBlur(radius=blur_r))
+
+
+    # --- gaussian blur inside dial circle only ---
+    if augment and DIAL_CIRCLE_BLUR:
+        dcb_r = DIAL_CIRCLE_BLUR_RADIUS
+        if dcb_r > 0.1:
+            blurred = img.filter(ImageFilter.GaussianBlur(radius=dcb_r))
+            circ_mask = Image.new("L", (canvas_size, canvas_size), 0)
+            ImageDraw.Draw(circ_mask).ellipse(
+                [cx - dial_rx, cy - dial_ry,
+                 cx + dial_rx, cy + dial_ry], fill=255)
+            img = Image.composite(blurred, img, circ_mask)
+
+    # --- mask to dial ellipse: keep only the meter, fill outside with black ---
+    arr = np.array(img)
+    ys, xs = np.ogrid[:canvas_size, :canvas_size]
+    outside = ((xs - cx) / dial_rx) ** 2 + ((ys - cy) / dial_ry) ** 2 > 1
+    arr[outside] = 0
+    img = Image.fromarray(arr, img.mode)
 
     # --- pad to IMG_SIZE x IMG_SIZE (edge-mean, centre-aligned + displacement) ---
     pad_left = (IMG_SIZE - canvas_size) // 2 + disp_x
@@ -651,15 +701,27 @@ def generate_image(angle_deg, path, augment=True):
 
 
 def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    global DIAL_CIRCLE_BLUR
+    parser = argparse.ArgumentParser(description="Generate synthetic dial images")
+    parser.add_argument("--output-dir", default=OUTPUT_DIR,
+                        help=f"Output directory (default: {OUTPUT_DIR})")
+    parser.add_argument("--dial-circle-blur", action="store_true",
+                        default=DIAL_CIRCLE_BLUR,
+                        help="Enable gaussian blur inside dial circle")
+    args = parser.parse_args()
 
-    csv_path = os.path.join(OUTPUT_DIR, "labels.csv")
+    DIAL_CIRCLE_BLUR = args.dial_circle_blur
+    output_dir = args.output_dir
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    csv_path = os.path.join(output_dir, "labels.csv")
     rows = []
 
     for i in range(NUM_IMAGES):
         angle_deg = random.randint(0, 359)
         fname = f"dial_{i:04d}.png"
-        fpath = os.path.join(OUTPUT_DIR, fname)
+        fpath = os.path.join(output_dir, fname)
 
         tip_x, tip_y = generate_image(angle_deg, fpath)
         rows.append({"filename": fname,
@@ -672,7 +734,7 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"Generated {NUM_IMAGES} images in '{OUTPUT_DIR}/'")
+    print(f"Generated {NUM_IMAGES} images in '{output_dir}/'")
     print(f"Labels written to '{csv_path}'")
 
 
