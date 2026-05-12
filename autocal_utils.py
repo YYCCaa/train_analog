@@ -419,6 +419,8 @@ def train_one_epoch_autocal(model, loader, optimizer, device,
         total_mark_err += mark_err.item() * bs
         n += bs
 
+    if n == 0:
+        return 0.0, 0.0
     return total_loss / n, total_mark_err / n
 
 
@@ -447,6 +449,7 @@ def evaluate_autocal(model, loader, device, img_size=IMG_SIZE,
             pred_8, img_size=img_size)
         pred_marks = derive_marks_torch(cx_p, cy_p, a_p, b_p, theta_p, phi_p)
         per_sample_mark_err = torch.norm(pred_marks - marks_raw, dim=-1).mean(dim=-1)
+        # ^ mean over the 10 marks → shape (B,); kept per-sample for p95/p99.
         per_sample_center_err = torch.sqrt(
             (cx_p - gt_cx) ** 2 + (cy_p - gt_cy) ** 2)
 
@@ -456,6 +459,10 @@ def evaluate_autocal(model, loader, device, img_size=IMG_SIZE,
         all_center_err.extend(per_sample_center_err.cpu().tolist())
         n += bs
 
+    if n == 0:
+        return {"loss": 0.0, "mark_err_mean": 0.0,
+                "mark_err_p95": 0.0, "mark_err_p99": 0.0,
+                "center_err_mean": 0.0}
     mark_arr = np.array(all_mark_err)
     center_arr = np.array(all_center_err)
     return {
@@ -468,21 +475,24 @@ def evaluate_autocal(model, loader, device, img_size=IMG_SIZE,
 
 
 def run_autocal_training(model, args):
-    """Full training pipeline: train → save best → export ONNX → benchmark."""
+    """Full training pipeline: train → save best → export ONNX."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Parameters: {n_params:,}")
 
     ds = AutoCalibDataset(args.data_dir)
+    assert len(ds) >= 2, f"Dataset too small: {len(ds)} samples"
+    assert args.epochs >= 1, f"--epochs must be >= 1 (got {args.epochs})"
     n_val = max(1, int(len(ds) * args.val_split))
     n_train = len(ds) - n_val
     train_ds, val_ds = random_split(
         ds, [n_train, n_val], generator=torch.Generator().manual_seed(42))
+    num_workers = getattr(args, "num_workers", 4)
     train_ldr = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                           num_workers=4, pin_memory=True)
+                           num_workers=num_workers, pin_memory=True)
     val_ldr = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                         num_workers=4, pin_memory=True)
+                         num_workers=num_workers, pin_memory=True)
     print(f"Train: {n_train}  Val: {n_val}")
 
     model.to(device)
@@ -490,7 +500,7 @@ def run_autocal_training(model, args):
                            weight_decay=args.weight_decay)
     sched = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    pth_path = args.save_onnx.replace(".onnx", ".pth")
+    pth_path = os.path.splitext(args.save_onnx)[0] + ".pth"
     best_mark_err = float("inf")
 
     for ep in range(1, args.epochs + 1):
