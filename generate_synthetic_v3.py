@@ -50,11 +50,17 @@ TICK_GREY_RANGE = (0, 30)
 DIGIT_FONT_SIZE_RANGE = (12, 24)
 DIGIT_GREY_RANGE = (0, 30)
 DIGIT_INSIDE_PROB = 0.5              # probability digits are inside ticks (vs outside)
+DIGIT_RC_INSIDE_OFFSET = (0.18, 0.28)   # r_c inset when digits inside ticks
+DIGIT_RC_OUTSIDE_OFFSET = (0.08, 0.18)  # r_c outset when digits outside ticks
 
 # ── Pointer ──────────────────────────────────────────────────────────────
 HUB_RATIO_RANGE = (0.35, 0.45)       # hub_radius / a
-PTR_S_RANGE = (0.5, 1.0)             # pointer HSV saturation; matching V is sampled per-image in Task 6
+PTR_S_RANGE = (0.5, 1.0)             # pointer HSV saturation range
+PTR_V_RANGE = (0.40, 0.95)           # pointer HSV value range
 HOLE_RATIO_RANGE = (1.05, 1.10)
+PTR_APEX_RC = 0.92                   # apex radius (fraction of semi-axis)
+PTR_BASE_W_FRAC = 0.6                # pointer triangle base half-width / hub_r
+PTR_HOLE_DARKEN = 60                 # per-channel offset to darken hub hole
 
 # ── HSV palette ──────────────────────────────────────────────────────────
 DIAL_S_RANGE = (0, 0.15)
@@ -286,7 +292,10 @@ def draw_dial_boundary(img, params, dial_h, dial_s):
 # ── Scale ticks ──────────────────────────────────────────────────────────
 
 def _canonical_to_image(t, r_c, cx, cy, a, b, theta):
-    """Inline copy of the canonical→image map for use in the generator."""
+    """Inline copy of the canonical→image map for use in the generator.
+
+    Mirror of `autocal_utils.canonical_to_image_np` — keep in sync.
+    """
     cos_t = math.cos(t)
     sin_t = math.sin(t)
     cos_o = math.cos(theta)
@@ -352,9 +361,9 @@ def draw_scale_digits(img, params):
 
     inside = random.random() < DIGIT_INSIDE_PROB
     if inside:
-        r_c = 1.0 - random.uniform(0.18, 0.28)
+        r_c = 1.0 - random.uniform(*DIGIT_RC_INSIDE_OFFSET)
     else:
-        r_c = 1.0 + random.uniform(0.08, 0.18)
+        r_c = 1.0 + random.uniform(*DIGIT_RC_OUTSIDE_OFFSET)
 
     draw = ImageDraw.Draw(img)
     for i in range(N_MARKS):
@@ -373,9 +382,8 @@ def draw_scale_digits(img, params):
 def _random_pointer_rgb():
     h = random.random()
     s = random.uniform(*PTR_S_RANGE)
-    v = random.uniform(0.4, 0.95)
-    r, g, b_ = colorsys.hsv_to_rgb(h, s, v)
-    return (int(r * 255), int(g * 255), int(b_ * 255))
+    v = random.uniform(*PTR_V_RANGE)
+    return _hsv_rgb(h, s, v)
 
 
 def draw_pointer(img, params):
@@ -392,10 +400,10 @@ def draw_pointer(img, params):
     hub_r = a * hub_ratio
     hole_r = hub_r * random.uniform(*HOLE_RATIO_RANGE)
     ptr_rgb = _random_pointer_rgb()
-    hole_rgb = tuple(max(0, c - 60) for c in ptr_rgb)
+    hole_rgb = tuple(max(0, c - PTR_HOLE_DARKEN) for c in ptr_rgb)
 
     t_apex = phi_0 + pv * (2 * math.pi / N_MARKS)
-    apex_x, apex_y = _canonical_to_image(t_apex, 0.92, cx, cy, a, b, theta)
+    apex_x, apex_y = _canonical_to_image(t_apex, PTR_APEX_RC, cx, cy, a, b, theta)
 
     # Base of triangle: a chord at the hub edge.
     # We render the pointer in image space as a triangle from hub to apex.
@@ -406,7 +414,7 @@ def draw_pointer(img, params):
     uy = dy / norm
     perp_x = -uy
     perp_y = ux
-    half_w = hub_r * 0.6
+    half_w = hub_r * PTR_BASE_W_FRAC
     base_mx = cx
     base_my = cy
     base_left = (base_mx + half_w * perp_x, base_my + half_w * perp_y)
