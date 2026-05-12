@@ -281,3 +281,142 @@ def draw_dial_boundary(img, params, dial_h, dial_s):
     draw = ImageDraw.Draw(img)
     draw.line(pts, fill=circle_rgb, width=1)
     return img
+
+
+# ── Scale ticks ──────────────────────────────────────────────────────────
+
+def _canonical_to_image(t, r_c, cx, cy, a, b, theta):
+    """Inline copy of the canonical→image map for use in the generator."""
+    cos_t = math.cos(t)
+    sin_t = math.sin(t)
+    cos_o = math.cos(theta)
+    sin_o = math.sin(theta)
+    x = cx + r_c * (a * cos_t * cos_o - b * sin_t * sin_o)
+    y = cy + r_c * (a * cos_t * sin_o + b * sin_t * cos_o)
+    return x, y
+
+
+def draw_scale_ticks(img, params):
+    """Render scale ticks at canonical angles t_i = phi_0 + i·36°.
+
+    Sub-ticks evenly spaced between consecutive main ticks. Tick lengths and
+    widths are jittered per image (shared values across all ticks in the image).
+    """
+    cx, cy = params["cx"], params["cy"]
+    a, b, theta = params["a"], params["b"], params["theta"]
+    phi_0 = params["phi_0"]
+
+    ticks_per_digit = random.randint(*TICKS_PER_DIGIT_RANGE)
+    main_len_frac = random.uniform(*TICK_LEN_FRAC_RANGE)
+    main_width = random.randint(*TICK_WIDTH_RANGE)
+    minor_width = max(1, main_width - 1)
+    grey = random.randint(*TICK_GREY_RANGE)
+    color = (grey, grey, grey)
+
+    draw = ImageDraw.Draw(img)
+    step_t = 2 * math.pi / N_MARKS / ticks_per_digit
+
+    for i in range(N_MARKS):
+        t_main = phi_0 + i * (2 * math.pi / N_MARKS)
+        for s in range(ticks_per_digit):
+            t = t_main + s * step_t
+            if s == 0:
+                len_frac = main_len_frac
+                width = main_width
+            else:
+                len_frac = main_len_frac * 0.5
+                width = minor_width
+            r_inner = 1.0 - len_frac
+            x0, y0 = _canonical_to_image(t, r_inner, cx, cy, a, b, theta)
+            x1, y1 = _canonical_to_image(t, 1.0, cx, cy, a, b, theta)
+            draw.line([(x0, y0), (x1, y1)], fill=color, width=width)
+    return img
+
+
+# ── Digits ───────────────────────────────────────────────────────────────
+
+def draw_scale_digits(img, params):
+    """Render digits 0..9 at canonical t_i = phi_0 + i·36°.
+
+    Random font size shared across the 10 digits. Half the time inside the
+    ticks, half outside.
+    """
+    cx, cy = params["cx"], params["cy"]
+    a, b, theta = params["a"], params["b"], params["theta"]
+    phi_0 = params["phi_0"]
+
+    font_size = random.randint(*DIGIT_FONT_SIZE_RANGE)
+    font = _load_font("arial.ttf", font_size)
+    grey = random.randint(*DIGIT_GREY_RANGE)
+    color = (grey, grey, grey)
+
+    inside = random.random() < DIGIT_INSIDE_PROB
+    if inside:
+        r_c = 1.0 - random.uniform(0.18, 0.28)
+    else:
+        r_c = 1.0 + random.uniform(0.08, 0.18)
+
+    draw = ImageDraw.Draw(img)
+    for i in range(N_MARKS):
+        t = phi_0 + i * (2 * math.pi / N_MARKS)
+        x, y = _canonical_to_image(t, r_c, cx, cy, a, b, theta)
+        text = str(i)
+        bbox = font.getbbox(text)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        draw.text((x - tw / 2, y - th / 2), text, fill=color, font=font)
+    return img
+
+
+# ── Pointer ──────────────────────────────────────────────────────────────
+
+def _random_pointer_rgb():
+    h = random.random()
+    s = random.uniform(*PTR_S_RANGE)
+    v = random.uniform(0.4, 0.95)
+    r, g, b_ = colorsys.hsv_to_rgb(h, s, v)
+    return (int(r * 255), int(g * 255), int(b_ * 255))
+
+
+def draw_pointer(img, params):
+    """Draw the pointer (hub circle + isosceles triangle) at canonical angle.
+
+    Apex at canonical angle phi_0 + pointer_value · 36°, r_c = 1.0 - small margin.
+    """
+    cx, cy = params["cx"], params["cy"]
+    a, b, theta = params["a"], params["b"], params["theta"]
+    phi_0 = params["phi_0"]
+    pv = params["pointer_value"]
+
+    hub_ratio = random.uniform(*HUB_RATIO_RANGE)
+    hub_r = a * hub_ratio
+    hole_r = hub_r * random.uniform(*HOLE_RATIO_RANGE)
+    ptr_rgb = _random_pointer_rgb()
+    hole_rgb = tuple(max(0, c - 60) for c in ptr_rgb)
+
+    t_apex = phi_0 + pv * (2 * math.pi / N_MARKS)
+    apex_x, apex_y = _canonical_to_image(t_apex, 0.92, cx, cy, a, b, theta)
+
+    # Base of triangle: a chord at the hub edge.
+    # We render the pointer in image space as a triangle from hub to apex.
+    dx = apex_x - cx
+    dy = apex_y - cy
+    norm = math.hypot(dx, dy) or 1.0
+    ux = dx / norm
+    uy = dy / norm
+    perp_x = -uy
+    perp_y = ux
+    half_w = hub_r * 0.6
+    base_mx = cx
+    base_my = cy
+    base_left = (base_mx + half_w * perp_x, base_my + half_w * perp_y)
+    base_right = (base_mx - half_w * perp_x, base_my - half_w * perp_y)
+
+    draw = ImageDraw.Draw(img)
+    draw.polygon([(apex_x, apex_y), base_left, base_right],
+                 fill=ptr_rgb)
+    draw.ellipse([cx - hub_r, cy - hub_r, cx + hub_r, cy + hub_r],
+                 fill=ptr_rgb)
+    draw.ellipse([cx - hole_r, cy - hole_r, cx + hole_r, cy + hole_r],
+                 fill=hole_rgb)
+    return img
