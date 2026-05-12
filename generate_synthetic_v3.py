@@ -215,3 +215,66 @@ def draw_distractor_text(img, params, outer_scale):
             overlay.paste(tmp, (x, y), tmp)
             break
     return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+
+# ── Outer canvas (bezel) and dial face ───────────────────────────────────
+
+def draw_outer_canvas(img, params, outer_scale, dial_h, dial_s):
+    """Render the bezel (annular fill + rim band) around the dial.
+
+    The bezel is an ellipse with the same orientation as the dial, scaled by
+    `outer_scale`. The annular region between the dial face and the bezel
+    boundary is filled with `outer_rgb`; the rim band sits on the dial edge.
+    """
+    canvas_size = img.size[0]
+    cx, cy = params["cx"], params["cy"]
+    a, b, theta = params["a"], params["b"], params["theta"]
+
+    outer_a = a * outer_scale
+    outer_b = b * outer_scale
+
+    ys, xs = np.ogrid[:canvas_size, :canvas_size]
+    cos_o = math.cos(theta)
+    sin_o = math.sin(theta)
+    u = (xs - cx) * cos_o + (ys - cy) * sin_o
+    v = -(xs - cx) * sin_o + (ys - cy) * cos_o
+
+    inner_r2 = (u / max(a, 1)) ** 2 + (v / max(b, 1)) ** 2
+    outer_r2 = (u / max(outer_a, 1)) ** 2 + (v / max(outer_b, 1)) ** 2
+
+    inside_outer = outer_r2 <= 1.0
+    annular = (inner_r2 > 1.0) & inside_outer
+
+    outer_rgb = _hsv_rgb(dial_h, dial_s, random.uniform(*OUTER_V_RANGE))
+    rim_rgb = _hsv_rgb(dial_h, dial_s, random.uniform(*RIM_V_RANGE))
+
+    arr = np.array(img)
+    arr[annular] = outer_rgb
+
+    # Rim band: thin shell straddling inner_r2 == 1
+    rim_half = RIM_WIDTH / min(max(a, 1), max(b, 1))
+    r_norm = np.sqrt(inner_r2)
+    rim_band = (r_norm > 1.0 - rim_half) & (r_norm < 1.0 + rim_half)
+    arr[rim_band] = rim_rgb
+
+    return Image.fromarray(arr, img.mode), inside_outer
+
+
+def draw_dial_boundary(img, params, dial_h, dial_s):
+    """Draw the faint dial circle as a polyline mapped through canonical→image."""
+    cx, cy, a, b, theta = params["cx"], params["cy"], params["a"], params["b"], params["theta"]
+    circle_rgb = _hsv_rgb(dial_h, dial_s, random.uniform(*CIRCLE_V_RANGE))
+
+    pts = []
+    n_seg = 180
+    for k in range(n_seg + 1):
+        t = 2 * math.pi * k / n_seg
+        cos_t = math.cos(t)
+        sin_t = math.sin(t)
+        x = cx + (a * cos_t * math.cos(theta) - b * sin_t * math.sin(theta))
+        y = cy + (a * cos_t * math.sin(theta) + b * sin_t * math.cos(theta))
+        pts.append((x, y))
+
+    draw = ImageDraw.Draw(img)
+    draw.line(pts, fill=circle_rgb + (255,), width=1)
+    return img
