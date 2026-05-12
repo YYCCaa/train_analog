@@ -31,8 +31,8 @@ CX_DISP_RANGE = (-40, 40)        # px from image centre
 CY_DISP_RANGE = (-40, 40)
 A_RANGE = (30, 115)              # px (semi-major)
 B_RATIO_RANGE = (0.8, 1.0)       # b / a
-THETA_RANGE = (-math.pi / 2, math.pi / 2)
-PHI_0_RANGE = (0.0, 2 * math.pi)
+THETA_RANGE = (-math.pi / 2, math.pi / 2)  # rad
+PHI_0_RANGE = (0.0, 2 * math.pi)           # rad
 POINTER_VALUE_RANGE = (0.0, 9.0)
 
 # ── Outer canvas (bezel) ─────────────────────────────────────────────────
@@ -48,16 +48,16 @@ TICK_GREY_RANGE = (0, 30)
 # ── Digits ───────────────────────────────────────────────────────────────
 DIGIT_FONT_SIZE_RANGE = (12, 24)
 DIGIT_GREY_RANGE = (0, 30)
-DIGIT_INSIDE_PROB = 0.5
+DIGIT_INSIDE_PROB = 0.5              # probability digits are inside ticks (vs outside)
 
 # ── Pointer ──────────────────────────────────────────────────────────────
 HUB_RATIO_RANGE = (0.35, 0.45)       # hub_radius / a
-PTR_S_RANGE = (0.5, 1.0)
+PTR_S_RANGE = (0.5, 1.0)             # pointer HSV saturation; matching V is sampled per-image in Task 6
 HOLE_RATIO_RANGE = (1.05, 1.10)
 
 # ── HSV palette ──────────────────────────────────────────────────────────
 DIAL_S_RANGE = (0, 0.15)
-BG_V_INSIDE_RANGE = (0.67, 0.71)
+BG_V_INSIDE_RANGE = (0.67, 0.71)     # HSV V for the dial face background (inside the ellipse)
 CIRCLE_V_RANGE = (0.84, 0.88)
 OUTER_V_RANGE = (0.76, 0.86)
 RIM_V_RANGE = (0.71, 0.76)
@@ -66,7 +66,7 @@ RIM_V_RANGE = (0.71, 0.76)
 BG_HUE_RANGE = (0.0, 1.0)
 BG_S_RANGE = (0.0, 0.30)
 BG_V_RANGE = (0.10, 0.95)
-BG_LOWFREQ_SIZE = 8
+BG_LOWFREQ_SIZE = 8                  # noise tile size (px), upsampled to IMG_SIZE
 BG_VARIATION = 25
 BG_PIXEL_NOISE = 5
 BG_BLUR_PROB = 0.3
@@ -93,7 +93,7 @@ TRI_COUNT_RANGE = (0, 6)
 TRI_SIZE_RANGE = (15, 40)
 TRI_MEAN_RANGE = (50, 200)
 TRI_PIXEL_VAR = 5
-TRI_VERTEX_DIST_RANGE = (0.3, 1.0)
+TRI_VERTEX_DIST_RANGE = (0.3, 1.0)   # fraction of TRI_SIZE_RANGE sampled `size`
 
 
 def _hsv_rgb(h, s, v):
@@ -105,7 +105,7 @@ def _hsv_rgb(h, s, v):
 # ── Parameter sampling ───────────────────────────────────────────────────
 
 def sample_params(img_size=IMG_SIZE):
-    """Sample one set of (cx, cy, a, b, theta, phi_0, pointer_value)."""
+    """Sample one set of (cx, cy, a, b, theta [rad], phi_0 [rad], pointer_value)."""
     cx = img_size / 2 + random.uniform(*CX_DISP_RANGE)
     cy = img_size / 2 + random.uniform(*CY_DISP_RANGE)
     a = random.uniform(*A_RANGE)
