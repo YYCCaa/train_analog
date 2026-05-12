@@ -1,8 +1,12 @@
-"""Autocalibration utilities: geometry math and shared constants.
+"""Autocalibration shared utilities.
 
-Currently provides the canonical-circle → ellipse map and 10-mark derivation
-in both numpy and torch forms. Future tasks will extend this module with
-parameter packing, loss, dataset, and training-loop helpers.
+Contents:
+  - Geometry math: canonical_to_image_np/torch, derive_marks_np/torch.
+  - Parameter packing: pack_params_to_8, unpack_params_from_8.
+  - Loss: autocal_loss (SmoothL1 on params + derived marks).
+  - Dataset: AutoCalibDataset (PyTorch Dataset over generated images + labels.csv).
+
+Future tasks will add backbones and training utilities.
 """
 
 import csv
@@ -192,10 +196,10 @@ class AutoCalibDataset(Dataset):
         self.samples = []
         with open(os.path.join(data_dir, "labels.csv"), newline="") as f:
             for row in csv.DictReader(f):
-                marks = []
+                marks_arr = np.empty((N_MARKS, 2), dtype=np.float32)
                 for i in range(N_MARKS):
-                    marks.append((float(row[f"mark_{i}_x"]),
-                                  float(row[f"mark_{i}_y"])))
+                    marks_arr[i, 0] = float(row[f"mark_{i}_x"])
+                    marks_arr[i, 1] = float(row[f"mark_{i}_y"])
                 self.samples.append({
                     "filename": row["filename"],
                     "cx": float(row["cx"]),
@@ -204,7 +208,7 @@ class AutoCalibDataset(Dataset):
                     "b": float(row["b"]),
                     "theta": float(row["theta"]),
                     "phi_0": float(row["phi_0"]),
-                    "marks": marks,
+                    "marks": marks_arr,
                 })
 
     def __len__(self):
@@ -218,5 +222,5 @@ class AutoCalibDataset(Dataset):
 
         params_raw = torch.tensor([s["cx"], s["cy"], s["a"], s["b"],
                                    s["theta"], s["phi_0"]], dtype=torch.float32)
-        marks_raw = torch.tensor(s["marks"], dtype=torch.float32)
+        marks_raw = torch.from_numpy(s["marks"])
         return torch.from_numpy(arr), params_raw, marks_raw, s["filename"]

@@ -9,13 +9,13 @@ import pytest
 import torch
 from PIL import Image
 
-from autocal_utils import AutoCalibDataset
+from autocal_utils import AutoCalibDataset, N_MARKS
 
 
 def _write_tiny_dataset(tmp_dir, n=3):
     """Write `n` blank 256x256 images and a labels.csv with hand-set values."""
     fieldnames = ["filename", "cx", "cy", "a", "b", "theta", "phi_0"]
-    for i in range(10):
+    for i in range(N_MARKS):
         fieldnames += [f"mark_{i}_x", f"mark_{i}_y"]
     rows = []
     for k in range(n):
@@ -24,7 +24,7 @@ def _write_tiny_dataset(tmp_dir, n=3):
             os.path.join(tmp_dir, fname))
         row = {"filename": fname, "cx": 128.0, "cy": 100.0 + k,
                "a": 60.0, "b": 55.0, "theta": 0.1, "phi_0": 0.5}
-        for i in range(10):
+        for i in range(N_MARKS):
             row[f"mark_{i}_x"] = 100.0 + i
             row[f"mark_{i}_y"] = 200.0 + i
         rows.append(row)
@@ -47,6 +47,11 @@ def test_dataset_loads_and_returns_correct_shapes():
         assert params_raw.shape == (6,)
         assert marks_raw.shape == (10, 2)
         assert fname == "img_0.png"
+        # Marks are written as mark_i_x = 100.0 + i, mark_i_y = 200.0 + i.
+        assert marks_raw[0, 0].item() == pytest.approx(100.0)
+        assert marks_raw[0, 1].item() == pytest.approx(200.0)
+        assert marks_raw[9, 0].item() == pytest.approx(109.0)
+        assert marks_raw[9, 1].item() == pytest.approx(209.0)
 
 
 def test_dataset_param_ordering():
