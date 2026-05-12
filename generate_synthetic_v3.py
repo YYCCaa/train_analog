@@ -428,3 +428,124 @@ def draw_pointer(img, params):
     draw.ellipse([cx - hole_r, cy - hole_r, cx + hole_r, cy + hole_r],
                  fill=hole_rgb)
     return img
+
+
+# ── Adversarial triangle artifacts ───────────────────────────────────────
+
+def add_triangle_artifacts(img):
+    """Random translucent triangles scattered on the canvas."""
+    arr = np.array(img)
+    canvas_size = arr.shape[0]
+    n = random.randint(*TRI_COUNT_RANGE)
+    for _ in range(n):
+        size = random.randint(*TRI_SIZE_RANGE)
+        cx = random.randint(0, canvas_size - 1)
+        cy = random.randint(0, canvas_size - 1)
+        verts = []
+        for _v in range(3):
+            ang = random.uniform(0, 2 * math.pi)
+            r = random.uniform(*TRI_VERTEX_DIST_RANGE) * size
+            verts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+        base = tuple(random.randint(*TRI_MEAN_RANGE) for _ in range(3))
+        tri_mask = Image.new("L", (canvas_size, canvas_size), 0)
+        ImageDraw.Draw(tri_mask).polygon(verts, fill=255)
+        m = np.array(tri_mask) > 127
+        if not m.any():
+            continue
+        for c in range(3):
+            noise = np.random.randint(-TRI_PIXEL_VAR, TRI_PIXEL_VAR + 1,
+                                      size=m.sum(), dtype=np.int16)
+            arr[:, :, c][m] = np.clip(base[c] + noise, 0, 255).astype(np.uint8)
+    return Image.fromarray(arr, img.mode)
+
+
+# ── Top-level image generation ───────────────────────────────────────────
+
+def generate_image(path, img_size=IMG_SIZE):
+    """Generate one synthetic dial image. Returns dict of label fields."""
+    params = sample_params(img_size=img_size)
+
+    # 1. Procedural background fill (full canvas).
+    img = make_procedural_background(img_size)
+
+    # Shared HSV dial palette for bezel/circle/rim.
+    dial_h = random.random()
+    dial_s = random.uniform(*DIAL_S_RANGE)
+
+    outer_scale = random.uniform(*OUTER_SCALE_RANGE)
+
+    # 2. Distractor text (outside bezel disc only).
+    img = draw_distractor_text(img, params, outer_scale)
+
+    # 3. Outer canvas (bezel + rim).
+    img, _inside_outer = draw_outer_canvas(img, params, outer_scale,
+                                           dial_h, dial_s)
+
+    # 4. Dial boundary, ticks, digits.
+    img = draw_dial_boundary(img, params, dial_h, dial_s)
+    img = draw_scale_ticks(img, params)
+    img = draw_scale_digits(img, params)
+
+    # 5. Pointer.
+    img = draw_pointer(img, params)
+
+    # 6. Triangle artifacts (across whole canvas).
+    img = add_triangle_artifacts(img)
+
+    # 7. Colour/exposure jitter.
+    img = ImageEnhance.Brightness(img).enhance(random.uniform(*BRIGHTNESS_RANGE))
+    img = ImageEnhance.Contrast(img).enhance(random.uniform(*CONTRAST_RANGE))
+    img = ImageEnhance.Color(img).enhance(random.uniform(*SATURATION_RANGE))
+    img = ImageEnhance.Sharpness(img).enhance(random.uniform(*SHARPNESS_RANGE))
+
+    img.save(path)
+
+    # Derive marks from the same params we rendered.
+    marks = derive_marks_np(params["cx"], params["cy"], params["a"], params["b"],
+                            params["theta"], params["phi_0"])
+
+    label = {
+        "filename": os.path.basename(path),
+        "cx": round(params["cx"], 3),
+        "cy": round(params["cy"], 3),
+        "a": round(params["a"], 3),
+        "b": round(params["b"], 3),
+        "theta": round(params["theta"], 6),
+        "phi_0": round(params["phi_0"], 6),
+    }
+    for i in range(N_MARKS):
+        label[f"mark_{i}_x"] = round(float(marks[i, 0]), 3)
+        label[f"mark_{i}_y"] = round(float(marks[i, 1]), 3)
+    return label
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate synthetic autocal images")
+    parser.add_argument("--output-dir", default=OUTPUT_DIR)
+    parser.add_argument("--num-images", type=int, default=NUM_IMAGES)
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    csv_path = os.path.join(args.output_dir, "labels.csv")
+
+    fieldnames = ["filename", "cx", "cy", "a", "b", "theta", "phi_0"]
+    for i in range(N_MARKS):
+        fieldnames += [f"mark_{i}_x", f"mark_{i}_y"]
+
+    rows = []
+    for i in range(args.num_images):
+        fname = f"dial_{i:05d}.png"
+        fpath = os.path.join(args.output_dir, fname)
+        rows.append(generate_image(fpath))
+
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"Generated {args.num_images} images in '{args.output_dir}/'")
+    print(f"Labels written to '{csv_path}'")
+
+
+if __name__ == "__main__":
+    main()
