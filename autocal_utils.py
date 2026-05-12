@@ -6,18 +6,21 @@ Contents:
   - Loss: autocal_loss (SmoothL1 on params + derived marks).
   - Dataset: AutoCalibDataset (PyTorch Dataset over generated images + labels.csv).
   - Backbones: AutocalModelE, AutocalModelF (regression head replaces heatmap decoder).
+  - Training: train_one_epoch_autocal, evaluate_autocal, run_autocal_training, _export_onnx_autocal.
 """
 
 import csv
 import math
 import os
+import time
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 from PIL import Image
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset, random_split
 
 
 IMG_SIZE = 256  # shared with generate_synthetic_v3 and train_autocal_*
@@ -378,3 +381,151 @@ class AutocalModelF(nn.Module):
         x = self.enc3(x)
         x = self.bn2(self.bn1(x))
         return self.head(x)
+
+
+# ── Training utilities ───────────────────────────────────────────────────
+
+def train_one_epoch_autocal(model, loader, optimizer, device,
+                            img_size=IMG_SIZE, w_param=0.1, w_mark=1.0):
+    """One training epoch. Returns (mean_loss, mean_mark_error_px)."""
+    model.train()
+    total_loss = 0.0
+    total_mark_err = 0.0
+    n = 0
+    for imgs, params_raw, marks_raw, _fnames in loader:
+        imgs = imgs.to(device)
+        params_raw = params_raw.to(device)
+        marks_raw = marks_raw.to(device)
+
+        pred_8 = model(imgs)
+
+        gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0 = params_raw.unbind(-1)
+        loss, _lp, _lm = autocal_loss(
+            pred_8, gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0,
+            marks_raw, img_size=img_size, w_param=w_param, w_mark=w_mark)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        with torch.no_grad():
+            cx_p, cy_p, a_p, b_p, theta_p, phi_p = unpack_params_from_8(
+                pred_8, img_size=img_size)
+            pred_marks = derive_marks_torch(cx_p, cy_p, a_p, b_p, theta_p, phi_p)
+            mark_err = torch.norm(pred_marks - marks_raw, dim=-1).mean()
+
+        bs = imgs.size(0)
+        total_loss += loss.item() * bs
+        total_mark_err += mark_err.item() * bs
+        n += bs
+
+    return total_loss / n, total_mark_err / n
+
+
+@torch.no_grad()
+def evaluate_autocal(model, loader, device, img_size=IMG_SIZE,
+                     w_param=0.1, w_mark=1.0):
+    """Evaluate on a validation loader. Returns dict of metrics."""
+    model.eval()
+    total_loss = 0.0
+    all_mark_err = []
+    all_center_err = []
+    n = 0
+    for imgs, params_raw, marks_raw, _fnames in loader:
+        imgs = imgs.to(device)
+        params_raw = params_raw.to(device)
+        marks_raw = marks_raw.to(device)
+
+        pred_8 = model(imgs)
+
+        gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0 = params_raw.unbind(-1)
+        loss, _lp, _lm = autocal_loss(
+            pred_8, gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0,
+            marks_raw, img_size=img_size, w_param=w_param, w_mark=w_mark)
+
+        cx_p, cy_p, a_p, b_p, theta_p, phi_p = unpack_params_from_8(
+            pred_8, img_size=img_size)
+        pred_marks = derive_marks_torch(cx_p, cy_p, a_p, b_p, theta_p, phi_p)
+        per_sample_mark_err = torch.norm(pred_marks - marks_raw, dim=-1).mean(dim=-1)
+        per_sample_center_err = torch.sqrt(
+            (cx_p - gt_cx) ** 2 + (cy_p - gt_cy) ** 2)
+
+        bs = imgs.size(0)
+        total_loss += loss.item() * bs
+        all_mark_err.extend(per_sample_mark_err.cpu().tolist())
+        all_center_err.extend(per_sample_center_err.cpu().tolist())
+        n += bs
+
+    mark_arr = np.array(all_mark_err)
+    center_arr = np.array(all_center_err)
+    return {
+        "loss": total_loss / n,
+        "mark_err_mean": float(mark_arr.mean()),
+        "mark_err_p95": float(np.percentile(mark_arr, 95)),
+        "mark_err_p99": float(np.percentile(mark_arr, 99)),
+        "center_err_mean": float(center_arr.mean()),
+    }
+
+
+def run_autocal_training(model, args):
+    """Full training pipeline: train → save best → export ONNX → benchmark."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Parameters: {n_params:,}")
+
+    ds = AutoCalibDataset(args.data_dir)
+    n_val = max(1, int(len(ds) * args.val_split))
+    n_train = len(ds) - n_val
+    train_ds, val_ds = random_split(
+        ds, [n_train, n_val], generator=torch.Generator().manual_seed(42))
+    train_ldr = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                           num_workers=4, pin_memory=True)
+    val_ldr = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                         num_workers=4, pin_memory=True)
+    print(f"Train: {n_train}  Val: {n_val}")
+
+    model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr,
+                           weight_decay=args.weight_decay)
+    sched = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+
+    pth_path = args.save_onnx.replace(".onnx", ".pth")
+    best_mark_err = float("inf")
+
+    for ep in range(1, args.epochs + 1):
+        t0 = time.time()
+        train_loss, train_mark_err = train_one_epoch_autocal(
+            model, train_ldr, optimizer, device,
+            w_param=args.w_param, w_mark=args.w_mark)
+        val = evaluate_autocal(
+            model, val_ldr, device,
+            w_param=args.w_param, w_mark=args.w_mark)
+        sched.step()
+        dt = time.time() - t0
+        lr = optimizer.param_groups[0]["lr"]
+        print(f"Epoch {ep:3d}/{args.epochs}  "
+              f"train_loss={train_loss:.4f} train_mark={train_mark_err:.2f}px  "
+              f"val_loss={val['loss']:.4f} mark_mean={val['mark_err_mean']:.2f}px "
+              f"p95={val['mark_err_p95']:.2f} p99={val['mark_err_p99']:.2f} "
+              f"center_mean={val['center_err_mean']:.2f}px  "
+              f"lr={lr:.2e}  ({dt:.1f}s)")
+
+        if val["mark_err_mean"] < best_mark_err:
+            best_mark_err = val["mark_err_mean"]
+            torch.save(model.state_dict(), pth_path)
+            print(f"  -> saved best mark_err_mean={best_mark_err:.2f}px")
+
+    # Export best.
+    model.load_state_dict(torch.load(pth_path, map_location="cpu", weights_only=True))
+    _export_onnx_autocal(model, args.save_onnx)
+
+
+def _export_onnx_autocal(model, path, img_size=IMG_SIZE):
+    import onnx
+    model.eval().cpu()
+    dummy = torch.randn(1, 3, img_size, img_size)
+    torch.onnx.export(model, dummy, path, opset_version=17,
+                      input_names=["input"], output_names=["params_8"])
+    onnx.checker.check_model(onnx.load(path))
+    print(f"ONNX exported: {path}  ({os.path.getsize(path) / 1024:.1f} KB)")
