@@ -81,6 +81,7 @@ DISTRACTOR_TEXTS_DIGITS = [str(d) for d in range(10)]
 DISTRACTOR_TEXTS_NUMBERS = ["12", "230", "0.5", "5.0", "100", "60", "0", "3.7"]
 DISTRACTOR_TEXTS_CODES = ["A-50", "V1.2", "K12", "M-30", "RPM", "Hz", "PSI"]
 DISTRACTOR_TEXTS_LABELS = ["V", "A", "AC", "DC", "kW", "OFF", "ON", "MAX"]
+DISTRACTOR_MAX_ATTEMPTS = 8       # rejection-sampling cap per text string
 
 # ── Colour / exposure jitter ─────────────────────────────────────────────
 BRIGHTNESS_RANGE = (0.85, 1.30)
@@ -171,6 +172,7 @@ def _random_distractor_text():
 def _bezel_disc_contains(x, y, cx, cy, a, b, theta, outer_scale):
     """Check if image point (x, y) lies inside the bezel (outer ellipse)."""
     # Transform (x, y) into the ellipse's local axis-aligned frame.
+    # u along major axis, v along minor.
     dx = x - cx
     dy = y - cy
     cos_o = math.cos(theta)
@@ -187,10 +189,9 @@ def draw_distractor_text(img, params, outer_scale):
     """
     canvas_size = img.size[0]
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    odraw = ImageDraw.Draw(overlay)
     n = random.randint(*DISTRACTOR_COUNT_RANGE)
     for _ in range(n):
-        for _attempt in range(8):
+        for _attempt in range(DISTRACTOR_MAX_ATTEMPTS):
             text = _random_distractor_text()
             font_name = random.choice(DISTRACTOR_FONTS)
             size = random.randint(*DISTRACTOR_FONT_SIZE_RANGE)
@@ -202,11 +203,12 @@ def draw_distractor_text(img, params, outer_scale):
                                     outer_scale):
                 continue
             rot = random.uniform(*DISTRACTOR_ROT_RANGE)
-            # Choose contrasting color: sample any HSV, but bias toward opposite V.
+            # greyscale text at random luminance
             grey = random.randint(0, 255)
             color = (grey, grey, grey, 255)
 
             # Render to a temp layer, rotate, paste.
+            # generous: ~2 px per glyph at chosen font size
             tmp = Image.new("RGBA", (size * len(text) * 2, size * 2), (0, 0, 0, 0))
             ImageDraw.Draw(tmp).text((0, 0), text, fill=color, font=font)
             tmp = tmp.rotate(rot, expand=True, resample=Image.BILINEAR)
