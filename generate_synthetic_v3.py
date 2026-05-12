@@ -118,3 +118,98 @@ def sample_params(img_size=IMG_SIZE):
         "theta": theta, "phi_0": phi_0,
         "pointer_value": pointer_value,
     }
+
+
+# ── Background fill ──────────────────────────────────────────────────────
+
+def make_procedural_background(canvas_size):
+    """Generate a full-canvas procedural background.
+
+    Random HSV base color → low-frequency variation → per-pixel noise.
+    Optionally Gaussian-blurred to simulate shallow depth of field.
+    Returns an RGB PIL.Image.
+    """
+    h = random.uniform(*BG_HUE_RANGE)
+    s = random.uniform(*BG_S_RANGE)
+    v = random.uniform(*BG_V_RANGE)
+    base_rgb = np.array(_hsv_rgb(h, s, v), dtype=np.int16)
+
+    lf_var = np.random.randint(-BG_VARIATION, BG_VARIATION + 1,
+                               (BG_LOWFREQ_SIZE, BG_LOWFREQ_SIZE, 3),
+                               dtype=np.int16)
+    lf_img = Image.fromarray(
+        np.clip(base_rgb + lf_var, 0, 255).astype(np.uint8), "RGB"
+    ).resize((canvas_size, canvas_size), Image.BICUBIC)
+
+    arr = np.array(lf_img, dtype=np.int16)
+    noise = np.random.randint(-BG_PIXEL_NOISE, BG_PIXEL_NOISE + 1,
+                              (canvas_size, canvas_size, 3), dtype=np.int16)
+    arr = np.clip(arr + noise, 0, 255).astype(np.uint8)
+    img = Image.fromarray(arr, "RGB")
+
+    if random.random() < BG_BLUR_PROB:
+        r = random.uniform(*BG_BLUR_RADIUS_RANGE)
+        img = img.filter(ImageFilter.GaussianBlur(radius=r))
+    return img
+
+
+# ── Distractor text ──────────────────────────────────────────────────────
+
+def _load_font(name, size):
+    try:
+        return ImageFont.truetype(name, size)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def _random_distractor_text():
+    pool = (DISTRACTOR_TEXTS_DIGITS + DISTRACTOR_TEXTS_NUMBERS
+            + DISTRACTOR_TEXTS_CODES + DISTRACTOR_TEXTS_LABELS)
+    return random.choice(pool)
+
+
+def _bezel_disc_contains(x, y, cx, cy, a, b, theta, outer_scale):
+    """Check if image point (x, y) lies inside the bezel (outer ellipse)."""
+    # Transform (x, y) into the ellipse's local axis-aligned frame.
+    dx = x - cx
+    dy = y - cy
+    cos_o = math.cos(theta)
+    sin_o = math.sin(theta)
+    u = dx * cos_o + dy * sin_o
+    v = -dx * sin_o + dy * cos_o
+    return (u / (a * outer_scale)) ** 2 + (v / (b * outer_scale)) ** 2 <= 1.0
+
+
+def draw_distractor_text(img, params, outer_scale):
+    """Render `n` random text strings outside the bezel.
+
+    Each string is rejected (re-sampled) if it would overlap the bezel disc.
+    """
+    canvas_size = img.size[0]
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    odraw = ImageDraw.Draw(overlay)
+    n = random.randint(*DISTRACTOR_COUNT_RANGE)
+    for _ in range(n):
+        for _attempt in range(8):
+            text = _random_distractor_text()
+            font_name = random.choice(DISTRACTOR_FONTS)
+            size = random.randint(*DISTRACTOR_FONT_SIZE_RANGE)
+            font = _load_font(font_name, size)
+            x = random.randint(0, canvas_size - 1)
+            y = random.randint(0, canvas_size - 1)
+            if _bezel_disc_contains(x, y, params["cx"], params["cy"],
+                                    params["a"], params["b"], params["theta"],
+                                    outer_scale):
+                continue
+            rot = random.uniform(*DISTRACTOR_ROT_RANGE)
+            # Choose contrasting color: sample any HSV, but bias toward opposite V.
+            grey = random.randint(0, 255)
+            color = (grey, grey, grey, 255)
+
+            # Render to a temp layer, rotate, paste.
+            tmp = Image.new("RGBA", (size * len(text) * 2, size * 2), (0, 0, 0, 0))
+            ImageDraw.Draw(tmp).text((0, 0), text, fill=color, font=font)
+            tmp = tmp.rotate(rot, expand=True, resample=Image.BILINEAR)
+            overlay.paste(tmp, (x, y), tmp)
+            break
+    return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
