@@ -54,6 +54,7 @@ def test_c2i_np_rotated_ellipse():
 # ── derive_marks_np ──────────────────────────────────────────────────────
 
 def test_derive_marks_count():
+    """derive_marks_np returns exactly 10 (x, y) mark positions."""
     marks = derive_marks_np(cx=128.0, cy=128.0, a=60.0, b=60.0,
                             theta=0.0, phi_0=0.0)
     assert marks.shape == (10, 2)
@@ -68,7 +69,11 @@ def test_derive_marks_on_circle_when_a_eq_b():
 
 
 def test_derive_marks_spacing_when_a_eq_b():
-    """Marks are spaced exactly 36° apart on the circle when a == b."""
+    """Marks are spaced exactly 36° apart on the circle when a == b.
+
+    Precondition: cx = cy = 0 and phi_0 = 0 so that atan2(y, x) measures
+    image-frame angle directly from the origin without offset ambiguity.
+    """
     marks = derive_marks_np(cx=0.0, cy=0.0, a=100.0, b=100.0,
                             theta=0.0, phi_0=0.0)
     for i in range(10):

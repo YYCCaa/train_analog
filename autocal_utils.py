@@ -1,7 +1,8 @@
-"""Autocalibration utilities: geometry math, parameter packing, loss, dataset, training loop.
+"""Autocalibration utilities: geometry math and shared constants.
 
-Shared by `generate_synthetic_v3.py`, `train_autocal_e.py`, `train_autocal_f.py`,
-and `infer_autocal.py`.
+Currently provides the canonical-circle → ellipse map and 10-mark derivation
+in both numpy and torch forms. Future tasks will extend this module with
+parameter packing, loss, dataset, and training-loop helpers.
 """
 
 import math
@@ -10,9 +11,10 @@ import numpy as np
 import torch
 
 
-IMG_SIZE = 256
+IMG_SIZE = 256  # shared with generate_synthetic_v3 and train_autocal_*
 N_MARKS = 10
 DEG_PER_MARK = 360.0 / N_MARKS
+RAD_PER_MARK = math.radians(DEG_PER_MARK)
 
 
 # ── Geometry: canonical-circle → ellipse map ────────────────────────────
@@ -58,7 +60,7 @@ def derive_marks_np(cx, cy, a, b, theta, phi_0):
     """
     marks = np.empty((N_MARKS, 2), dtype=np.float64)
     for i in range(N_MARKS):
-        t_i = phi_0 + i * math.radians(DEG_PER_MARK)
+        t_i = phi_0 + i * RAD_PER_MARK
         x, y = canonical_to_image_np(t=t_i, r_c=1.0,
                                      cx=cx, cy=cy, a=a, b=b, theta=theta)
         marks[i, 0] = x
@@ -74,17 +76,18 @@ def derive_marks_torch(cx, cy, a, b, theta, phi_0):
     device = cx.device
     dtype = cx.dtype
     i = torch.arange(N_MARKS, device=device, dtype=dtype)
-    step = 2 * math.pi / N_MARKS
-    # Broadcast: phi_0 (B,1) + i*(10,) -> (B, 10)
-    t_i = phi_0.unsqueeze(-1) + i * step
+    # Broadcast: phi_0 (B,1) + i*(10,) -> (B, 10).
+    # `_bc` suffix marks tensors unsqueezed from (B,) to (B, 1) for broadcasting
+    # over the 10 marks dimension.
+    t_i = phi_0.unsqueeze(-1) + i * RAD_PER_MARK
     cos_t = torch.cos(t_i)
     sin_t = torch.sin(t_i)
     cos_o = torch.cos(theta).unsqueeze(-1)
     sin_o = torch.sin(theta).unsqueeze(-1)
-    a_b = a.unsqueeze(-1)
-    b_b = b.unsqueeze(-1)
-    cx_b = cx.unsqueeze(-1)
-    cy_b = cy.unsqueeze(-1)
-    x = cx_b + a_b * cos_t * cos_o - b_b * sin_t * sin_o
-    y = cy_b + a_b * cos_t * sin_o + b_b * sin_t * cos_o
+    a_bc = a.unsqueeze(-1)
+    b_bc = b.unsqueeze(-1)
+    cx_bc = cx.unsqueeze(-1)
+    cy_bc = cy.unsqueeze(-1)
+    x = cx_bc + a_bc * cos_t * cos_o - b_bc * sin_t * sin_o
+    y = cy_bc + a_bc * cos_t * sin_o + b_bc * sin_t * cos_o
     return torch.stack([x, y], dim=-1)
