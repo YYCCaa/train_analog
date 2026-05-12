@@ -21,7 +21,8 @@
       "WebFetch(domain:gist.github.com)",
       "WebFetch(domain:cs.brown.edu)",
       "WebFetch(domain:www.programcreek.com)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(.venv/Scripts/python -c \":*)"
     ]
   }
 }

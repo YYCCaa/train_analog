@@ -24,7 +24,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 from autocal_utils import IMG_SIZE, N_MARKS, DEG_PER_MARK, derive_marks_np
 
 OUTPUT_DIR = "sv3"
-NUM_IMAGES = 15000
+NUM_IMAGES = 15
 
 # ── Ellipse parameter sampling ranges ────────────────────────────────────
 CX_DISP_RANGE = (-40, 40)        # px from image centre

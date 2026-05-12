@@ -18,15 +18,15 @@ import os
 import random
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 OUTPUT_DIR = "synthetic_data"
-IMG_SIZE = 192
+IMG_SIZE = 256
 CENTER = IMG_SIZE // 2  # 128
-NUM_IMAGES = 20
+NUM_IMAGES = 15000
 
 # Base dial face parameters (before scaling)
-DIAL_RADIUS_BASE = 64
+DIAL_RADIUS_BASE = IMG_SIZE // 3
 
 # Scale: 0-9 clockwise, 36 deg per division, 0 at top
 NUM_DIGITS = 10
@@ -35,21 +35,43 @@ VALUE_MIN = 0.0
 VALUE_MAX = 9.0
 
 # Augmentation ranges
-SCALE_RANGE = (0.9, 1.0)
+SCALE_RANGE = (0.8, 1.0)
 HUB_RATIO_RANGE = (0.4, 0.45)
 CHORD_RATIO_RANGE = (0.99, 1.0)     # chord_length / hub_diameter
-HOLE_RATIO_RANGE = (1.05, 1.1)    # mounting hole radius / hub_radius
-HOLE_DISP_RANGE = (0, 8)           # random displacement of mounting hole centre (px)
+HOLE_RATIO_RANGE = (1.05, 1.08)    # mounting hole radius / hub_radius
+HOLE_DISP_RANGE = (-5, 5)           # random displacement of mounting hole centre (px)
+DIGIT_DIST = IMG_SIZE // 3 -5               # base distance from centre to digit centre (px)
+DIGIT_DIST_JITTER = (0, 20)        # per-digit radial jitter (px)
+DIGIT_ANGLE_JITTER = (0, 2)       # per-digit angular jitter (degrees)
+DIGIT_FONT_SIZE_RANGE = (12, 26)   # font size range for scale digits
+DIGIT_SHOW_PROB = 0.5             # probability of showing digits per image
+TICKS_PER_DIGIT_RANGE = (1, 5)   # subdivision ticks between consecutive digits
 TIP_VARIATION = 0.02
-DISPLACEMENT_RANGE = (0, 10)
-NOISE_INTENSITY = 12
+DISPLACEMENT_RANGE = (-3, 3)
+PTR_DISPLACEMENT_RANGE = (-5, 5)       # pointer+hole offset from dial centre (px)
+NOISE_INTENSITY = 3
 BLUR_RANGE = (1,3)
 STRETCH_H_RANGE = (0.98, 1.02)      # horizontal stretch factor inside dial
 STRETCH_V_RANGE = (0.98, 1.02)      # vertical stretch factor inside dial
 DIAL_CIRCLE_BLUR = True             # gaussian blur inside dial circle only
 DIAL_CIRCLE_BLUR_RADIUS = 3     # fixed blur radius inside dial circle
 CUT_TIP = True                      # erase pointer pixels near the apex
-CUT_TIP_RADIUS = 3                   # px radius around apex to erase
+CUT_TIP_RADIUS_RANGE = (2, 5)         # px radius around apex to erase (per image)
+
+# Outer canvas (housing/bezel beyond dial face)
+OUTER_SCALE_RANGE = (1.2, 1.27)     # outer radius relative to dial
+RIM_WIDTH = 3                         # rim thickness in pixels
+RIM_GRAY_RANGE = (200, 220)           # light gray for rim
+OUTER_REGION_GRAY_RANGE = (170, 190)    # darker gray between dial and outer
+HIER_NOISE_BLOCKS = 5                 # block grid for hierarchical noise
+HIER_NOISE_BLOCK_VARIANCE = 15        # per-block noise amplitude
+HIER_NOISE_PIXEL_VARIANCE = 3         # per-pixel noise amplitude
+
+# Adversarial triangular artifacts
+TRI_ARTIFACT_COUNT = (0, 6)          # number of triangles per image
+TRI_ARTIFACT_SIZE = (25, 40)           # approximate vertex radius from centre (px)
+TRI_ARTIFACT_MEAN_RANGE = (50, 200)   # per-triangle per-channel mean
+TRI_ARTIFACT_PIXEL_VAR = 5            # per-pixel variance around mean
 
 # Shadow parameters (pointer cast shadow)
 SHADOW_OFFSET_RANGE = (10, 15)        # pixels
@@ -63,12 +85,12 @@ RIM_SHADOW_OFFSET_FRAC = (0.15, 0.35)
 # Cutout circle radius relative to dial_radius
 # (smaller → thicker crescent, larger → thinner crescent)
 RIM_SHADOW_CUTOUT_FRAC = (0.80, 0.95)
-RIM_SHADOW_PRIMARY_OPACITY = (200, 200)      # alpha for key light shadow
-RIM_SHADOW_SECONDARY_OPACITY = (200, 200)     # alpha for fill light shadow
+RIM_SHADOW_PRIMARY_OPACITY = (200, 220)      # alpha for key light shadow
+RIM_SHADOW_SECONDARY_OPACITY = (200, 220)     # alpha for fill light shadow
 RIM_SHADOW_BLUR_RANGE = (4.0, 8.0)          # blur radius for soft falloff
 
 # Color jitter ranges (ImageEnhance factor: 1.0 = original)
-BRIGHTNESS_RANGE = (0.85, 1.35)
+BRIGHTNESS_RANGE = (0.95, 1.35)
 CONTRAST_RANGE = (0.80, 1.20)
 SATURATION_RANGE = (0.75, 1.25)
 SHARPNESS_RANGE = (0.7, 1.5)
@@ -80,7 +102,7 @@ BG_VARIATION = 8                   # max pixel deviation from base colour
 # Pointer colour variation
 PTR_GRADIENT_RANGE = (-25, 25)      # lengthwise brightness shift hub→tip
 PTR_NOISE_RANGE = 5                 # fine per-pixel noise
-PTR_EDGE_THICKNESS_RANGE = (2, 3)   # edge band width in pixels
+PTR_EDGE_THICKNESS_RANGE = (5, 7)   # edge band width in pixels
 PTR_EDGE_NOISE_RANGE = 5           # per-pixel random variation on edge
 # Canvas: dial is drawn on a tight canvas, then edge-mean-padded to IMG_SIZE
 CANVAS_MARGIN = 30                  # px beyond dial_radius in small canvas
@@ -89,7 +111,7 @@ CANVAS_MARGIN = 30                  # px beyond dial_radius in small canvas
 # ── dial face ───────────────────────────────────────────────────────────
 
 def draw_dial_face(draw, cx, cy, dial_radius, gap_start_deg=None, gap_span_deg=0,
-                   augment=True):
+                   augment=True, show_ticks=True, show_circle=True):
     """Draw a very faint outer circle with tick marks and one arc gap.
 
     gap_start_deg : where the gap begins (PIL arc degrees: 0 = 3-o'clock, CW)
@@ -97,44 +119,92 @@ def draw_dial_face(draw, cx, cy, dial_radius, gap_start_deg=None, gap_span_deg=0
     """
     faint = (220, 220, 218, 255)
 
-    if gap_span_deg <= 0 or gap_start_deg is None:
-        draw.ellipse(
-            [cx - dial_radius, cy - dial_radius,
-             cx + dial_radius, cy + dial_radius],
-            outline=faint, width=1,
-        )
-    else:
-        arc_start = (gap_start_deg + gap_span_deg) % 360
-        arc_end = gap_start_deg % 360
-        bbox = [cx - dial_radius, cy - dial_radius,
-                cx + dial_radius, cy + dial_radius]
-        draw.arc(bbox, start=arc_start, end=arc_end, fill=faint, width=1)
-
-    # 0-9 scale ticks (no digits), drawn inward from the outer circle
-    tick_outer = dial_radius
-    for i in range(NUM_DIGITS):
-        nominal_deg = i * DEG_PER_DIGIT  # 0° = top, clockwise
-
-        # Per-tick randomisation
-        if augment:
-            angle_jitter = random.uniform(-4, 4)       # ±1-4 deg displacement
-            tick_len = random.randint(4, 6)             # 4-6 px length
-            grey = random.randint(0, 30)                # near-black colour
-            tick_color = (grey, grey, grey, 255)
+    if show_circle:
+        if gap_span_deg <= 0 or gap_start_deg is None:
+            draw.ellipse(
+                [cx - dial_radius, cy - dial_radius,
+                 cx + dial_radius, cy + dial_radius],
+                outline=faint, width=1,
+            )
         else:
-            angle_jitter = 0
-            tick_len = 5
-            tick_color = (0, 0, 0, 255)
+            arc_start = (gap_start_deg + gap_span_deg) % 360
+            arc_end = gap_start_deg % 360
+            bbox = [cx - dial_radius, cy - dial_radius,
+                    cx + dial_radius, cy + dial_radius]
+            draw.arc(bbox, start=arc_start, end=arc_end, fill=faint, width=1)
 
-        angle_deg = nominal_deg + angle_jitter
+    # 0-9 scale ticks drawn inward from the outer circle, with subdivision
+    # ticks evenly spaced between each pair of consecutive digits.
+    if not show_ticks:
+        return
+    tick_outer = dial_radius
+
+    # Shared jitter for all ticks (same values applied uniformly)
+    if augment:
+        angle_jitter = random.uniform(-4, 4)
+        major_tick_len = random.randint(4, 6)
+        grey = random.randint(0, 30)
+        tick_color = (grey, grey, grey, 255)
+        ticks_per_digit = random.randint(*TICKS_PER_DIGIT_RANGE)
+    else:
+        angle_jitter = 0
+        major_tick_len = 5
+        tick_color = (0, 0, 0, 255)
+        ticks_per_digit = 1
+
+    minor_tick_len = max(1, major_tick_len // 2)
+    sub_deg = DEG_PER_DIGIT / ticks_per_digit
+
+    for i in range(NUM_DIGITS):
+        for s in range(ticks_per_digit):
+            nominal_deg = i * DEG_PER_DIGIT + s * sub_deg
+            angle_deg = nominal_deg + angle_jitter
+            angle_rad = math.radians(angle_deg - 90)  # -90 so 0° = up
+
+            tick_len = major_tick_len if s == 0 else minor_tick_len
+            tick_inner = tick_outer - tick_len
+            x0 = cx + tick_inner * math.cos(angle_rad)
+            y0 = cy + tick_inner * math.sin(angle_rad)
+            x1 = cx + tick_outer * math.cos(angle_rad)
+            y1 = cy + tick_outer * math.sin(angle_rad)
+            draw.line([(x0, y0), (x1, y1)], fill=tick_color, width=1)
+
+
+def draw_scale_digits(draw, cx, cy, dial_radius, augment=True):
+    """Draw digits 0-9 around the dial. 0 at top (positive y), clockwise."""
+    font_size = random.randint(*DIGIT_FONT_SIZE_RANGE) if augment else DIGIT_FONT_SIZE_RANGE[0]
+    try:
+        font = ImageFont.truetype("arial.ttf", font_size)
+    except OSError:
+        font = ImageFont.load_default()
+
+    # Shared jitter for all digits (same values applied uniformly)
+    if augment:
+        ang_jitter = random.uniform(*DIGIT_ANGLE_JITTER) * random.choice([-1, 1])
+        dist_jitter = random.uniform(*DIGIT_DIST_JITTER)
+        grey = random.randint(0, 30)
+        color = (grey, grey, grey, 255)
+    else:
+        ang_jitter = 0
+        dist_jitter = 0
+        color = (0, 0, 0, 255)
+
+    for i in range(NUM_DIGITS):
+        nominal_deg = i * DEG_PER_DIGIT
+        angle_deg = nominal_deg + ang_jitter
         angle_rad = math.radians(angle_deg - 90)  # -90 so 0° = up
+        dist = DIGIT_DIST + dist_jitter
 
-        tick_inner = tick_outer - tick_len
-        x0 = cx + tick_inner * math.cos(angle_rad)
-        y0 = cy + tick_inner * math.sin(angle_rad)
-        x1 = cx + tick_outer * math.cos(angle_rad)
-        y1 = cy + tick_outer * math.sin(angle_rad)
-        draw.line([(x0, y0), (x1, y1)], fill=tick_color, width=1)
+        dx = dist * math.cos(angle_rad)
+        dy = dist * math.sin(angle_rad)
+
+        text = str(i)
+        bbox = font.getbbox(text)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        tx = cx + dx - tw / 2
+        ty = cy + dy - th / 2
+        draw.text((tx, ty), text, fill=color, font=font)
 
 
 # ── shadow ──────────────────────────────────────────────────────────────
@@ -142,12 +212,13 @@ def draw_dial_face(draw, cx, cy, dial_radius, gap_start_deg=None, gap_span_deg=0
 def draw_shadow(shadow_draw, apex, base_left, base_right,
                 cx, cy, hub_radius, dial_radius,
                 offset_dx, offset_dy, opacity,
-                gap_start_deg=None, gap_span_deg=0):
+                gap_start_deg=None, gap_span_deg=0,
+                base_rgb=(40, 40, 40)):
     """Draw a soft, offset shadow of the pointer shape and the outer circle.
 
     The shadow is blurred later, so the tip naturally loses its sharpness.
     """
-    shadow_color = (40, 40, 40, opacity)
+    shadow_color = (*base_rgb, opacity)
 
     # Offset triangle
     s_apex = (apex[0] + offset_dx, apex[1] + offset_dy)
@@ -273,7 +344,8 @@ def _draw_pointer_edge(img, mask, edge_color_rgb, bg_arr):
 # ── pointer ─────────────────────────────────────────────────────────────
 
 def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist,
-                 chord_half, chord_dist, pointer_base_rgb, edge_color_rgb=None):
+                 chord_half, chord_dist, pointer_base_rgb, edge_color_rgb=None,
+                 cut_tip_radius=2):
     """Draw the pointer with realistic colour variation.  Return (apex, bl, br)."""
     a = math.radians(angle_deg - 90)
 
@@ -318,7 +390,7 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist,
 
     # Optionally erase the tip region (pointer drawn without its apex)
     if CUT_TIP:
-        r = CUT_TIP_RADIUS
+        r = cut_tip_radius
         mask_arr = np.array(mask)
         ys_t, xs_t = np.ogrid[:mask_arr.shape[0], :mask_arr.shape[1]]
         tip_circle = (xs_t - apex[0]) ** 2 + (ys_t - apex[1]) ** 2 <= r ** 2
@@ -332,7 +404,7 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist,
 
 # ── rim shadow (bowl cavity) ───────────────────────────────────────────
 
-def draw_rim_shadows(cx, cy, dial_radius, canvas_size):
+def draw_rim_shadows(cx, cy, dial_radius, canvas_size, base_rgb=(30, 30, 30)):
     """Create a blurred RGBA layer with crescent shadows cast by the bowl rim.
 
     Physical model: the dial is a recessed bowl.  A light source illuminates
@@ -353,50 +425,40 @@ def draw_rim_shadows(cx, cy, dial_radius, canvas_size):
     dial_dist2 = (xs - cx) ** 2 + (ys - cy) ** 2
     dial_mask = dial_dist2 <= dial_radius ** 2
 
-    num_lights = random.choice([1, 2])
+    light_angle = random.uniform(0, 360)
 
-    light_angles = [random.uniform(0, 360)]
-    if num_lights == 2:
-        offset_ang = random.uniform(60, 180)
-        light_angles.append((light_angles[0] + offset_ang) % 360)
+    # Single light source
+    light_rad = math.radians(light_angle - 90)  # convert: 0=up,CW → trig
 
-    for i, light_deg in enumerate(light_angles):
-        # Cutout circle is shifted TOWARD the light (away from shadow side)
-        light_rad = math.radians(light_deg - 90)  # convert: 0=up,CW → trig
+    offset_frac = random.uniform(*RIM_SHADOW_OFFSET_FRAC)
+    cutout_frac = random.uniform(*RIM_SHADOW_CUTOUT_FRAC)
+    co_offset = offset_frac * dial_radius
+    co_radius = cutout_frac * dial_radius
 
-        offset_frac = random.uniform(*RIM_SHADOW_OFFSET_FRAC)
-        cutout_frac = random.uniform(*RIM_SHADOW_CUTOUT_FRAC)
-        co_offset = offset_frac * dial_radius
-        co_radius = cutout_frac * dial_radius
+    # Cutout centre shifted toward the light
+    co_cx = cx + co_offset * math.cos(light_rad)
+    co_cy = cy + co_offset * math.sin(light_rad)
 
-        # Cutout centre shifted toward the light
-        co_cx = cx + co_offset * math.cos(light_rad)
-        co_cy = cy + co_offset * math.sin(light_rad)
+    cutout_mask = ((xs - co_cx) ** 2 + (ys - co_cy) ** 2) <= co_radius ** 2
 
-        cutout_mask = ((xs - co_cx) ** 2 + (ys - co_cy) ** 2) <= co_radius ** 2
+    # Crescent: inside dial AND outside cutout
+    crescent = dial_mask & (~cutout_mask)
 
-        # Crescent: inside dial AND outside cutout
-        crescent = dial_mask & (~cutout_mask)
-
-        if i == 0:
-            opacity = random.randint(*RIM_SHADOW_PRIMARY_OPACITY)
-        else:
-            opacity = random.randint(*RIM_SHADOW_SECONDARY_OPACITY)
-
-        layer_a[crescent] += opacity
+    opacity = random.randint(*RIM_SHADOW_PRIMARY_OPACITY)
+    layer_a[crescent] += opacity
 
     layer_a = np.clip(layer_a, 0, 255)
 
     rgba = np.zeros((canvas_size, canvas_size, 4), dtype=np.uint8)
-    rgba[:, :, 0] = 30
-    rgba[:, :, 1] = 30
-    rgba[:, :, 2] = 30
+    rgba[:, :, 0] = base_rgb[0]
+    rgba[:, :, 1] = base_rgb[1]
+    rgba[:, :, 2] = base_rgb[2]
     rgba[:, :, 3] = layer_a.astype(np.uint8)
 
     layer = Image.fromarray(rgba, "RGBA")
     blur_r = random.uniform(*RIM_SHADOW_BLUR_RANGE)
     layer = layer.filter(ImageFilter.GaussianBlur(radius=blur_r))
-    return layer, light_angles
+    return layer, light_angle
 
 
 # ── edge-mean padding ─────────────────────────────────────────────────
@@ -447,12 +509,13 @@ def value_to_angle(value):
     return value * DEG_PER_DIGIT
 
 
-def _random_red_rgb():
-    """Return a random reddish (R, G, B) tuple as the pointer base."""
-    r = random.randint(170, 190)
-    g = random.randint(80, 90)
-    b = random.randint(80, 90)
-    return (r, g, b)
+def _random_pointer_rgb():
+    """Return a random (R, G, B) from the top half of HSV value axis."""
+    h = random.random()
+    s = random.random()
+    v = random.uniform(0.5, 1.0)
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return (int(r * 255), int(g * 255), int(b * 255))
 
 
 def _luminance_strip_color(base_rgb, darker_only=False):
@@ -466,7 +529,7 @@ def _luminance_strip_color(base_rgb, darker_only=False):
     """
     r, g, b = [c / 255.0 for c in base_rgb]
     h, s, v = colorsys.rgb_to_hsv(r, g, b)
-    new_v = random.uniform(0.7*v, 0.8*v) if darker_only else random.random()
+    new_v = random.uniform(0.4*v, 0.6*v) if darker_only else random.random()
     nr, ng, nb = colorsys.hsv_to_rgb(h, s, new_v)
     return (int(nr * 255), int(ng * 255), int(nb * 255))
 
@@ -526,9 +589,35 @@ def generate_image(angle_deg, path, augment=True):
         gap_start_deg = None
         gap_span_deg = 0
 
+    # --- pointer / hole displacement from dial centre ---
+    if augment:
+        ptr_disp_mag = random.uniform(*PTR_DISPLACEMENT_RANGE)
+        ptr_disp_ang = random.uniform(0, 2 * math.pi)
+        ptr_dx = ptr_disp_mag * math.cos(ptr_disp_ang)
+        ptr_dy = ptr_disp_mag * math.sin(ptr_disp_ang)
+    else:
+        ptr_dx, ptr_dy = 0, 0
+    ptr_cx = cx + ptr_dx
+    ptr_cy = cy + ptr_dy
+
+    # --- shadow / rim base colours (bottom 1/5 of HSV value axis) ---
+    def _sample_dark_rgb():
+        h = random.random()
+        s = random.random()
+        v = random.uniform(0.1, 0.16)
+        r, g, b = colorsys.hsv_to_rgb(h, s, v)
+        return (int(r * 255), int(g * 255), int(b * 255))
+
+    if augment:
+        pointer_shadow_rgb = _sample_dark_rgb()
+        rim_shadow_rgb = _sample_dark_rgb()
+    else:
+        pointer_shadow_rgb = (30, 30, 30)
+        rim_shadow_rgb = (30, 30, 30)
+
     # --- non-uniform background (small canvas) ---
     if augment:
-        bg_base = random.randint(210, 250)
+        bg_base = random.randint(170, 180)
 
         lf_lum = np.random.randint(-BG_VARIATION, BG_VARIATION + 1,
                                    (BG_LOWFREQ_SIZE, BG_LOWFREQ_SIZE),
@@ -557,29 +646,38 @@ def generate_image(angle_deg, path, augment=True):
 
     draw = ImageDraw.Draw(img)
 
-    # --- faint dial circle (with gap) ---
+    # --- faint dial circle (with gap) + scale marks/digits ---
+    show_digits = random.random() < DIGIT_SHOW_PROB if augment else True
     draw_dial_face(draw, cx, cy, dial_radius, gap_start_deg, gap_span_deg,
-                   augment=augment)
+                   augment=augment, show_ticks=False)
 
-    # --- rim shadow (bowl cavity — 1-2 light sources) ---
-    # light_angles is reused for the pointer cast shadow direction
-    if augment:
-        rim_layer, light_angles = draw_rim_shadows(cx, cy, dial_radius,
-                                                   canvas_size)
+    # Ticks & digits on a separate RGBA overlay so the outer-dial annular
+    # fill and rim band (drawn later) cannot occlude them.
+    td_layer = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+    td_draw = ImageDraw.Draw(td_layer)
+    if show_digits:
+        draw_dial_face(td_draw, cx, cy, dial_radius, gap_start_deg, gap_span_deg,
+                       augment=augment, show_ticks=True, show_circle=False)
+
+    # --- shadows (rim + pointer, controlled by one random boolean) ---
+    has_shadow = random.random() < 0.5 if augment else False
+    light_angle = random.uniform(0, 360)
+
+    if augment and has_shadow:
+        rim_layer, light_angle = draw_rim_shadows(cx, cy, dial_radius,
+                                                  canvas_size,
+                                                  base_rgb=rim_shadow_rgb)
         img = Image.alpha_composite(img, rim_layer)
-    else:
-        light_angles = [random.uniform(0, 360)]
 
-    # --- pointer cast shadow (same light source as rim shadow) ---
-    if augment:
+    if augment and has_shadow:
         shadow_layer = Image.new("RGBA", (canvas_size, canvas_size),
                                  (0, 0, 0, 0))
         sdraw = ImageDraw.Draw(shadow_layer)
 
         a = math.radians(angle_deg - 90)
-        s_apex = (cx + tip_dist * math.cos(a), cy + tip_dist * math.sin(a))
-        bmx = cx - chord_dist * math.cos(a)
-        bmy = cy - chord_dist * math.sin(a)
+        s_apex = (ptr_cx + tip_dist * math.cos(a), ptr_cy + tip_dist * math.sin(a))
+        bmx = ptr_cx - chord_dist * math.cos(a)
+        bmy = ptr_cy - chord_dist * math.sin(a)
         perp = (math.cos(a + math.pi / 2), math.sin(a + math.pi / 2))
         s_bl = (bmx + chord_half * perp[0], bmy + chord_half * perp[1])
         s_br = (bmx - chord_half * perp[0], bmy - chord_half * perp[1])
@@ -587,8 +685,7 @@ def generate_image(angle_deg, path, augment=True):
         # Shadow falls on the side away from the light.
         # Rim cutout is shifted toward light at light_rad; crescent is opposite.
         # Pointer shadow offset must point the same way as the crescent.
-        primary_light_deg = light_angles[0]
-        light_rad = math.radians(primary_light_deg - 90)  # same conv as rim
+        light_rad = math.radians(light_angle - 90)  # same conv as rim
         shd_dist = random.uniform(*SHADOW_OFFSET_RANGE)
         # Offset AWAY from light (negate the light direction)
         shd_dx = shd_dist * math.cos(light_rad)
@@ -596,17 +693,22 @@ def generate_image(angle_deg, path, augment=True):
         shd_opacity = random.randint(*SHADOW_OPACITY_RANGE)
 
         draw_shadow(sdraw, s_apex, s_bl, s_br,
-                    cx, cy, hub_radius, dial_radius,
+                    ptr_cx, ptr_cy, hub_radius, dial_radius,
                     shd_dx, shd_dy, shd_opacity,
-                    gap_start_deg, gap_span_deg)
+                    gap_start_deg, gap_span_deg,
+                    base_rgb=pointer_shadow_rgb)
 
         shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=2.5))
         img = Image.alpha_composite(img, shadow_layer)
 
+    # --- scale digits on overlay ---
+    if show_digits:
+        draw_scale_digits(td_draw, cx, cy, dial_radius, augment=augment)
+
     # --- pointer with non-uniform colour + feathered edges ---
     hole_ratio = random.uniform(*HOLE_RATIO_RANGE) if augment else 1.25
     hole_r = hub_radius * hole_ratio
-    ptr_rgb = _random_red_rgb() if augment else (210, 30, 30)
+    ptr_rgb = _random_pointer_rgb() if augment else (210, 30, 30)
 
     # Draw mounting hole BEFORE saving pre-pointer background so it
     # survives the CUT_TIP restoration (fixes hole-invisible bug).
@@ -614,22 +716,24 @@ def generate_image(angle_deg, path, augment=True):
     if augment:
         hd_mag = random.uniform(*HOLE_DISP_RANGE)
         hd_ang = random.uniform(0, 2 * math.pi)
-        hole_cx = cx + hd_mag * math.cos(hd_ang)
-        hole_cy = cy + hd_mag * math.sin(hd_ang)
+        hole_cx = ptr_cx + hd_mag * math.cos(hd_ang)
+        hole_cy = ptr_cy + hd_mag * math.sin(hd_ang)
     else:
-        hole_cx, hole_cy = cx, cy
+        hole_cx, hole_cy = ptr_cx, ptr_cy
     hole_draw = ImageDraw.Draw(img)
     hole_draw.ellipse([hole_cx - hole_r, hole_cy - hole_r,
                        hole_cx + hole_r, hole_cy + hole_r],
                       fill=hole_color)
 
     bg_pre_ptr = img.copy() if CUT_TIP else None
+    cut_r = random.randint(*CUT_TIP_RADIUS_RANGE) if augment else 2
     edge_color = _luminance_strip_color(ptr_rgb, darker_only=True)
     img, apex, bl, br, ptr_mask = draw_pointer(
-        img, cx, cy, angle_deg,
+        img, ptr_cx, ptr_cy, angle_deg,
         hub_radius=hub_radius, tip_dist=tip_dist,
         chord_half=chord_half, chord_dist=chord_dist,
         pointer_base_rgb=ptr_rgb, edge_color_rgb=edge_color,
+        cut_tip_radius=cut_r,
     )
     if CUT_TIP and bg_pre_ptr is not None:
         inv_mask = Image.fromarray(255 - np.array(ptr_mask), "L")
@@ -639,11 +743,18 @@ def generate_image(angle_deg, path, augment=True):
     if augment:
         stretch_h = random.uniform(*STRETCH_H_RANGE)
         stretch_v = random.uniform(*STRETCH_V_RANGE)
+        affine_coeffs = (1.0 / stretch_h, 0, cx * (1 - 1.0 / stretch_h),
+                         0, 1.0 / stretch_v, cy * (1 - 1.0 / stretch_v))
         img = img.transform(
             (canvas_size, canvas_size),
             Image.AFFINE,
-            (1.0 / stretch_h, 0, cx * (1 - 1.0 / stretch_h),
-             0, 1.0 / stretch_v, cy * (1 - 1.0 / stretch_v)),
+            affine_coeffs,
+            resample=Image.BICUBIC,
+        )
+        td_layer = td_layer.transform(
+            (canvas_size, canvas_size),
+            Image.AFFINE,
+            affine_coeffs,
             resample=Image.BICUBIC,
         )
         apex = (cx + (apex[0] - cx) * stretch_h,
@@ -664,25 +775,144 @@ def generate_image(angle_deg, path, augment=True):
         img = ImageEnhance.Color(img).enhance(random.uniform(*SATURATION_RANGE))
         img = ImageEnhance.Sharpness(img).enhance(random.uniform(*SHARPNESS_RANGE))
 
-    # --- final gaussian blur ---
+    # --- outer canvas (housing/bezel around dial) ---
+    outer_scale = random.uniform(*OUTER_SCALE_RANGE) if augment else 1.08
+    outer_rx = dial_rx * outer_scale
+    outer_ry = dial_ry * outer_scale
 
+    arr = np.array(img)
+    ys, xs = np.ogrid[:canvas_size, :canvas_size]
+    inner_r2 = ((xs - cx) / max(dial_rx, 1)) ** 2 + ((ys - cy) / max(dial_ry, 1)) ** 2
+    outer_r2 = ((xs - cx) / max(outer_rx, 1)) ** 2 + ((ys - cy) / max(outer_ry, 1)) ** 2
+    inside_outer = outer_r2 <= 1
+    annular = (inner_r2 > 1) & inside_outer
 
-    # --- gaussian blur inside dial circle only ---
+    # Fill annular region (between dial and outer boundary) with darker gray
+    outer_gray = random.randint(*OUTER_REGION_GRAY_RANGE) if augment else 70
+    arr[annular] = outer_gray
+
+    # Rim at dial boundary (before noise & blur so edges blend naturally)
+    r_norm = np.sqrt(inner_r2)
+    rim_half = RIM_WIDTH / min(max(dial_rx, 1), max(dial_ry, 1))
+    rim_band = (r_norm > 1 - rim_half) & (r_norm < 1 + rim_half)
+    rim_gray = random.randint(*RIM_GRAY_RANGE) if augment else 190
+    arr[rim_band] = rim_gray
+
+    # Hierarchical noise inside outer canvas
+    if augment:
+        # Block-level noise (coarse 5x5 grid, higher variance)
+        block_vals = np.random.randint(
+            -HIER_NOISE_BLOCK_VARIANCE, HIER_NOISE_BLOCK_VARIANCE + 1,
+            (HIER_NOISE_BLOCKS, HIER_NOISE_BLOCKS), dtype=np.int16)
+        block_u8 = np.clip(block_vals + 128, 0, 255).astype(np.uint8)
+        block_up = np.array(
+            Image.fromarray(block_u8, "L").resize(
+                (canvas_size, canvas_size), Image.BICUBIC),
+            dtype=np.int16) - 128
+        # Per-pixel noise (fine grain, lower variance)
+        pixel_noise = np.random.randint(
+            -HIER_NOISE_PIXEL_VARIANCE, HIER_NOISE_PIXEL_VARIANCE + 1,
+            (canvas_size, canvas_size), dtype=np.int16)
+        combined = block_up + pixel_noise
+        for c in range(3):
+            ch = arr[:, :, c].astype(np.int16)
+            ch[inside_outer] += combined[inside_outer]
+            arr[:, :, c] = np.clip(ch, 0, 255).astype(np.uint8)
+
+    # Adversarial triangular artifacts (before blur so they get softened)
+    if augment:
+        # Stretch ptr_mask to match current (post-stretch) coordinate space
+        ptr_mask_s = ptr_mask.transform(
+            (canvas_size, canvas_size),
+            Image.AFFINE,
+            (1.0 / stretch_h, 0, cx * (1 - 1.0 / stretch_h),
+             0, 1.0 / stretch_v, cy * (1 - 1.0 / stretch_v)),
+            resample=Image.NEAREST,
+        )
+        ptr_blocked = np.array(ptr_mask_s) > 127
+        # Also block mounting hole (stretched coordinates)
+        s_hole_cx = cx + (hole_cx - cx) * stretch_h
+        s_hole_cy = cy + (hole_cy - cy) * stretch_v
+        s_hole_rx = hole_r * stretch_h
+        s_hole_ry = hole_r * stretch_v
+        hole_dist2 = ((xs - s_hole_cx) / max(s_hole_rx, 1)) ** 2 + \
+                     ((ys - s_hole_cy) / max(s_hole_ry, 1)) ** 2
+        ptr_blocked |= (hole_dist2 <= 1)
+
+        # Dilate blocked region by DIAL_CIRCLE_BLUR_RADIUS so triangles
+        # don't touch the pointer/hole or their blur neighbourhood.
+        margin = DIAL_CIRCLE_BLUR_RADIUS
+        if margin > 0:
+            blocked_img = Image.fromarray(ptr_blocked.astype(np.uint8) * 255, "L")
+            blocked_img = blocked_img.filter(ImageFilter.MaxFilter(2 * margin + 1))
+            ptr_blocked = np.array(blocked_img) > 127
+
+        n_tris = random.randint(*TRI_ARTIFACT_COUNT)
+
+        for _ in range(n_tris):
+            base_rgb = tuple(random.randint(*TRI_ARTIFACT_MEAN_RANGE) for _ in range(3))
+            # Random position and orientation
+            tcx = random.randint(0, canvas_size - 1)
+            tcy = random.randint(0, canvas_size - 1)
+            base_len = random.randint(*TRI_ARTIFACT_SIZE)
+            rot = random.uniform(0, 2 * math.pi)
+
+            # Base endpoints centred on (tcx, tcy)
+            half = base_len / 2
+            cos_r, sin_r = math.cos(rot), math.sin(rot)
+            p0 = (tcx - cos_r * half, tcy - sin_r * half)
+            p1 = (tcx + cos_r * half, tcy + sin_r * half)
+
+            # Apex from two base angles via sine rule
+            a0 = math.radians(random.uniform(40, 80))
+            a1 = math.radians(random.uniform(40, 80))
+            t = base_len * math.sin(a1) / math.sin(a0 + a1)
+            # Apex in local frame (base along x, -half to +half)
+            alx = -half + t * math.cos(a0)
+            aly = t * math.sin(a0)
+            # Rotate to canvas frame
+            apex = (tcx + alx * cos_r - aly * sin_r,
+                    tcy + alx * sin_r + aly * cos_r)
+            verts = [p0, p1, apex]
+
+            # Rasterize triangle
+            tri_mask = Image.new("L", (canvas_size, canvas_size), 0)
+            ImageDraw.Draw(tri_mask).polygon(verts, fill=255)
+            tri_pixels = np.array(tri_mask) > 127
+
+            # Only place where inside outer canvas AND not on pointer
+            valid = tri_pixels & inside_outer & (~ptr_blocked)
+            if not valid.any():
+                continue
+
+            # Noisy fill: per-channel mean + per-pixel variance
+            for c in range(3):
+                noise = np.random.randint(
+                    -TRI_ARTIFACT_PIXEL_VAR, TRI_ARTIFACT_PIXEL_VAR + 1,
+                    (canvas_size, canvas_size), dtype=np.int16)
+                fill = np.clip(base_rgb[c] + noise, 0, 255).astype(np.uint8)
+                arr[:, :, c][valid] = fill[valid]
+
+    arr[~inside_outer] = 0
+    img = Image.fromarray(arr, img.mode)
+
+    # Composite tick/digit overlay so scales aren't occluded by outer dial
+    img = Image.alpha_composite(img.convert("RGBA"), td_layer).convert("RGB")
+
+    # Gaussian blur inside outer canvas
     if augment and DIAL_CIRCLE_BLUR:
         dcb_r = DIAL_CIRCLE_BLUR_RADIUS
         if dcb_r > 0.1:
             blurred = img.filter(ImageFilter.GaussianBlur(radius=dcb_r))
-            circ_mask = Image.new("L", (canvas_size, canvas_size), 0)
-            ImageDraw.Draw(circ_mask).ellipse(
-                [cx - dial_rx, cy - dial_ry,
-                 cx + dial_rx, cy + dial_ry], fill=255)
-            img = Image.composite(blurred, img, circ_mask)
+            outer_mask_img = Image.new("L", (canvas_size, canvas_size), 0)
+            ImageDraw.Draw(outer_mask_img).ellipse(
+                [cx - outer_rx, cy - outer_ry,
+                 cx + outer_rx, cy + outer_ry], fill=255)
+            img = Image.composite(blurred, img, outer_mask_img)
 
-    # --- mask to dial ellipse: keep only the meter, fill outside with black ---
+    # Mask everything outside outer canvas to black
     arr = np.array(img)
-    ys, xs = np.ogrid[:canvas_size, :canvas_size]
-    outside = ((xs - cx) / dial_rx) ** 2 + ((ys - cy) / dial_ry) ** 2 > 1
-    arr[outside] = 0
+    arr[~inside_outer] = 0
     img = Image.fromarray(arr, img.mode)
 
     # --- pad to IMG_SIZE x IMG_SIZE (edge-mean, centre-aligned + displacement) ---
