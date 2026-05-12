@@ -5,11 +5,15 @@ in both numpy and torch forms. Future tasks will extend this module with
 parameter packing, loss, dataset, and training-loop helpers.
 """
 
+import csv
 import math
+import os
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from PIL import Image
+from torch.utils.data import Dataset
 
 
 IMG_SIZE = 256  # shared with generate_synthetic_v3 and train_autocal_*
@@ -168,3 +172,51 @@ def autocal_loss(pred_8, gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0,
 
     total = w_param * l_param + w_mark * l_mark
     return total, l_param, l_mark
+
+
+# ── Dataset ──────────────────────────────────────────────────────────────
+
+class AutoCalibDataset(Dataset):
+    """Synthetic autocal images with regression targets.
+
+    __getitem__ returns:
+        img:          (3, IMG_SIZE, IMG_SIZE) float32 in [0, 1]
+        params_raw:   (6,) float32 — [cx, cy, a, b, theta, phi_0]
+        marks_raw:    (10, 2) float32 — pixel coords of 10 marks
+        filename:     str
+    """
+
+    def __init__(self, data_dir, img_size=IMG_SIZE):
+        self.data_dir = data_dir
+        self.img_size = img_size
+        self.samples = []
+        with open(os.path.join(data_dir, "labels.csv"), newline="") as f:
+            for row in csv.DictReader(f):
+                marks = []
+                for i in range(N_MARKS):
+                    marks.append((float(row[f"mark_{i}_x"]),
+                                  float(row[f"mark_{i}_y"])))
+                self.samples.append({
+                    "filename": row["filename"],
+                    "cx": float(row["cx"]),
+                    "cy": float(row["cy"]),
+                    "a": float(row["a"]),
+                    "b": float(row["b"]),
+                    "theta": float(row["theta"]),
+                    "phi_0": float(row["phi_0"]),
+                    "marks": marks,
+                })
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        s = self.samples[idx]
+        img = Image.open(os.path.join(self.data_dir, s["filename"])).convert("RGB")
+        arr = np.array(img, dtype=np.float32) / 255.0
+        arr = arr.transpose(2, 0, 1)  # HWC → CHW
+
+        params_raw = torch.tensor([s["cx"], s["cy"], s["a"], s["b"],
+                                   s["theta"], s["phi_0"]], dtype=torch.float32)
+        marks_raw = torch.tensor(s["marks"], dtype=torch.float32)
+        return torch.from_numpy(arr), params_raw, marks_raw, s["filename"]
