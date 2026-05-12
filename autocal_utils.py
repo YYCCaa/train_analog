@@ -9,6 +9,7 @@ import math
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 IMG_SIZE = 256  # shared with generate_synthetic_v3 and train_autocal_*
@@ -93,9 +94,6 @@ def derive_marks_torch(cx, cy, a, b, theta, phi_0):
     return torch.stack([x, y], dim=-1)
 
 
-import torch.nn.functional as F
-
-
 # ── Parameter packing ────────────────────────────────────────────────────
 
 def pack_params_to_8(cx, cy, a, b, theta, phi_0, img_size=IMG_SIZE):
@@ -111,11 +109,12 @@ def pack_params_to_8(cx, cy, a, b, theta, phi_0, img_size=IMG_SIZE):
     cy_n = cy / img_size
     a_n = a / (img_size / 2)
     b_n = b / (img_size / 2)
-    sin2 = torch.sin(2 * theta)
-    cos2 = torch.cos(2 * theta)
+    sin_2theta = torch.sin(2 * theta)
+    cos_2theta = torch.cos(2 * theta)
     sin_p = torch.sin(phi_0)
     cos_p = torch.cos(phi_0)
-    return torch.stack([cx_n, cy_n, a_n, b_n, sin2, cos2, sin_p, cos_p], dim=-1)
+    return torch.stack(
+        [cx_n, cy_n, a_n, b_n, sin_2theta, cos_2theta, sin_p, cos_p], dim=-1)
 
 
 def unpack_params_from_8(packed, img_size=IMG_SIZE):
@@ -129,12 +128,12 @@ def unpack_params_from_8(packed, img_size=IMG_SIZE):
     the round-trip error for real (sin, cos) pairs stays below 5e-5.
     """
     _EPS = 1e-4
-    cx_n, cy_n, a_n, b_n, sin2, cos2, sin_p, cos_p = packed.unbind(-1)
+    cx_n, cy_n, a_n, b_n, sin_2theta, cos_2theta, sin_p, cos_p = packed.unbind(-1)
     cx = cx_n * img_size
     cy = cy_n * img_size
     a = a_n * (img_size / 2)
     b = b_n * (img_size / 2)
-    theta = 0.5 * torch.atan2(sin2, cos2 + _EPS)
+    theta = 0.5 * torch.atan2(sin_2theta, cos_2theta + _EPS)
     phi_0 = torch.atan2(sin_p, cos_p + _EPS)
     return cx, cy, a, b, theta, phi_0
 

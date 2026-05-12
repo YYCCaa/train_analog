@@ -7,10 +7,13 @@ import pytest
 import torch
 
 from autocal_utils import (
+    autocal_loss,
     canonical_to_image_np,
     canonical_to_image_torch,
     derive_marks_np,
     derive_marks_torch,
+    pack_params_to_8,
+    unpack_params_from_8,
 )
 
 
@@ -160,14 +163,8 @@ def test_derive_marks_torch_is_differentiable():
 
 # ── Param packing/unpacking ──────────────────────────────────────────────
 
-from autocal_utils import (
-    pack_params_to_8,
-    unpack_params_from_8,
-    autocal_loss,
-)
-
-
 def test_pack_params_shape():
+    """pack_params_to_8 emits an (B, 8) tensor for a 1-batch input."""
     cx = torch.tensor([128.0])
     cy = torch.tensor([128.0])
     a = torch.tensor([60.0])
