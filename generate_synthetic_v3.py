@@ -38,6 +38,7 @@ POINTER_VALUE_RANGE = (0.0, 9.0)
 # ── Outer canvas (bezel) ─────────────────────────────────────────────────
 OUTER_SCALE_RANGE = (1.20, 1.32)
 RIM_WIDTH = 3
+DIAL_POLY_SEGS = 180     # number of segments for the dial-boundary polyline
 
 # ── Scale ticks ──────────────────────────────────────────────────────────
 TICKS_PER_DIGIT_RANGE = (1, 5)
@@ -265,16 +266,18 @@ def draw_dial_boundary(img, params, dial_h, dial_s):
     cx, cy, a, b, theta = params["cx"], params["cy"], params["a"], params["b"], params["theta"]
     circle_rgb = _hsv_rgb(dial_h, dial_s, random.uniform(*CIRCLE_V_RANGE))
 
+    cos_o = math.cos(theta)
+    sin_o = math.sin(theta)
     pts = []
-    n_seg = 180
-    for k in range(n_seg + 1):
+    n_seg = DIAL_POLY_SEGS
+    for k in range(n_seg + 1):  # +1 to close the polyline (k=0 and k=n_seg map to same point)
         t = 2 * math.pi * k / n_seg
         cos_t = math.cos(t)
         sin_t = math.sin(t)
-        x = cx + (a * cos_t * math.cos(theta) - b * sin_t * math.sin(theta))
-        y = cy + (a * cos_t * math.sin(theta) + b * sin_t * math.cos(theta))
+        x = cx + (a * cos_t * cos_o - b * sin_t * sin_o)
+        y = cy + (a * cos_t * sin_o + b * sin_t * cos_o)
         pts.append((x, y))
 
     draw = ImageDraw.Draw(img)
-    draw.line(pts, fill=circle_rgb + (255,), width=1)
+    draw.line(pts, fill=circle_rgb, width=1)
     return img
