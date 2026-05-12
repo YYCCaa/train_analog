@@ -5,8 +5,7 @@ Contents:
   - Parameter packing: pack_params_to_8, unpack_params_from_8.
   - Loss: autocal_loss (SmoothL1 on params + derived marks).
   - Dataset: AutoCalibDataset (PyTorch Dataset over generated images + labels.csv).
-
-Future tasks will add backbones and training utilities.
+  - Backbones: AutocalModelE, AutocalModelF (regression head replaces heatmap decoder).
 """
 
 import csv
@@ -15,6 +14,7 @@ import os
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset
@@ -224,3 +224,143 @@ class AutoCalibDataset(Dataset):
                                    s["theta"], s["phi_0"]], dtype=torch.float32)
         marks_raw = torch.from_numpy(s["marks"])
         return torch.from_numpy(arr), params_raw, marks_raw, s["filename"]
+
+
+# ── Backbone architectures (regression heads) ────────────────────────────
+
+# Building blocks copied from train_e_inv_res.py and train_f_se_dwsep.py.
+
+class _InvRes(nn.Module):
+    """Inverted residual block (MobileNetV2 style)."""
+
+    def __init__(self, in_ch, out_ch, stride=1, expand_ratio=2):
+        super().__init__()
+        mid = in_ch * expand_ratio
+        self.use_res = (stride == 1 and in_ch == out_ch)
+        layers = []
+        if expand_ratio != 1:
+            layers += [nn.Conv2d(in_ch, mid, 1, bias=False),
+                       nn.BatchNorm2d(mid), nn.ReLU6(inplace=True)]
+        layers += [nn.Conv2d(mid, mid, 3, stride=stride, padding=1,
+                             groups=mid, bias=False),
+                   nn.BatchNorm2d(mid), nn.ReLU6(inplace=True),
+                   nn.Conv2d(mid, out_ch, 1, bias=False),
+                   nn.BatchNorm2d(out_ch)]
+        self.block = nn.Sequential(*layers)
+
+    def forward(self, x):
+        out = self.block(x)
+        if self.use_res:
+            out = out + x
+        return out
+
+
+class _ChannelSE(nn.Module):
+    """Squeeze-and-Excitation channel attention."""
+
+    def __init__(self, ch, reduction=4):
+        super().__init__()
+        mid = max(ch // reduction, 4)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Conv2d(ch, mid, 1, bias=False), nn.ReLU(inplace=True),
+            nn.Conv2d(mid, ch, 1, bias=False), nn.Sigmoid())
+
+    def forward(self, x):
+        return x * self.fc(self.pool(x))
+
+
+class _DWSepSE(nn.Module):
+    def __init__(self, in_ch, out_ch, stride=1):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, 3, stride=stride, padding=1,
+                      groups=in_ch, bias=False),
+            nn.BatchNorm2d(in_ch), nn.ReLU(inplace=True),
+            nn.Conv2d(in_ch, out_ch, 1, bias=False),
+            nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True))
+        self.se = _ChannelSE(out_ch, reduction=4)
+
+    def forward(self, x):
+        return self.se(self.block(x))
+
+
+class _DWSepResSE(nn.Module):
+    def __init__(self, ch):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(ch, ch, 3, padding=1, groups=ch, bias=False),
+            nn.BatchNorm2d(ch), nn.ReLU(inplace=True),
+            nn.Conv2d(ch, ch, 1, bias=False),
+            nn.BatchNorm2d(ch), nn.ReLU(inplace=True))
+        self.se = _ChannelSE(ch, reduction=4)
+
+    def forward(self, x):
+        return x + self.se(self.block(x))
+
+
+class _RegressionHead(nn.Module):
+    """Global avg pool → 1x1 conv ReLU → 1x1 conv to 8 outputs.
+
+    Conv-only design exports cleanly to ONNX.
+    """
+
+    def __init__(self, in_ch, hidden=64, out=8):
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Conv2d(in_ch, hidden, 1, bias=True)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc2 = nn.Conv2d(hidden, out, 1, bias=True)
+
+    def forward(self, x):
+        x = self.pool(x)
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x.flatten(1)  # (B, 8)
+
+
+class AutocalModelE(nn.Module):
+    """Autocal variant of Model E (Inverted Residual encoder + regression head).
+
+    Encoder identical to InvResNet up to the bottleneck; decoder removed.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, 24, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(24), nn.ReLU6(inplace=True))         # 128x128x24
+        self.enc2 = _InvRes(24, 48, stride=2, expand_ratio=2)    # 64x64x48
+        self.enc3 = _InvRes(48, 64, stride=2, expand_ratio=2)    # 32x32x64
+        self.bn1 = _InvRes(64, 64, stride=1, expand_ratio=2)
+        self.bn2 = _InvRes(64, 64, stride=1, expand_ratio=2)
+        self.head = _RegressionHead(64)
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.enc2(x)
+        x = self.enc3(x)
+        x = self.bn2(self.bn1(x))
+        return self.head(x)
+
+
+class AutocalModelF(nn.Module):
+    """Autocal variant of Model F (SE-enhanced DWSep encoder + regression head)."""
+
+    def __init__(self):
+        super().__init__()
+        self.enc1 = nn.Sequential(
+            nn.Conv2d(3, 32, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(32), nn.ReLU(inplace=True))           # 128x128x32
+        self.enc2 = _DWSepSE(32, 64, stride=2)                    # 64x64x64
+        self.enc3 = _DWSepSE(64, 96, stride=2)                    # 32x32x96
+        self.bn1 = _DWSepResSE(96)
+        self.bn2 = _DWSepResSE(96)
+        self.head = _RegressionHead(96)
+
+    def forward(self, x):
+        x = self.enc1(x)
+        x = self.enc2(x)
+        x = self.enc3(x)
+        x = self.bn2(self.bn1(x))
+        return self.head(x)
