@@ -91,3 +91,81 @@ def derive_marks_torch(cx, cy, a, b, theta, phi_0):
     x = cx_bc + a_bc * cos_t * cos_o - b_bc * sin_t * sin_o
     y = cy_bc + a_bc * cos_t * sin_o + b_bc * sin_t * cos_o
     return torch.stack([x, y], dim=-1)
+
+
+import torch.nn.functional as F
+
+
+# ── Parameter packing ────────────────────────────────────────────────────
+
+def pack_params_to_8(cx, cy, a, b, theta, phi_0, img_size=IMG_SIZE):
+    """Pack 6 raw params into 8 normalized scalars suitable for regression.
+
+    Layout: [cx_n, cy_n, a_n, b_n, sin(2θ), cos(2θ), sin(φ₀), cos(φ₀)]
+      cx_n, cy_n: divided by IMG_SIZE
+      a_n, b_n: divided by IMG_SIZE/2
+      θ uses 2θ because, with a ≥ b enforced, θ has period π (an axis line).
+    Returns tensor of shape (B, 8).
+    """
+    cx_n = cx / img_size
+    cy_n = cy / img_size
+    a_n = a / (img_size / 2)
+    b_n = b / (img_size / 2)
+    sin2 = torch.sin(2 * theta)
+    cos2 = torch.cos(2 * theta)
+    sin_p = torch.sin(phi_0)
+    cos_p = torch.cos(phi_0)
+    return torch.stack([cx_n, cy_n, a_n, b_n, sin2, cos2, sin_p, cos_p], dim=-1)
+
+
+def unpack_params_from_8(packed, img_size=IMG_SIZE):
+    """Inverse of pack_params_to_8.
+
+    Returns (cx, cy, a, b, theta, phi_0), each shape (B,).
+
+    A small epsilon is added to the cosine argument of atan2 so that the
+    gradient is finite even when the network outputs an all-zero vector
+    (typical random-init scenario).  The bias is 1e-4, small enough that
+    the round-trip error for real (sin, cos) pairs stays below 5e-5.
+    """
+    _EPS = 1e-4
+    cx_n, cy_n, a_n, b_n, sin2, cos2, sin_p, cos_p = packed.unbind(-1)
+    cx = cx_n * img_size
+    cy = cy_n * img_size
+    a = a_n * (img_size / 2)
+    b = b_n * (img_size / 2)
+    theta = 0.5 * torch.atan2(sin2, cos2 + _EPS)
+    phi_0 = torch.atan2(sin_p, cos_p + _EPS)
+    return cx, cy, a, b, theta, phi_0
+
+
+# ── Loss ──────────────────────────────────────────────────────────────────
+
+def autocal_loss(pred_8, gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0,
+                 gt_marks, img_size=IMG_SIZE, w_param=0.1, w_mark=1.0):
+    """Combined SmoothL1 loss on packed params and derived marks.
+
+    Args:
+        pred_8: (B, 8) — network output (the packed prediction).
+        gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0: ground truth, each (B,).
+        gt_marks: (B, 10, 2) — ground truth mark positions in pixel coords.
+        img_size: used to normalize the mark loss to unit scale.
+        w_param, w_mark: weighting; mark loss carries the main signal.
+
+    Returns: (total_loss, param_loss, mark_loss)
+    """
+    gt_8 = pack_params_to_8(gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0,
+                            img_size=img_size)
+
+    l_param = F.smooth_l1_loss(pred_8, gt_8)
+
+    cx_p, cy_p, a_p, b_p, theta_p, phi_0_p = unpack_params_from_8(
+        pred_8, img_size=img_size)
+    pred_marks = derive_marks_torch(cx_p, cy_p, a_p, b_p, theta_p, phi_0_p)
+
+    pred_marks_n = pred_marks / img_size
+    gt_marks_n = gt_marks / img_size
+    l_mark = F.smooth_l1_loss(pred_marks_n, gt_marks_n)
+
+    total = w_param * l_param + w_mark * l_mark
+    return total, l_param, l_mark

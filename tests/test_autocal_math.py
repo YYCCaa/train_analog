@@ -156,3 +156,135 @@ def test_derive_marks_torch_is_differentiable():
     for p in (cx, cy, a, b, theta, phi_0):
         assert p.grad is not None
         assert torch.isfinite(p.grad).all()
+
+
+# ── Param packing/unpacking ──────────────────────────────────────────────
+
+from autocal_utils import (
+    pack_params_to_8,
+    unpack_params_from_8,
+    autocal_loss,
+)
+
+
+def test_pack_params_shape():
+    cx = torch.tensor([128.0])
+    cy = torch.tensor([128.0])
+    a = torch.tensor([60.0])
+    b = torch.tensor([55.0])
+    theta = torch.tensor([0.3])
+    phi_0 = torch.tensor([0.5])
+    packed = pack_params_to_8(cx, cy, a, b, theta, phi_0, img_size=256)
+    assert packed.shape == (1, 8)
+
+
+def test_pack_params_normalization_ranges():
+    """All 8 normalized values should sit in [-1, 1]."""
+    cx = torch.tensor([128.0])
+    cy = torch.tensor([0.0])
+    a = torch.tensor([128.0])
+    b = torch.tensor([100.0])
+    theta = torch.tensor([0.0])
+    phi_0 = torch.tensor([0.0])
+    packed = pack_params_to_8(cx, cy, a, b, theta, phi_0, img_size=256)
+    assert packed[0, 0].item() == pytest.approx(0.5)  # cx/256
+    assert packed[0, 1].item() == pytest.approx(0.0)  # cy/256
+    assert packed[0, 2].item() == pytest.approx(1.0)  # a/128
+    assert packed[0, 3].item() == pytest.approx(100.0 / 128)
+    assert packed[0, 4].item() == pytest.approx(0.0)  # sin(2*0)
+    assert packed[0, 5].item() == pytest.approx(1.0)  # cos(2*0)
+    assert packed[0, 6].item() == pytest.approx(0.0)  # sin(0)
+    assert packed[0, 7].item() == pytest.approx(1.0)  # cos(0)
+
+
+def test_unpack_inverse_of_pack():
+    """unpack(pack(x)) ≈ x for valid inputs."""
+    rng = np.random.default_rng(42)
+    for _ in range(5):
+        cx_v = rng.uniform(0, 256)
+        cy_v = rng.uniform(0, 256)
+        a_v = rng.uniform(30, 115)
+        b_v = a_v * rng.uniform(0.8, 1.0)
+        # Keep theta in (-pi/2, pi/2) so atan2(sin2θ, cos2θ)/2 recovers it.
+        theta_v = rng.uniform(-math.pi / 2 + 0.01, math.pi / 2 - 0.01)
+        # Keep phi_0 in (-pi, pi).
+        phi_0_v = rng.uniform(-math.pi + 0.01, math.pi - 0.01)
+
+        cx = torch.tensor([cx_v])
+        cy = torch.tensor([cy_v])
+        a = torch.tensor([a_v])
+        b = torch.tensor([b_v])
+        theta = torch.tensor([theta_v])
+        phi_0 = torch.tensor([phi_0_v])
+
+        packed = pack_params_to_8(cx, cy, a, b, theta, phi_0, img_size=256)
+        cx2, cy2, a2, b2, theta2, phi_0_2 = unpack_params_from_8(packed, img_size=256)
+
+        assert cx2.item() == pytest.approx(cx_v, abs=1e-4)
+        assert cy2.item() == pytest.approx(cy_v, abs=1e-4)
+        assert a2.item() == pytest.approx(a_v, abs=1e-4)
+        assert b2.item() == pytest.approx(b_v, abs=1e-4)
+        assert theta2.item() == pytest.approx(theta_v, abs=1e-4)
+        assert phi_0_2.item() == pytest.approx(phi_0_v, abs=1e-4)
+
+
+# ── Loss ──────────────────────────────────────────────────────────────────
+
+def test_autocal_loss_zero_at_truth():
+    """Loss is zero when prediction matches ground truth exactly."""
+    gt_cx = torch.tensor([128.0])
+    gt_cy = torch.tensor([100.0])
+    gt_a = torch.tensor([60.0])
+    gt_b = torch.tensor([55.0])
+    gt_theta = torch.tensor([0.3])
+    gt_phi_0 = torch.tensor([0.5])
+    gt_marks = derive_marks_torch(gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0)
+
+    pred_8 = pack_params_to_8(gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0,
+                              img_size=256)
+
+    total, l_p, l_m = autocal_loss(
+        pred_8, gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0, gt_marks,
+        img_size=256, w_param=0.1, w_mark=1.0)
+
+    assert total.item() == pytest.approx(0.0, abs=1e-6)
+    assert l_p.item() == pytest.approx(0.0, abs=1e-6)
+    assert l_m.item() == pytest.approx(0.0, abs=1e-6)
+
+
+def test_autocal_loss_positive_for_error():
+    """Loss is positive when prediction differs from ground truth."""
+    gt_cx = torch.tensor([128.0])
+    gt_cy = torch.tensor([100.0])
+    gt_a = torch.tensor([60.0])
+    gt_b = torch.tensor([55.0])
+    gt_theta = torch.tensor([0.3])
+    gt_phi_0 = torch.tensor([0.5])
+    gt_marks = derive_marks_torch(gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0)
+
+    # Perturb predicted center by 10 px
+    pred_8 = pack_params_to_8(gt_cx + 10.0, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0,
+                              img_size=256)
+    total, _, _ = autocal_loss(
+        pred_8, gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0, gt_marks,
+        img_size=256)
+    assert total.item() > 0.0
+
+
+def test_autocal_loss_backprop():
+    """Gradient flows from total loss back to predicted params."""
+    pred_8 = torch.zeros((1, 8), requires_grad=True)
+    gt_cx = torch.tensor([128.0])
+    gt_cy = torch.tensor([100.0])
+    gt_a = torch.tensor([60.0])
+    gt_b = torch.tensor([55.0])
+    gt_theta = torch.tensor([0.0])
+    gt_phi_0 = torch.tensor([0.0])
+    gt_marks = derive_marks_torch(gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0)
+
+    total, _, _ = autocal_loss(
+        pred_8, gt_cx, gt_cy, gt_a, gt_b, gt_theta, gt_phi_0, gt_marks)
+    total.backward()
+    assert pred_8.grad is not None
+    assert torch.isfinite(pred_8.grad).all()
+    assert (pred_8.grad.abs() > 0).any()
