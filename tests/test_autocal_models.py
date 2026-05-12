@@ -1,6 +1,5 @@
 """Smoke tests for the two autocal backbones."""
 
-import pytest
 import torch
 
 from autocal_utils import AutocalModelE, AutocalModelF
@@ -29,13 +28,10 @@ def test_model_e_backprop():
     x = torch.randn(1, 3, 256, 256)
     out = model(x)
     out.sum().backward()
-    # Spot-check one parameter has a gradient.
-    found = False
-    for p in model.parameters():
-        if p.grad is not None and p.grad.abs().sum() > 0:
-            found = True
-            break
-    assert found
+    # Stem is the deepest-back parameter; if it has gradient, the whole graph is alive.
+    stem_w = model.stem[0].weight
+    assert stem_w.grad is not None
+    assert stem_w.grad.abs().sum() > 0
 
 
 def test_model_f_backprop():
@@ -43,9 +39,6 @@ def test_model_f_backprop():
     x = torch.randn(1, 3, 256, 256)
     out = model(x)
     out.sum().backward()
-    found = False
-    for p in model.parameters():
-        if p.grad is not None and p.grad.abs().sum() > 0:
-            found = True
-            break
-    assert found
+    enc1_w = model.enc1[0].weight  # F's first stem conv lives in enc1
+    assert enc1_w.grad is not None
+    assert enc1_w.grad.abs().sum() > 0

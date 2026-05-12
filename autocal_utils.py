@@ -229,6 +229,9 @@ class AutoCalibDataset(Dataset):
 # ── Backbone architectures (regression heads) ────────────────────────────
 
 # Building blocks copied from train_e_inv_res.py and train_f_se_dwsep.py.
+# If the autocal versions need to diverge from the train_*.py originals
+# (different SE reduction, dropout, etc.), that is intentional — these serve
+# a different task. Otherwise keep them in sync.
 
 class _InvRes(nn.Module):
     """Inverted residual block (MobileNetV2 style)."""
@@ -271,6 +274,8 @@ class _ChannelSE(nn.Module):
 
 
 class _DWSepSE(nn.Module):
+    """Depthwise separable conv + Squeeze-and-Excitation channel attention."""
+
     def __init__(self, in_ch, out_ch, stride=1):
         super().__init__()
         self.block = nn.Sequential(
@@ -286,6 +291,8 @@ class _DWSepSE(nn.Module):
 
 
 class _DWSepResSE(nn.Module):
+    """Residual DWSep + SE for the bottleneck (output = input + SE(DWSep(input)))."""
+
     def __init__(self, ch):
         super().__init__()
         self.block = nn.Sequential(
@@ -320,9 +327,11 @@ class _RegressionHead(nn.Module):
 
 
 class AutocalModelE(nn.Module):
-    """Autocal variant of Model E (Inverted Residual encoder + regression head).
+    """Autocal variant of Model E.
 
-    Encoder identical to InvResNet up to the bottleneck; decoder removed.
+    Stem and encoder/bottleneck taken from InvResNet (train_e_inv_res.py).
+    The decoder and sigmoid heatmap head are replaced by _RegressionHead,
+    producing 8 packed parameters per image instead of a 128x128 heatmap.
     """
 
     def __init__(self):
@@ -345,7 +354,12 @@ class AutocalModelE(nn.Module):
 
 
 class AutocalModelF(nn.Module):
-    """Autocal variant of Model F (SE-enhanced DWSep encoder + regression head)."""
+    """Autocal variant of Model F.
+
+    Encoder/bottleneck taken from SEDWSepNet (train_f_se_dwsep.py).
+    The decoder and sigmoid heatmap head are replaced by _RegressionHead,
+    producing 8 packed parameters per image.
+    """
 
     def __init__(self):
         super().__init__()
