@@ -433,7 +433,7 @@ def draw_pointer(img, params):
 # ── Adversarial triangle artifacts ───────────────────────────────────────
 
 def add_triangle_artifacts(img):
-    """Random translucent triangles scattered on the canvas."""
+    """Opaque random-colour triangles scattered on the canvas."""
     arr = np.array(img)
     canvas_size = arr.shape[0]
     n = random.randint(*TRI_COUNT_RANGE)
@@ -469,7 +469,7 @@ def generate_image(path, img_size=IMG_SIZE):
     img = make_procedural_background(img_size)
 
     # Shared HSV dial palette for bezel/circle/rim.
-    dial_h = random.random()
+    dial_h = random.random()  # full hue wheel
     dial_s = random.uniform(*DIAL_S_RANGE)
 
     outer_scale = random.uniform(*OUTER_SCALE_RANGE)
@@ -479,7 +479,7 @@ def generate_image(path, img_size=IMG_SIZE):
 
     # 3. Outer canvas (bezel + rim).
     img, _inside_outer = draw_outer_canvas(img, params, outer_scale,
-                                           dial_h, dial_s)
+                                           dial_h, dial_s)  # mask unused: v3 fills full canvas
 
     # 4. Dial boundary, ticks, digits.
     img = draw_dial_boundary(img, params, dial_h, dial_s)
@@ -498,6 +498,7 @@ def generate_image(path, img_size=IMG_SIZE):
     img = ImageEnhance.Color(img).enhance(random.uniform(*SATURATION_RANGE))
     img = ImageEnhance.Sharpness(img).enhance(random.uniform(*SHARPNESS_RANGE))
 
+    # 8. Save.
     img.save(path)
 
     # Derive marks from the same params we rendered.
@@ -525,6 +526,9 @@ def main():
     parser.add_argument("--num-images", type=int, default=NUM_IMAGES)
     args = parser.parse_args()
 
+    if args.num_images <= 0:
+        parser.error("--num-images must be a positive integer")
+
     os.makedirs(args.output_dir, exist_ok=True)
     csv_path = os.path.join(args.output_dir, "labels.csv")
 
@@ -532,16 +536,13 @@ def main():
     for i in range(N_MARKS):
         fieldnames += [f"mark_{i}_x", f"mark_{i}_y"]
 
-    rows = []
-    for i in range(args.num_images):
-        fname = f"dial_{i:05d}.png"
-        fpath = os.path.join(args.output_dir, fname)
-        rows.append(generate_image(fpath))
-
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        for i in range(args.num_images):
+            fname = f"dial_{i:05d}.png"
+            fpath = os.path.join(args.output_dir, fname)
+            writer.writerow(generate_image(fpath))
 
     print(f"Generated {args.num_images} images in '{args.output_dir}/'")
     print(f"Labels written to '{csv_path}'")
