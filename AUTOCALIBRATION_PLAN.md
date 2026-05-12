@@ -77,7 +77,7 @@ The 10 mark positions are computed in the generator from the canonical → image
 
 **Shadow caveat.** v2's `draw_rim_shadows` (`generate_synthetic_v2.py:464`) assumes a circular dial; on an ellipse it renders incorrectly. Set `SHADOW_PROB = 0` initially. Revisit an ellipse-aware shadow model once Phase 1 trains and we know whether the absence of shadows is a sim-to-real gap.
 
-### 1.2 Training: `train_autocalibration.py`
+### 1.2 Training: `train_autocal_e.py` / `train_autocal_f.py`
 
 **Backbones:** train two variants in parallel — one forked from `model_e_inv_res_final`, one from `model_f_se_dwsep_final`. Compare on validation; pick the winner for production. Replace the heatmap output head on each with an **8-scalar regression head** (the 6 params packed as 8 outputs — see normalization below). No decoder, no auxiliary heatmap output.
 
@@ -99,7 +99,7 @@ L = w_param · SmoothL1(pred_params_norm, true_params_norm)
 
 **Data volume:** start at 15k images (shared across both backbones — single dataset, two training runs). Expand to 30k if validation underfits.
 
-### 1.3 Inference: `infer_autocalibration.py`
+### 1.3 Inference: `infer_autocal.py`
 
 Input: a box-selected (user-cropped) dial image, resized + padded to `IMG_SIZE`.
 Output: 6 params + 10 derived mark positions, drawn on the input for visual validation.

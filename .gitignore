@@ -10,11 +10,14 @@ build/
 
 # Model files
 *.pth
+*.onnx
 *.tflite
 
 # Data directories
 synthetic_data/
 infer_data/
+sv2/
+sv3/
 
 # Images
 *.png
