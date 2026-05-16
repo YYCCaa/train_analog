@@ -18,6 +18,26 @@ Loss is direct param regression + differentiable mark-position regression (the m
 
 ---
 
+## Quick Start
+
+End-to-end Phase 1 invocation:
+
+```bash
+# 1. Generate synthetic training data (defaults: 15k images, sv3/).
+python generate_synthetic_v3.py --output-dir sv3 --num-images 15000
+
+# 2. Train both backbones in parallel (run in separate shells).
+python train_autocal_e.py --data-dir sv3 --save-onnx autocal_model_e.onnx
+python train_autocal_f.py --data-dir sv3 --save-onnx autocal_model_f.onnx
+
+# 3. Inference on one image (writes an overlay PNG).
+python infer_autocal.py --model autocal_model_e.onnx --image path/to/dial.png --output overlay.png
+```
+
+For a custom training loop, import `AutoCalibDataset` and `autocal_loss` from `autocal_utils`. Architecture, loss, normalization, and label schema are all documented below.
+
+---
+
 ## Phase 1 — Affine 6-DOF Model (do now)
 
 ### 1.1 Generator: `generate_synthetic_v3.py`

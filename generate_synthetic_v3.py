@@ -24,7 +24,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 from autocal_utils import IMG_SIZE, N_MARKS, DEG_PER_MARK, derive_marks_np
 
 OUTPUT_DIR = "sv3"
-NUM_IMAGES = 15
+NUM_IMAGES = 15000
 
 
 # ── Ellipse parameter sampling ranges ────────────────────────────────────
@@ -596,8 +596,12 @@ def generate_image(path, img_size=IMG_SIZE):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic autocal images")
-    parser.add_argument("--output-dir", default=OUTPUT_DIR)
-    parser.add_argument("--num-images", type=int, default=NUM_IMAGES)
+    parser.add_argument(
+        "--output-dir", default=OUTPUT_DIR,
+        help=f"directory to write PNGs and labels.csv (default: {OUTPUT_DIR})")
+    parser.add_argument(
+        "--num-images", type=int, default=NUM_IMAGES,
+        help=f"number of synthetic images to generate (default: {NUM_IMAGES})")
     args = parser.parse_args()
 
     if args.num_images <= 0:
