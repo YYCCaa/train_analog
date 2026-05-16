@@ -26,6 +26,7 @@ from autocal_utils import IMG_SIZE, N_MARKS, DEG_PER_MARK, derive_marks_np
 OUTPUT_DIR = "sv3"
 NUM_IMAGES = 15
 
+
 # ── Ellipse parameter sampling ranges ────────────────────────────────────
 CX_DISP_RANGE = (-40, 40)        # px from image centre
 CY_DISP_RANGE = (-40, 40)
@@ -102,6 +103,10 @@ TRI_SIZE_RANGE = (15, 40)
 TRI_MEAN_RANGE = (50, 200)
 TRI_PIXEL_VAR = 5
 TRI_VERTEX_DIST_RANGE = (0.3, 1.0)   # fraction of TRI_SIZE_RANGE sampled `size`
+
+# ── Intrusion augmentation ───────────────────────────────────────────────
+INTRUSION_PROB = 0.3                   # probability of rendering an intruder dial
+INTRUSION_DEPTH_RANGE = (0.10, 0.50)   # fraction of intruder's outer bezel inside the canvas
 
 
 def _hsv_rgb(h, s, v):
@@ -459,6 +464,66 @@ def add_triangle_artifacts(img):
     return Image.fromarray(arr, img.mode)
 
 
+# ── Intrusion augmentation ───────────────────────────────────────────────
+
+def _sample_intruder_params(img_size=IMG_SIZE):
+    """Sample parameters for an off-canvas intruder dial.
+
+    Returns (params_dict, dial_h, dial_s, outer_scale) where params_dict
+    has the same keys as sample_params() but with (cx, cy) placed outside
+    the canvas so that only a depth-fraction of the bezel is visible.
+    """
+    a = random.uniform(*A_RANGE)
+    b = a * random.uniform(*B_RATIO_RANGE)
+    theta = random.uniform(*THETA_RANGE)
+    phi_0 = random.uniform(*PHI_0_RANGE)
+    pointer_value = random.uniform(*POINTER_VALUE_RANGE)
+    outer_scale = random.uniform(*OUTER_SCALE_RANGE)
+
+    # Conservative bezel radius for placement; use a (un-rotated upper bound).
+    bezel_radius = a * outer_scale
+
+    depth = random.uniform(*INTRUSION_DEPTH_RANGE)
+    offset = bezel_radius * (1 - depth)
+
+    edge = random.choice(['top', 'bottom', 'left', 'right'])
+    if edge == 'top':
+        cx = random.uniform(0, img_size)
+        cy = -offset
+    elif edge == 'bottom':
+        cx = random.uniform(0, img_size)
+        cy = img_size + offset
+    elif edge == 'left':
+        cx = -offset
+        cy = random.uniform(0, img_size)
+    else:  # right
+        cx = img_size + offset
+        cy = random.uniform(0, img_size)
+
+    params = {
+        "cx": cx, "cy": cy, "a": a, "b": b,
+        "theta": theta, "phi_0": phi_0,
+        "pointer_value": pointer_value,
+    }
+    dial_h = random.random()
+    dial_s = random.uniform(*DIAL_S_RANGE)
+    return params, dial_h, dial_s, outer_scale
+
+
+def _render_intruder(img, intruder_params, dial_h, dial_s, outer_scale):
+    """Render a complete intruder dial onto img (in-place via successive calls).
+
+    Mirrors the target rendering sequence but omits distractor text (which
+    is canvas-global and drawn once for the target).
+    """
+    img, _ = draw_outer_canvas(img, intruder_params, outer_scale, dial_h, dial_s)
+    img = draw_dial_boundary(img, intruder_params, dial_h, dial_s)
+    img = draw_scale_ticks(img, intruder_params)
+    img = draw_scale_digits(img, intruder_params)
+    img = draw_pointer(img, intruder_params)
+    return img
+
+
 # ── Top-level image generation ───────────────────────────────────────────
 
 def generate_image(path, img_size=IMG_SIZE):
@@ -476,6 +541,15 @@ def generate_image(path, img_size=IMG_SIZE):
 
     # 2. Distractor text (outside bezel disc only).
     img = draw_distractor_text(img, params, outer_scale)
+
+    # 2b. Optional intruder (neighbor dial whose center is off-canvas).
+    # Rendered before the target so the target dial visually dominates;
+    # only edge slivers of the intruder remain visible. Labels are unchanged —
+    # they describe only the target. This prepares the model for Phase 2
+    # stage-2 crops where adjacent dials may appear at frame edges.
+    if random.random() < INTRUSION_PROB:
+        intr_params, intr_h, intr_s, intr_outer = _sample_intruder_params(img_size)
+        img = _render_intruder(img, intr_params, intr_h, intr_s, intr_outer)
 
     # 3. Outer canvas (bezel + rim).
     img, _inside_outer = draw_outer_canvas(img, params, outer_scale,

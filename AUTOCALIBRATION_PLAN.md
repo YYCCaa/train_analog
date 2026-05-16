@@ -45,6 +45,8 @@ y = cy + r_c · (a·cos(t)·sinθ + b·sin(t)·cosθ)
 
 2. **Background distractor text.** `n ~ Uniform[0, 6]` strings rendered at random positions, **rejected if they overlap the outer bezel disc.** Each string: random font (arial, courier, times), size `Uniform[8, 32]` px, color contrasting against local background, rotation `Uniform[-15°, 15°]`. Content from a mixed pool — single digits `'0'-'9'`, multi-digit numbers `'12' '230' '0.5'`, alphanumeric codes `'A-50' 'V1.2' 'K12'`, short labels `'V' 'AC' 'kW' 'OFF'`. Teaches the model to ignore text outside the bezel.
 
+2b. **Optional intruder dial (intrusion augmentation).** With probability 0.3, a complete neighbor dial is rendered whose center is placed *outside* the canvas edge, so only a random depth-fraction (10–50 %) of its bezel is visible at the frame edge. The intruder is drawn *before* the target so the target visually dominates. Labels are unchanged — they describe only the target. This makes the Phase 2 stage-2 per-dial autocal model robust to slivers of adjacent dials that appear at the edges of tight two-stage detector crops.
+
 3. **Outer canvas (housing / bezel).** Always rendered. Annular fill + rim band, per v2's `OUTER_SCALE_RANGE = (1.25, 1.32)` machinery. Bezel ellipse = dial ellipse scaled by `outer_scale`.
 
 4. **Dial boundary.** Sample `t` densely over `[0, 2π]`, map via the canonical formula, draw the faint dial circle as polyline.
