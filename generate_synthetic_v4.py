@@ -840,7 +840,7 @@ def _arc_polyline(x0, y0, x1, y1, mid_x, mid_y, n_segments=TICK_ARC_SEGMENTS):
     return pts
 
 
-def draw_scale_ticks(img, params, protect_draw=None):
+def draw_scale_ticks(img, params, ink_color, protect_draw=None):
     """Render scale ticks at canonical angles t_i = phi_0 + i·36°.
 
     Positions are deterministic — no angular jitter, ever.  All length
@@ -941,15 +941,16 @@ def draw_scale_ticks(img, params, protect_draw=None):
             mid_y = (y0 + y1) / 2.0 + ty_dir * curl_signed
             polyline = _arc_polyline(x0, y0, x1, y1, mid_x, mid_y)
 
-            # Per-tick gray offset (luminance jitter only — geometry stays rigid).
+            # Per-tick color.  In colored-mode (TICK_COLORED_PROB) keep
+            # the v3 per-tick gray offset around the saturated hue;
+            # otherwise use the per-image ink_color verbatim (no jitter
+            # — auto-color is already a single deterministic choice).
             if colored_mode:
                 offset = random.randint(*TICK_GREY_PER_TICK_JITTER)
                 color_rgb = tuple(
                     max(0, min(255, int(c) + offset)) for c in tick_base_rgb)
             else:
-                g = max(0, min(255,
-                               base_grey + random.randint(*TICK_GREY_PER_TICK_JITTER)))
-                color_rgb = (g, g, g)
+                color_rgb = ink_color
             color_rgba = color_rgb + (255,)
 
             tick_draw.line(polyline, fill=color_rgba, width=width,
