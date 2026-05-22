@@ -976,7 +976,7 @@ def draw_scale_ticks(img, params, ink_color, protect_draw=None):
 DIGIT_TICK_GAP = 0.02      # canonical r_norm safety margin between digit bbox and tick
 
 
-def draw_scale_digits(img, params, tick_inner_rc, protect_draw=None):
+def draw_scale_digits(img, params, tick_inner_rc, ink_color, protect_draw=None):
     """Render digits 0..9 at canonical t_i = phi_0 + i·36°.
 
     Position encoding
@@ -1029,8 +1029,7 @@ def draw_scale_digits(img, params, tick_inner_rc, protect_draw=None):
     font_size = random.randint(*DIGIT_FONT_SIZE_RANGE)
     font_name = random.choice(DIGIT_FONTS)
     font = _load_font(font_name, font_size)
-    grey = random.randint(*DIGIT_GREY_RANGE)
-    color = (grey, grey, grey)
+    color = ink_color
 
     # Pre-render each digit and measure its actual ink bbox.  We use the
     # ink bbox (not font.getbbox) for two reasons:
