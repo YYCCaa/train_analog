@@ -246,26 +246,33 @@ INTRUSION_PROB = 0.3                   # probability of rendering an intruder di
 INTRUSION_DEPTH_RANGE = (0.10, 0.50)   # fraction of intruder's outer bezel inside the canvas
 
 
-def pick_local_ink_color(bg_img, x, y, half_size, threshold=128.0):
+def pick_local_ink_color(bg_img, x, y, half_w, half_h=None, threshold=128.0):
     """Pick black or white ink for a feature centred at `(x, y)`.
 
-    Same Rec. 601 mean-luminance + threshold algorithm as `pick_ink_color`,
-    but parameterized by an arbitrary centre point and patch half-size
-    instead of the dial-area bbox.  Used to give each tick line and each
-    digit its own contrasting color, so individual features stay locally
-    legible even when the photo has high luminance variation across the
-    dial area.
+    Same Rec. 601 mean-luminance + threshold algorithm as the original
+    helper, but sized to each feature's actual footprint instead of a
+    uniform square window.  `half_w` and `half_h` are the half-extents
+    of the sampling rectangle along x and y respectively; when `half_h`
+    is `None`, the patch is square (`half_h = half_w`) — back-compat
+    for callers that only need an isotropic patch.
+
+    Used to give each tick and each digit its own contrasting color
+    matched to the photo region the feature will actually occupy.
+    Adaptive sizing prevents the patch from bleeding past the feature
+    into surrounding pixels that aren't visually relevant.
 
     Returns `(0, 0, 0)` when mean luminance >= threshold (bright patch →
     black ink), `(255, 255, 255)` otherwise.  Falls back to mean_lum
     = 128.0 → black ink when the patch is empty (centre fully outside
-    the image).
+    the image, or extents collapse to zero).
     """
+    if half_h is None:
+        half_h = half_w
     w, h = bg_img.size
-    xs = max(0, int(x - half_size))
-    ys = max(0, int(y - half_size))
-    xe = min(w, int(x + half_size))
-    ye = min(h, int(y + half_size))
+    xs = max(0, int(x - half_w))
+    ys = max(0, int(y - half_h))
+    xe = min(w, int(x + half_w))
+    ye = min(h, int(y + half_h))
     if xe <= xs or ye <= ys:
         mean_lum = 128.0
     else:
@@ -952,9 +959,21 @@ def draw_scale_ticks(img, params, protect_draw=None):
                 color_rgb = tuple(
                     max(0, min(255, int(c) + offset)) for c in tick_base_rgb)
             else:
-                mid_x = (x0 + x1) / 2.0
-                mid_y = (y0 + y1) / 2.0
-                color_rgb = pick_local_ink_color(img, mid_x, mid_y, half_size=8)
+                # Adaptive patch: bbox of the tick's image-space footprint
+                # (the two endpoints + the curl-midpoint), padded by half
+                # the line width.  Sampling matches the area the tick
+                # will actually cover instead of an arbitrary window.
+                pad = width / 2.0
+                xs = min(x0, x1, mid_x) - pad
+                ys = min(y0, y1, mid_y) - pad
+                xe = max(x0, x1, mid_x) + pad
+                ye = max(y0, y1, mid_y) + pad
+                center_x = (xs + xe) / 2.0
+                center_y = (ys + ye) / 2.0
+                color_rgb = pick_local_ink_color(
+                    img, center_x, center_y,
+                    half_w=(xe - xs) / 2.0,
+                    half_h=(ye - ys) / 2.0)
             color_rgba = color_rgb + (255,)
 
             tick_draw.line(polyline, fill=color_rgba, width=width,
@@ -1055,6 +1074,7 @@ def draw_scale_digits(img, params, tick_inner_rc, protect_draw=None):
     PROBE_C = PROBE / 2.0
     INK_THRESH = 64
     ink_offset = []
+    digit_dims = []
     max_half_diag_px = 0.0
     for i in range(N_MARKS):
         probe = Image.new("L", (PROBE, PROBE), 0)
@@ -1070,6 +1090,7 @@ def draw_scale_digits(img, params, tick_inner_rc, protect_draw=None):
             ink_offset.append((ink_cx - PROBE_C, ink_cy - PROBE_C))
             tw = ix_max - ix_min
             th = iy_max - iy_min
+            digit_dims.append((tw, th))
             half_diag = math.sqrt(tw * tw + th * th) / 2.0
             if half_diag > max_half_diag_px:
                 max_half_diag_px = half_diag
@@ -1081,6 +1102,7 @@ def draw_scale_digits(img, params, tick_inner_rc, protect_draw=None):
             bb = font.getbbox(str(i))
             tw = bb[2] - bb[0]
             th = bb[3] - bb[1]
+            digit_dims.append((tw, th))
             half_diag = math.sqrt(tw * tw + th * th) / 2.0
             if half_diag > max_half_diag_px:
                 max_half_diag_px = half_diag
@@ -1139,11 +1161,14 @@ def draw_scale_digits(img, params, tick_inner_rc, protect_draw=None):
         t_jitter = random.uniform(*DIGIT_ANGULAR_JITTER_RANGE)
         t = phi_0 + i * (2 * math.pi / N_MARKS) + t_jitter
         x, y = _canonical_to_image(t, r_c, cx, cy, a, b, theta)
-        # Each digit picks its own black/white ink from the photo patch
-        # around its anchor — same per-feature contrast adaptation as the
-        # ticks (see pick_local_ink_color).  Half-size 14 covers the
-        # digit footprint at DIGIT_FONT_SIZE_RANGE = (18, 24).
-        color = pick_local_ink_color(img, x, y, half_size=14)
+        # Each digit picks its own black/white ink from a patch sized
+        # to the digit's actual ink footprint (tw × th from the probe
+        # loop above) — adaptive sampling matches each glyph's drawn
+        # area instead of a fixed window that might bleed outside it.
+        tw_i, th_i = digit_dims[i]
+        color = pick_local_ink_color(img, x, y,
+                                     half_w=tw_i / 2.0 + 1.0,
+                                     half_h=th_i / 2.0 + 1.0)
         # `ink_offset[i]` is the displacement from anchor="mm" to the
         # visible ink center for this glyph.  Shifting the anchor by
         # `-ink_offset` makes the ink center land exactly at (x, y).
