@@ -1676,141 +1676,59 @@ def _render_intruder(img, intruder_params, dial_h, dial_s, outer_scale,
 
 def generate_image(path, img_size=IMG_SIZE, photo_paths=None,
                    bg_prefetcher=None):
-    """Generate one synthetic dial image. Returns dict of label fields.
+    """Generate one v4 synthetic dial image.  Returns dict of label fields.
 
-    Background source is driven by the module-level BG_SOURCE constant.
-    When BG_SOURCE == "photo", a real-photo background replaces the
-    procedural one and the bezel outpaint is disabled so the bezel-vs-
-    photo boundary stays crisp.
+    Renders ONLY scale ticks and digits on top of a Places365 photo
+    background.  No bezel, no dial face, no pointer, no distractor
+    text, no intruder dial, no rim shadows.  Per-image tick/digit ink
+    color is picked from the mean luminance of the photo patch under
+    the implicit dial ellipse (see pick_ink_color).
 
-    `bg_prefetcher` (optional) is a `_BGPrefetcher` instance whose
-    worker thread has been pre-loading photos ahead of this call.
-    When provided, this function pulls a decoded image off its queue
-    and applies augmentation on the main thread.  When None, falls
-    back to the synchronous `make_photo_background` path.
+    `bg_prefetcher` is the same `_BGPrefetcher` interface as v3 — when
+    provided, photo decoding has already happened on a worker thread.
     """
+    if BG_SOURCE != "photo":
+        raise ValueError(
+            f"v4 requires BG_SOURCE='photo'; got {BG_SOURCE!r}.  v4 has "
+            f"no procedural-background code path.")
+
     params = sample_params(img_size=img_size)
 
-    # Shared HSV dial palette for bezel/circle/rim, sampled FIRST so the
-    # procedural background (if used) can outpaint from the same palette.
-    dial_h = random.random()
-    dial_s = random.uniform(*DIAL_S_RANGE)
-    # outer_scale was sampled into params by sample_params (so the same
-    # value drives both bezel-fit clamping and rendering).
-    outer_scale = params["outer_scale"]
-
-    # 1. Background.  Procedural (palette-matched, soft silhouette) vs.
-    # photo (real image, crisp silhouette) — see draw_outer_canvas's
-    # `outpaint` arg, which we flip accordingly below.
-    if BG_SOURCE == "photo":
-        if bg_prefetcher is not None:
-            # Image was decoded by the worker thread; apply augmentation
-            # here (main thread) so flip + jitter stay in lockstep with
-            # the rest of the per-dial RNG draws.
-            img = _apply_photo_augmentation(bg_prefetcher.get())
-        else:
-            if photo_paths is None:
-                photo_paths = _load_bg_photo_paths(BG_PHOTO_DIR)
-            img = make_photo_background(img_size, photo_paths)
-        use_outpaint = False
-    elif BG_SOURCE == "procedural":
-        img = make_procedural_background(img_size, dial_h, dial_s)
-        use_outpaint = True
+    # 1. Photo background.
+    if bg_prefetcher is not None:
+        img = _apply_photo_augmentation(bg_prefetcher.get())
     else:
-        raise ValueError(
-            f"BG_SOURCE must be 'procedural' or 'photo', got {BG_SOURCE!r}")
+        if photo_paths is None:
+            photo_paths = _load_bg_photo_paths(BG_PHOTO_DIR)
+        img = make_photo_background(img_size, photo_paths)
 
-    # 2. Distractor text (outside bezel disc only).
-    img = draw_distractor_text(img, params, outer_scale)
+    # 2. Per-image ink color from the photo patch under the dial area.
+    #    Computed AFTER photo augmentation so the colour matches what the
+    #    model actually sees.
+    ink_color = pick_ink_color(img, params["cx"], params["cy"], params["a"])
 
-    # 3. Optional intruder dial whose centre is off-canvas.  Drawn before
-    # the target so only edge slivers remain after the target is composited.
-    # The intruder is rejection-sampled to keep its bezel bounding circle
-    # disjoint from the target's, so the two dials never touch.  If no
-    # valid placement is found (rare; only on extreme target placements),
-    # the intrusion is silently skipped for this image.
-    if random.random() < INTRUSION_PROB:
-        sample = _sample_intruder_params(img_size, target_params=params)
-        if sample is not None:
-            intr_params, intr_h, intr_s, intr_outer = sample
-            img = _render_intruder(img, intr_params, intr_h, intr_s,
-                                   intr_outer, outpaint=use_outpaint)
-
-    # 4. Outer canvas (bezel + rim) — also yields the inside_outer mask
-    # used by the hierarchical-noise pass below.
-    img, inside_outer = draw_outer_canvas(img, params, outer_scale,
-                                          dial_h, dial_s,
-                                          outpaint=use_outpaint)
-
-    # 5. Hierarchical noise inside the bezel (texture variation).
-    img = apply_hierarchical_noise(img, inside_outer)
-
-    # 6. Decide per-image whether to render shadows.  When enabled, both
-    # the rim crescent and the pointer cast shadow share `light_angle` so
-    # the bowl-cavity shadow and the pointer shadow point consistently.
-    has_shadow = random.random() < SHADOW_PROB
-    light_angle = random.uniform(0, 360)
-
-    # 7. Rim crescent shadow (recessed-bowl effect).
-    if has_shadow:
-        rim_layer, light_angle = draw_rim_shadows(params, img_size,
-                                                  _sample_shadow_rgb())
-        img = Image.alpha_composite(img.convert("RGBA"), rim_layer).convert("RGB")
-
-    # 8. Dial boundary with arc gap (canonical-t space).
-    gap_start_t = random.uniform(0, 2 * math.pi)
-    gap_span_t = math.radians(random.uniform(*ARC_GAP_RANGE))
-    img = draw_dial_boundary(img, params, dial_h, dial_s,
-                             gap_start_t=gap_start_t, gap_span_t=gap_span_t)
-
-    # 9. Scale ticks + digits.  Each tick line and glyph is mirrored into
-    # `protect_mask` so the triangle-artifact pass can avoid them.
-    # draw_scale_ticks returns the canonical inner endpoint of the main
-    # ticks so draw_scale_digits can compute a digit-safe r_c band that
-    # doesn't overlap any tick.
+    # 3. Scale ticks + digits.  Each tick line and glyph is mirrored
+    #    into `protect_mask` so the triangle-artifact pass can avoid them.
     protect_mask = Image.new("L", (img_size, img_size), 0)
     protect_draw = ImageDraw.Draw(protect_mask)
-    img, tick_inner_rc = draw_scale_ticks(img, params, protect_draw=protect_draw)
-    img = draw_scale_digits(img, params, tick_inner_rc,
+    img, tick_inner_rc = draw_scale_ticks(img, params, ink_color,
+                                          protect_draw=protect_draw)
+    img = draw_scale_digits(img, params, tick_inner_rc, ink_color,
                             protect_draw=protect_draw)
 
-    # 10. Pointer geometry, cast shadow, and pointer body.  The hole
-    # polygon is added to protect_mask BEFORE the pointer is drawn (the
-    # visible part of the hole is the thin darker ring just outside the
-    # hub — not covered by ptr_mask).  ptr_mask itself is merged in
-    # afterwards.
-    geom = _sample_pointer_geometry(params)
-    verts = _pointer_image_vertices(geom, params)
-    protect_draw.polygon(verts["hole_pts"], fill=255)
-    if has_shadow:
-        light_rad = math.radians(light_angle - 90)
-        shd_dist = random.uniform(*SHADOW_OFFSET_RANGE)
-        shd_dx = shd_dist * math.cos(light_rad)
-        shd_dy = shd_dist * math.sin(light_rad)
-        shd_opacity = random.randint(*SHADOW_OPACITY_RANGE)
-        shadow_layer = Image.new("RGBA", (img_size, img_size), (0, 0, 0, 0))
-        sdraw = ImageDraw.Draw(shadow_layer)
-        draw_pointer_shadow(sdraw, verts, shd_dx, shd_dy, shd_opacity,
-                            base_rgb=_sample_shadow_rgb())
-        shadow_layer = shadow_layer.filter(
-            ImageFilter.GaussianBlur(radius=SHADOW_BLUR_RADIUS))
-        img = Image.alpha_composite(img.convert("RGBA"), shadow_layer).convert("RGB")
-    img, ptr_mask = draw_pointer(img, geom, verts)
-    protect_mask.paste(255, (0, 0), ptr_mask)
-
-    # 11. Whole-image Gaussian blur (camera-defocus simulation).
+    # 4. Whole-image Gaussian blur (camera-defocus simulation).
     img = apply_global_blur(img)
 
-    # 12. Adversarial triangle artifacts — skip pixels in protect_mask.
+    # 5. Adversarial triangle artifacts — skip pixels in protect_mask.
     img = add_triangle_artifacts(img, protect_mask=protect_mask)
 
-    # 13. Colour/exposure jitter.
+    # 6. Colour / exposure jitter.
     img = ImageEnhance.Brightness(img).enhance(random.uniform(*BRIGHTNESS_RANGE))
     img = ImageEnhance.Contrast(img).enhance(random.uniform(*CONTRAST_RANGE))
     img = ImageEnhance.Color(img).enhance(random.uniform(*SATURATION_RANGE))
     img = ImageEnhance.Sharpness(img).enhance(random.uniform(*SHARPNESS_RANGE))
 
-    # 14. Save.
+    # 7. Save.
     img.save(path)
 
     # Derive marks from the same params we rendered.
