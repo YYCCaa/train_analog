@@ -53,3 +53,26 @@ def test_pick_ink_color_handles_degenerate_bbox():
     bg = _solid_bg((230, 230, 230))
     color = v4.pick_ink_color(bg, cx=-1000.0, cy=-1000.0, a=80.0)
     assert color == (0, 0, 0)
+
+
+def test_sample_params_geometry_matches_v3():
+    """v4's sample_params is verbatim from v3 by design.  This regression
+    test fails if anyone touches the geometric sampler in either copy."""
+    import generate_synthetic_v3 as v3
+    import generate_synthetic_v4 as v4_mod
+
+    SEED = 42
+    GEOMETRIC_KEYS = ["cx", "cy", "a", "b", "theta", "phi_0", "outer_scale"]
+
+    random.seed(SEED)
+    np.random.seed(SEED)
+    v3_params = v3.sample_params()
+
+    random.seed(SEED)
+    np.random.seed(SEED)
+    v4_params = v4_mod.sample_params()
+
+    for key in GEOMETRIC_KEYS:
+        assert v4_params[key] == pytest.approx(v3_params[key]), (
+            f"v4 sample_params drifted from v3 on key {key!r}: "
+            f"v3={v3_params[key]} v4={v4_params[key]}")
