@@ -246,6 +246,40 @@ INTRUSION_PROB = 0.3                   # probability of rendering an intruder di
 INTRUSION_DEPTH_RANGE = (0.10, 0.50)   # fraction of intruder's outer bezel inside the canvas
 
 
+def pick_ink_color(bg_img, cx, cy, a, threshold=128.0):
+    """Pick a per-image tick/digit ink color based on the photo BG patch.
+
+    Computes the mean luminance of the photo region inside the
+    bounding box `[cx - a, cy - a, cx + a, cy + a]` (clamped to image
+    bounds) using Rec. 601 weights (0.299/0.587/0.114).  If the patch
+    is empty (centre fully outside the image), falls back to a 128.0
+    mean luminance.  Returns pure black for mean >= threshold,
+    pure white otherwise.
+
+    Called once per image after photo augmentation; the returned
+    triple is then used for every tick line and every digit stroke
+    drawn on this image (except for the rare TICK_COLORED_PROB
+    branch, which keeps its own saturated-hue logic).
+    """
+    w, h = bg_img.size
+    xs = max(0, int(cx - a))
+    ys = max(0, int(cy - a))
+    xe = min(w, int(cx + a))
+    ye = min(h, int(cy + a))
+    if xe <= xs or ye <= ys:
+        mean_lum = 128.0
+    else:
+        patch = np.asarray(bg_img.crop((xs, ys, xe, ye)))
+        if patch.size == 0:
+            mean_lum = 128.0
+        else:
+            mean_lum = round(float(
+                (0.299 * patch[..., 0]
+                 + 0.587 * patch[..., 1]
+                 + 0.114 * patch[..., 2]).mean()), 6)
+    return (0, 0, 0) if mean_lum >= threshold else (255, 255, 255)
+
+
 def _hsv_rgb(h, s, v):
     """HSV (0-1) → (R, G, B) ints 0-255."""
     r, g, b = colorsys.hsv_to_rgb(h, s, v)
