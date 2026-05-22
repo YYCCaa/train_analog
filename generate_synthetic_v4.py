@@ -246,26 +246,26 @@ INTRUSION_PROB = 0.3                   # probability of rendering an intruder di
 INTRUSION_DEPTH_RANGE = (0.10, 0.50)   # fraction of intruder's outer bezel inside the canvas
 
 
-def pick_ink_color(bg_img, cx, cy, a, threshold=128.0):
-    """Pick a per-image tick/digit ink color based on the photo BG patch.
+def pick_local_ink_color(bg_img, x, y, half_size, threshold=128.0):
+    """Pick black or white ink for a feature centred at `(x, y)`.
 
-    Computes the mean luminance of the photo region inside the
-    bounding box `[cx - a, cy - a, cx + a, cy + a]` (clamped to image
-    bounds) using Rec. 601 weights (0.299/0.587/0.114).  If the patch
-    is empty (centre fully outside the image), falls back to a 128.0
-    mean luminance.  Returns pure black for mean >= threshold,
-    pure white otherwise.
+    Same Rec. 601 mean-luminance + threshold algorithm as `pick_ink_color`,
+    but parameterized by an arbitrary centre point and patch half-size
+    instead of the dial-area bbox.  Used to give each tick line and each
+    digit its own contrasting color, so individual features stay locally
+    legible even when the photo has high luminance variation across the
+    dial area.
 
-    Called once per image after photo augmentation; the returned
-    triple is then used for every tick line and every digit stroke
-    drawn on this image (except for the rare TICK_COLORED_PROB
-    branch, which keeps its own saturated-hue logic).
+    Returns `(0, 0, 0)` when mean luminance >= threshold (bright patch →
+    black ink), `(255, 255, 255)` otherwise.  Falls back to mean_lum
+    = 128.0 → black ink when the patch is empty (centre fully outside
+    the image).
     """
     w, h = bg_img.size
-    xs = max(0, int(cx - a))
-    ys = max(0, int(cy - a))
-    xe = min(w, int(cx + a))
-    ye = min(h, int(cy + a))
+    xs = max(0, int(x - half_size))
+    ys = max(0, int(y - half_size))
+    xe = min(w, int(x + half_size))
+    ye = min(h, int(y + half_size))
     if xe <= xs or ye <= ys:
         mean_lum = 128.0
     else:
@@ -840,7 +840,7 @@ def _arc_polyline(x0, y0, x1, y1, mid_x, mid_y, n_segments=TICK_ARC_SEGMENTS):
     return pts
 
 
-def draw_scale_ticks(img, params, ink_color, protect_draw=None):
+def draw_scale_ticks(img, params, protect_draw=None):
     """Render scale ticks at canonical angles t_i = phi_0 + i·36°.
 
     Positions are deterministic — no angular jitter, ever.  All length
@@ -942,15 +942,19 @@ def draw_scale_ticks(img, params, ink_color, protect_draw=None):
             polyline = _arc_polyline(x0, y0, x1, y1, mid_x, mid_y)
 
             # Per-tick color.  In colored-mode (TICK_COLORED_PROB) keep
-            # the v3 per-tick gray offset around the saturated hue;
-            # otherwise use the per-image ink_color verbatim (no jitter
-            # — auto-color is already a single deterministic choice).
+            # the v3 per-tick gray offset around the per-image saturated
+            # hue.  Otherwise each tick picks its own black/white ink
+            # from a small patch of the photo BG around its midpoint —
+            # ticks within one dial may end up mixed-color when the BG
+            # varies, but each tick stays locally legible.
             if colored_mode:
                 offset = random.randint(*TICK_GREY_PER_TICK_JITTER)
                 color_rgb = tuple(
                     max(0, min(255, int(c) + offset)) for c in tick_base_rgb)
             else:
-                color_rgb = ink_color
+                mid_x = (x0 + x1) / 2.0
+                mid_y = (y0 + y1) / 2.0
+                color_rgb = pick_local_ink_color(img, mid_x, mid_y, half_size=8)
             color_rgba = color_rgb + (255,)
 
             tick_draw.line(polyline, fill=color_rgba, width=width,
@@ -976,7 +980,7 @@ def draw_scale_ticks(img, params, ink_color, protect_draw=None):
 DIGIT_TICK_GAP = 0.02      # canonical r_norm safety margin between digit bbox and tick
 
 
-def draw_scale_digits(img, params, tick_inner_rc, ink_color, protect_draw=None):
+def draw_scale_digits(img, params, tick_inner_rc, protect_draw=None):
     """Render digits 0..9 at canonical t_i = phi_0 + i·36°.
 
     Position encoding
@@ -1029,7 +1033,6 @@ def draw_scale_digits(img, params, tick_inner_rc, ink_color, protect_draw=None):
     font_size = random.randint(*DIGIT_FONT_SIZE_RANGE)
     font_name = random.choice(DIGIT_FONTS)
     font = _load_font(font_name, font_size)
-    color = ink_color
 
     # Pre-render each digit and measure its actual ink bbox.  We use the
     # ink bbox (not font.getbbox) for two reasons:
@@ -1136,6 +1139,11 @@ def draw_scale_digits(img, params, tick_inner_rc, ink_color, protect_draw=None):
         t_jitter = random.uniform(*DIGIT_ANGULAR_JITTER_RANGE)
         t = phi_0 + i * (2 * math.pi / N_MARKS) + t_jitter
         x, y = _canonical_to_image(t, r_c, cx, cy, a, b, theta)
+        # Each digit picks its own black/white ink from the photo patch
+        # around its anchor — same per-feature contrast adaptation as the
+        # ticks (see pick_local_ink_color).  Half-size 14 covers the
+        # digit footprint at DIGIT_FONT_SIZE_RANGE = (18, 24).
+        color = pick_local_ink_color(img, x, y, half_size=14)
         # `ink_offset[i]` is the displacement from anchor="mm" to the
         # visible ink center for this glyph.  Shifting the anchor by
         # `-ink_offset` makes the ink center land exactly at (x, y).
@@ -1680,9 +1688,9 @@ def generate_image(path, img_size=IMG_SIZE, photo_paths=None,
 
     Renders ONLY scale ticks and digits on top of a Places365 photo
     background.  No bezel, no dial face, no pointer, no distractor
-    text, no intruder dial, no rim shadows.  Per-image tick/digit ink
-    color is picked from the mean luminance of the photo patch under
-    the implicit dial ellipse (see pick_ink_color).
+    text, no intruder dial, no rim shadows.  Each tick and digit picks
+    its own black/white ink from a local photo patch around it (see
+    pick_local_ink_color).
 
     `bg_prefetcher` is the same `_BGPrefetcher` interface as v3 — when
     provided, photo decoding has already happened on a worker thread.
@@ -1702,33 +1710,32 @@ def generate_image(path, img_size=IMG_SIZE, photo_paths=None,
             photo_paths = _load_bg_photo_paths(BG_PHOTO_DIR)
         img = make_photo_background(img_size, photo_paths)
 
-    # 2. Per-image ink color from the photo patch under the dial area.
-    #    Computed AFTER photo augmentation so the colour matches what the
-    #    model actually sees.
-    ink_color = pick_ink_color(img, params["cx"], params["cy"], params["a"])
-
-    # 3. Scale ticks + digits.  Each tick line and glyph is mirrored
-    #    into `protect_mask` so the triangle-artifact pass can avoid them.
+    # 2. Scale ticks + digits.  Each tick line and glyph picks its own
+    #    black/white ink from the local photo patch around it (see
+    #    pick_local_ink_color), so features stay legible even when the
+    #    BG has high luminance variation across the dial area.  Each
+    #    tick/digit is also mirrored into `protect_mask` so the
+    #    triangle-artifact pass can avoid them.
     protect_mask = Image.new("L", (img_size, img_size), 0)
     protect_draw = ImageDraw.Draw(protect_mask)
-    img, tick_inner_rc = draw_scale_ticks(img, params, ink_color,
+    img, tick_inner_rc = draw_scale_ticks(img, params,
                                           protect_draw=protect_draw)
-    img = draw_scale_digits(img, params, tick_inner_rc, ink_color,
+    img = draw_scale_digits(img, params, tick_inner_rc,
                             protect_draw=protect_draw)
 
-    # 4. Whole-image Gaussian blur (camera-defocus simulation).
+    # 3. Whole-image Gaussian blur (camera-defocus simulation).
     img = apply_global_blur(img)
 
-    # 5. Adversarial triangle artifacts — skip pixels in protect_mask.
+    # 4. Adversarial triangle artifacts — skip pixels in protect_mask.
     img = add_triangle_artifacts(img, protect_mask=protect_mask)
 
-    # 6. Colour / exposure jitter.
+    # 5. Colour / exposure jitter.
     img = ImageEnhance.Brightness(img).enhance(random.uniform(*BRIGHTNESS_RANGE))
     img = ImageEnhance.Contrast(img).enhance(random.uniform(*CONTRAST_RANGE))
     img = ImageEnhance.Color(img).enhance(random.uniform(*SATURATION_RANGE))
     img = ImageEnhance.Sharpness(img).enhance(random.uniform(*SHARPNESS_RANGE))
 
-    # 7. Save.
+    # 6. Save.
     img.save(path)
 
     # Derive marks from the same params we rendered.
