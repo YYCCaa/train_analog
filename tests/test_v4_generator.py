@@ -1,90 +1,70 @@
 """Tests for generate_synthetic_v4.
 
 Covers:
-  - pick_local_ink_color picks black on bright BG, white on dark BG
-  - pick_local_ink_color falls back to a default for an empty patch
+  - pick_viable_ink_color picks dark on bright BG, bright on dark BG
+  - pick_viable_ink_color avoids dominant hues
   - sample_params matches v3 byte-for-byte under the same seed
 """
 
+import math
 import random
 
 import numpy as np
 import pytest
-from PIL import Image
 
 import generate_synthetic_v4 as v4
 
 
-def _solid_bg(rgb, size=256):
-    return Image.new("RGB", (size, size), rgb)
+def test_pick_viable_ink_color_returns_dark_on_uniformly_bright_bg():
+    """When every BG pixel is bright, viable inks must be dark."""
+    bg = np.full((200, 3), 230, dtype=np.uint8)
+    for _ in range(20):
+        color = v4.pick_viable_ink_color(bg)
+        lum = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
+        assert lum < 200, f"got bright ink {color} (lum={lum}) on bright BG"
 
 
-def test_pick_local_ink_color_picks_black_on_bright_bg():
-    bg = _solid_bg((230, 230, 230))
-    color = v4.pick_local_ink_color(bg, x=128.0, y=128.0, half_w=8)
-    assert color == (0, 0, 0)
+def test_pick_viable_ink_color_returns_bright_on_uniformly_dark_bg():
+    """When every BG pixel is dark, viable inks must be far from dark in
+    RGB Euclidean distance — bright or colorful candidates outcompete
+    dark ones because they're farther from (20,20,20)."""
+    bg = np.full((200, 3), 20, dtype=np.uint8)
+    for _ in range(20):
+        color = v4.pick_viable_ink_color(bg)
+        dist = math.sqrt((color[0]-20)**2 + (color[1]-20)**2 + (color[2]-20)**2)
+        assert dist > 100, f"got color {color} too close to dark BG (dist={dist:.1f})"
 
 
-def test_pick_local_ink_color_picks_white_on_dark_bg():
-    bg = _solid_bg((20, 20, 20))
-    color = v4.pick_local_ink_color(bg, x=128.0, y=128.0, half_w=8)
-    assert color == (255, 255, 255)
+def test_pick_viable_ink_color_avoids_extremes_on_bimodal_bg():
+    """Bimodal BG (black + white) → ink must avoid both pure black and
+    pure white (each is dist 0 from one of the BG pixel sets)."""
+    bg = np.array([[0, 0, 0]] * 100 + [[255, 255, 255]] * 100, dtype=np.uint8)
+    for _ in range(20):
+        color = v4.pick_viable_ink_color(bg)
+        assert color != (0, 0, 0)
+        assert color != (255, 255, 255)
 
 
-def test_pick_local_ink_color_picks_black_on_threshold():
-    # Mean luminance exactly 128 → black (>= threshold).
-    bg = _solid_bg((128, 128, 128))
-    color = v4.pick_local_ink_color(bg, x=128.0, y=128.0, half_w=8)
-    assert color == (0, 0, 0)
+def test_pick_viable_ink_color_avoids_dominant_hue():
+    """Uniformly yellow BG → ink should be far from yellow in RGB."""
+    bg = np.zeros((200, 3), dtype=np.uint8)
+    bg[:, 0] = 240
+    bg[:, 1] = 220
+    bg[:, 2] = 50
+    for _ in range(20):
+        color = v4.pick_viable_ink_color(bg)
+        dr = color[0] - 240
+        dg = color[1] - 220
+        db = color[2] - 50
+        dist = math.sqrt(dr * dr + dg * dg + db * db)
+        assert dist > 100, f"ink {color} too close to BG yellow (dist={dist:.1f})"
 
 
-def test_pick_local_ink_color_clamps_bbox_to_image():
-    # Centre right at the corner so half the bbox is outside the image.
-    bg = _solid_bg((230, 230, 230))
-    color = v4.pick_local_ink_color(bg, x=0.0, y=0.0, half_w=8)
-    assert color in [(0, 0, 0), (255, 255, 255)]
-
-
-def test_pick_local_ink_color_handles_degenerate_bbox():
-    # Centre fully outside the image → empty patch → fallback (mean=128 → black).
-    bg = _solid_bg((230, 230, 230))
-    color = v4.pick_local_ink_color(bg, x=-1000.0, y=-1000.0, half_w=8)
-    assert color == (0, 0, 0)
-
-
-def test_pick_local_ink_color_rectangular_patch():
-    """Rectangular patch (half_w != half_h) samples a different region
-    than a square one, so the chosen ink can differ accordingly."""
-    # Top half of the image is bright (230); bottom half is dark (20).
-    # Sample centred at (128, 128) — exactly the boundary.
-    bg = Image.new("RGB", (256, 256), (0, 0, 0))
-    for y in range(128):
-        for x in range(256):
-            bg.putpixel((x, y), (230, 230, 230))
-    for y in range(128, 256):
-        for x in range(256):
-            bg.putpixel((x, y), (20, 20, 20))
-
-    # Wide, short patch (16×4): samples ~equal bright and dark → mean ~125
-    # — just below threshold, picks white.  Tall, narrow patch (4×16):
-    # samples a vertical strip with the same 50/50 split → same result.
-    # Both rectangles cover the same vertical span, but the test is that
-    # the rectangular API works at all.  Choose values that make the
-    # square half_w=2 also yield white (mean ~125 over a tight 4×4 patch
-    # straddling the boundary).
-    square = v4.pick_local_ink_color(bg, x=128.0, y=128.0, half_w=2)
-    rect = v4.pick_local_ink_color(bg, x=128.0, y=128.0, half_w=8, half_h=2)
-    # Both straddle the boundary equally; both should pick white.
-    assert square in [(0, 0, 0), (255, 255, 255)]
-    assert rect in [(0, 0, 0), (255, 255, 255)]
-
-    # A pure-bright patch sampled fully above the boundary picks black.
-    above = v4.pick_local_ink_color(bg, x=128.0, y=60.0, half_w=8, half_h=4)
-    assert above == (0, 0, 0)
-
-    # A pure-dark patch sampled fully below the boundary picks white.
-    below = v4.pick_local_ink_color(bg, x=128.0, y=200.0, half_w=8, half_h=4)
-    assert below == (255, 255, 255)
+def test_pick_viable_ink_color_empty_falls_back():
+    """Empty union → returns mid-grey fallback."""
+    bg = np.zeros((0, 3), dtype=np.uint8)
+    color = v4.pick_viable_ink_color(bg)
+    assert color == (128, 128, 128)
 
 
 def test_sample_params_geometry_matches_v3():
