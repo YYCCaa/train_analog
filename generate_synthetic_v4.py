@@ -30,7 +30,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 from autocal_utils import IMG_SIZE, N_MARKS, DEG_PER_MARK, derive_marks_np
 
 OUTPUT_DIR = "sv4"
-NUM_IMAGES = 25000
+NUM_IMAGES = 250
 
 # ── Background source ────────────────────────────────────────────────────
 # 'procedural' (default) — palette-matched synthetic BG with soft bezel
@@ -239,7 +239,7 @@ HIER_NOISE_PIXEL_VARIANCE = 3
 
 # ── Dial-region Gaussian blur ────────────────────────────────────────────
 DIAL_BLUR_PROB = 1.0
-DIAL_BLUR_RADIUS_RANGE = (1.0, 2.0)
+DIAL_BLUR_RADIUS_RANGE = (1.0, 1.0)
 
 # ── Intrusion augmentation ───────────────────────────────────────────────
 INTRUSION_PROB = 0.3                   # probability of rendering an intruder dial
@@ -264,7 +264,7 @@ def _build_candidate_palette():
     return np.asarray(palette, dtype=np.float32)
 
 
-def pick_viable_ink_color(union_pixels, threshold=100.0):
+def pick_viable_ink_color(union_pixels, threshold=200.0):
     """Pick one ink color far from every pixel in the union of feature bboxes.
 
     union_pixels: (N, 3) uint8 array of RGB pixels at the positions ticks
