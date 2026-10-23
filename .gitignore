@@ -30,3 +30,8 @@ sv3/
 # OS
 Thumbs.db
 Desktop.ini
+
+# Studio / scratch
+studio/frontend/node_modules/
+studio/frontend/dist/
+tmp_smoke/
