@@ -59,8 +59,8 @@ digits:
 palette:
   bg_gray_range: [154, 179]  # [lo, hi] int; from HSV V 0.67-0.71, S 0-0.15: luma p1-p99
   circle_gray_range: [193, 222]  # [lo, hi] int; from HSV V 0.84-0.88, S 0-0.15: luma p1-p99
-  outer_gray_range: [177, 216]  # [lo, hi] int; from HSV V 0.76-0.86, S 0-0.15: luma p1-p99
-  rim_gray_range: [164, 191]  # [lo, hi] int; from HSV V 0.71-0.76, S 0-0.15: luma p1-p99
+  outer_gray_range: [183, 222]  # [lo, hi] int; luma p1-p99 of HSV V 0.76-0.86, S 0-0.15 ([177, 216]) raised +6 to match old bezel-ring mean (compare_v7_look)
+  rim_gray_range: [170, 197]  # [lo, hi] int; luma p1-p99 of HSV V 0.71-0.76, S 0-0.15 ([164, 191]) raised +6 to match old bezel-ring mean (compare_v7_look)
 
 pointer:
   gray_range: [0, 255]  # [lo, hi] int; user decision: uniform 0-255 (old: HSV all uniform, luma p1-p99 = 1-232)
