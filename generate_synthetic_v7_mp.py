@@ -154,8 +154,8 @@ def draw_ticks(td_value, td_alpha, cx, cy, dial_radius, tcfg, rng):
     tcfg                : cfg["ticks"]; rng: the "ticks" random.Random
     Returns the inner radius (float, px) of the longest major tick.
     """
-    vdraw = ImageDraw.Draw(td_value)
-    adraw = ImageDraw.Draw(td_alpha)
+    vdraw = ImageDraw.Draw(td_value)  # draws tick gray into the overlay value
+    adraw = ImageDraw.Draw(td_alpha)  # draws tick opacity into the overlay alpha
     tick_outer = dial_radius  # ticks run inward from the dial circle (px)
 
     # Shared jitter for all ticks (fixed-count draws first)
@@ -194,7 +194,7 @@ def draw_scale_digits(td_value, td_alpha, cx, cy, dial_radius, tick_inner_radius
     jitter is bidirectional.  dcfg = cfg["digits"]; rng = "digits" stream.
     """
     try:
-        font = ImageFont.truetype("arial.ttf", font_size)
+        font = ImageFont.truetype("arial.ttf", font_size)  # FreeTypeFont, digit glyphs
     except OSError:
         font = ImageFont.load_default()
 
@@ -209,16 +209,25 @@ def draw_scale_digits(td_value, td_alpha, cx, cy, dial_radius, tick_inner_radius
     dist_jitter = rng.uniform(*dcfg["dist_jitter_range"]) * rng.choice([-1, 1])  # float, px
     dist = base_dist + dist_jitter  # float, same for all digits
 
-    vdraw = ImageDraw.Draw(td_value)
-    adraw = ImageDraw.Draw(td_alpha)
+    # anti-aliased digit coverage 0-255, "L" (canvas, canvas).  Text goes to
+    # coverage only: the value stays a flat `grey` (straight, not
+    # premultiplied), as a text draw on a transparent colour layer stored it,
+    # so edges are not attenuated twice when composited.
+    cover = Image.new("L", td_alpha.size, 0)
+    cdraw = ImageDraw.Draw(cover)  # draws into the coverage mask
     for i in range(NUM_DIGITS):
         angle_rad = math.radians(i * DEG_PER_DIGIT + ang_jitter - 90)
         text = str(i)
         bbox = font.getbbox(text)
         tx = cx + dist * math.cos(angle_rad) - (bbox[2] - bbox[0]) / 2
         ty = cy + dist * math.sin(angle_rad) - (bbox[3] - bbox[1]) / 2
-        vdraw.text((tx, ty), text, fill=grey, font=font)
-        adraw.text((tx, ty), text, fill=255, font=font)
+        cdraw.text((tx, ty), text, fill=255, font=font)
+
+    m = np.asarray(cover, dtype=np.int32)  # (C, C) int32 coverage
+    a = np.asarray(td_alpha, dtype=np.int32)  # (C, C) int32 existing overlay alpha
+    td_value.paste(grey, mask=Image.fromarray(((m > 0) * 255).astype(np.uint8)))
+    # alpha "over": m + a * (255 - m) / 255, (C, C) uint8, written in place
+    td_alpha.paste(Image.fromarray((m + (a * (255 - m) + 127) // 255).astype(np.uint8)))
 
 
 # ── shadows ─────────────────────────────────────────────────────────────
@@ -232,8 +241,8 @@ def draw_shadow(s_value, s_alpha, apex, base_left, base_right,
     s_value / s_alpha : layer "L" images; the layer is blurred later, so
     the tip naturally loses its sharpness.  gray: pointer shadow level.
     """
-    vdraw = ImageDraw.Draw(s_value)
-    adraw = ImageDraw.Draw(s_alpha)
+    vdraw = ImageDraw.Draw(s_value)  # draws shadow gray into the layer value
+    adraw = ImageDraw.Draw(s_alpha)  # draws shadow opacity into the layer alpha
     tri = [(p[0] + offset_dx, p[1] + offset_dy) for p in (apex, base_left, base_right)]
     scx, scy = cx + offset_dx, cy + offset_dy
     hub_box = [scx - hub_radius, scy - hub_radius, scx + hub_radius, scy + hub_radius]
@@ -393,7 +402,7 @@ def render_image(cfg, image_seed):
     """
     rngs = section_rngs(image_seed)
     img_size = cfg["canvas"]["img_size"]  # output side (int, px)
-    G, O = cfg["geometry"], cfg["outer"]
+    G, O = cfg["geometry"], cfg["outer"]  # geometry / outer sections, dict[str, value]
 
     # --- angle ---
     angle_deg = rngs["angle"][0].randint(*cfg["dataset"]["angle_deg_range"])  # int
@@ -406,8 +415,8 @@ def render_image(cfg, image_seed):
     dial_radius = int(img_size // 3 * scale)  # int, px
     canvas_size = 2 * (dial_radius + G["canvas_margin"])  # int, even, px
     cx = cy = canvas_size // 2  # canvas centre (int, px)
-    disp_mag = grng.uniform(*G["displacement_range"])
-    disp_ang = grng.uniform(0, 2 * math.pi)
+    disp_mag = grng.uniform(*G["displacement_range"])  # float px, whole-dial shift length
+    disp_ang = grng.uniform(0, 2 * math.pi)  # float rad, whole-dial shift direction
     disp_x = int(round(disp_mag * math.cos(disp_ang)))  # int px, applied at padding
     disp_y = int(round(disp_mag * math.sin(disp_ang)))
     hub_radius = dial_radius * grng.uniform(*G["hub_ratio_range"])  # float, px
@@ -415,8 +424,8 @@ def render_image(cfg, image_seed):
     max_d = math.sqrt(max(hub_radius ** 2 - chord_half ** 2, 0))
     chord_dist = grng.uniform(0, max_d)  # float, px: chord behind the centre
     tip_dist = (dial_radius - 2) * (1 + grng.uniform(-G["tip_variation"], G["tip_variation"]))
-    ptr_disp_mag = grng.uniform(*G["ptr_displacement_range"])
-    ptr_disp_ang = grng.uniform(0, 2 * math.pi)
+    ptr_disp_mag = grng.uniform(*G["ptr_displacement_range"])  # float px, pointer shift length
+    ptr_disp_ang = grng.uniform(0, 2 * math.pi)  # float rad, pointer shift direction
     ptr_cx = cx + ptr_disp_mag * math.cos(ptr_disp_ang)  # float, pointer centre
     ptr_cy = cy + ptr_disp_mag * math.sin(ptr_disp_ang)
     hole_r = hub_radius * grng.uniform(*G["hole_ratio_range"])  # float, px
@@ -520,12 +529,16 @@ def render_image(cfg, image_seed):
         img.paste(bg_pre_ptr, mask=Image.fromarray(255 - np.array(ptr_mask)))
 
     # --- 8 horizontal / vertical stretch inside dial ---
+    # inverse affine (output -> input) coefficients, 6-tuple of float: stretch about (cx, cy)
     affine = (1.0 / stretch_h, 0, cx * (1 - 1.0 / stretch_h),
               0, 1.0 / stretch_v, cy * (1 - 1.0 / stretch_v))
-    size2 = (canvas_size, canvas_size)
+    size2 = (canvas_size, canvas_size)  # canvas (width, height) tuple of int
     img = img.transform(size2, Image.AFFINE, affine, resample=Image.BICUBIC)
-    td_value = td_value.transform(size2, Image.AFFINE, affine, resample=Image.BICUBIC)
-    td_alpha = td_alpha.transform(size2, Image.AFFINE, affine, resample=Image.BICUBIC)
+    # overlay stretched as one "LA" image: Pillow resamples LA premultiplied
+    # (La), so fringe pixels keep their own gray instead of fading toward 0
+    td_la = Image.merge("LA", (td_value, td_alpha)).transform(
+        size2, Image.AFFINE, affine, resample=Image.BICUBIC)  # "LA" (C, C)
+    td_value, td_alpha = td_la.split()  # two "L" images (C, C)
     apex = (cx + (apex[0] - cx) * stretch_h, cy + (apex[1] - cy) * stretch_v)
     dial_rx, dial_ry = dial_radius * stretch_h, dial_radius * stretch_v  # float px
 
@@ -544,7 +557,7 @@ def render_image(cfg, image_seed):
     outer_r2 = ((xs - cx) / max(outer_rx, 1)) ** 2 + ((ys - cy) / max(outer_ry, 1)) ** 2
     inside_outer = outer_r2 <= 1  # (C, C) bool
     arr[(inner_r2 > 1) & inside_outer] = outer_gray
-    r_norm = np.sqrt(inner_r2)
+    r_norm = np.sqrt(inner_r2)  # (C, C) float64, radius / dial ellipse radius
     rim_half = O["rim_width"] / min(max(dial_rx, 1), max(dial_ry, 1))
     arr[(r_norm > 1 - rim_half) & (r_norm < 1 + rim_half)] = rim_gray
 
@@ -555,8 +568,8 @@ def render_image(cfg, image_seed):
                        0, 255).astype(np.uint8)  # (nb, nb) uint8, offset by 128
     block_up = np.array(Image.fromarray(block_u8).resize(size2, Image.BICUBIC),
                         dtype=np.int16) - 128  # (C, C) int16
-    combined = block_up + hnp.integers(-pv, pv + 1, size2, dtype=np.int16)
-    ch = arr.astype(np.int16)
+    combined = block_up + hnp.integers(-pv, pv + 1, size2, dtype=np.int16)  # (C, C) int16 block + pixel noise
+    ch = arr.astype(np.int16)  # (C, C) int16 working copy of the canvas
     ch[inside_outer] += combined[inside_outer]
     arr = np.clip(ch, 0, 255).astype(np.uint8)
 
@@ -579,7 +592,7 @@ def render_image(cfg, image_seed):
         tcx = trng.randint(0, canvas_size - 1)
         tcy = trng.randint(0, canvas_size - 1)
         sz = trng.randint(*T["size_range"])  # int px
-        verts = []
+        verts = []  # list of 3 (x, y) float tuples, triangle vertices
         for _v in range(3):
             va = trng.uniform(0, 2 * math.pi)
             vr = trng.uniform(*T["vertex_dist_range"]) * sz
@@ -589,7 +602,7 @@ def render_image(cfg, image_seed):
         valid = (np.array(tri_mask) > 127) & inside_outer & ~ptr_blocked  # (C, C) bool
         if not valid.any():
             continue
-        noise = tnp.integers(-tv, tv + 1, size2, dtype=np.int16)
+        noise = tnp.integers(-tv, tv + 1, size2, dtype=np.int16)  # (C, C) int16 per-pixel fill noise
         arr[valid] = np.clip(tri_gray + noise, 0, 255).astype(np.uint8)[valid]
 
     arr[~inside_outer] = 0
