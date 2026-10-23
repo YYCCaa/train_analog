@@ -27,10 +27,15 @@ class JobRunner:
             self._cancel = cancel = threading.Event()
             self._state, self._done, self._total = "running", 0, int(num_images)
             self._output_dir, self._error = output_dir, None
-            self._thread = threading.Thread(
+            thread = threading.Thread(
                 target=self._run, daemon=True,
                 args=(cfg, output_dir, num_images, seed, workers, overwrite, cancel))
-            self._thread.start()
+            try:
+                thread.start()
+            except BaseException:
+                self._state = "idle"  # never leave a phantom running job
+                raise
+            self._thread = thread
 
     def _progress(self, done, total):
         """progress_cb: record done/total (ints) under the lock."""
