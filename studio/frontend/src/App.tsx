@@ -24,7 +24,11 @@ export default function App() {
   const [seeds, setSeeds] = useState<number[]>(INITIAL_SEEDS); // preview seeds (9 ints)
   const [tiles, setTiles] = useState<Tile[]>([]); // latest applied tiles
   const [overlay, setOverlay] = useState(false); // tip markers on/off
-  const [errors, setErrors] = useState<string[]>([]); // config / preview errors shown
+  // errors of the last preview request (list[str]); cleared by a successful preview
+  const [previewErrors, setPreviewErrors] = useState<string[]>([]);
+  // errors of the last YAML load / save / startup fetch (list[str]); a preview never
+  // clears these, only a later successful load or a control change does
+  const [fileErrors, setFileErrors] = useState<string[]>([]);
   const [sentSeq, setSentSeq] = useState(0); // newest preview request number (int)
   const [appliedSeq, setAppliedSeq] = useState(0); // number of the response shown (int)
   const [busy, setBusy] = useState(true); // debounce pending or latest request in flight
@@ -40,7 +44,7 @@ export default function App() {
         setSchema(s);
         setConfig(c);
       })
-      .catch((e) => setErrors(errorsOf(e)));
+      .catch((e) => setFileErrors(errorsOf(e)));
   }, []);
 
   // debounced preview; only the response of the newest request is applied
@@ -48,7 +52,7 @@ export default function App() {
     if (!config) return;
     pendingRef.current = true;
     setBusy(true);
-    const timer = setTimeout(() => {
+    const timer = setTimeout(() => { // debounce timer handle (number)
       pendingRef.current = false;
       const seq = ++seqRef.current; // this request's number (int)
       setSentSeq(seq);
@@ -57,11 +61,11 @@ export default function App() {
         .then((t) => {
           if (seq !== seqRef.current) return; // stale: a newer request was sent
           setTiles(t);
-          setErrors([]);
+          setPreviewErrors([]);
         })
         .catch((e) => {
           if (seq !== seqRef.current) return;
-          setErrors(errorsOf(e)); // keep the old tiles on screen
+          setPreviewErrors(errorsOf(e)); // keep the old tiles on screen
         })
         .finally(() => {
           if (seq !== seqRef.current) return;
@@ -72,29 +76,36 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [config, seeds]);
 
+  // set one leaf: (section str, key str, v Value) => void; also drops stale file errors
   const setParam = useCallback((section: string, key: string, v: Value) => {
+    setFileErrors([]);
     setConfig((c) => (c ? { ...c, [section]: { ...c[section], [key]: v } } : c));
   }, []);
 
+  // pick 9 new random preview seeds (ints in [0, 2^31)); () => void
   const reshuffle = () =>
     setSeeds(Array.from({ length: TILE_COUNT }, () => Math.floor(Math.random() * 2 ** 31)));
 
+  // read a YAML File, parse it server-side, adopt the config or show its errors;
+  // (file: File) => Promise<void>
   const loadYaml = async (file: File) => {
     try {
-      const cfg = await api.parseConfig(await file.text());
+      const cfg = await api.parseConfig(await file.text()); // parsed config (Config)
       setConfig(cfg);
-      setErrors([]);
+      setFileErrors([]);
     } catch (e) {
-      setErrors(errorsOf(e));
+      setFileErrors(errorsOf(e));
     }
   };
 
+  // dump the current config to YAML and download it as v7_config.yaml; () => Promise<void>
   const saveYaml = async () => {
     if (!config) return;
     try {
-      const text = await api.dumpConfig(config);
+      const text = await api.dumpConfig(config); // YAML text (str)
+      // object URL (str) of a Blob holding the YAML text
       const url = URL.createObjectURL(new Blob([text], { type: "application/x-yaml" }));
-      const a = document.createElement("a");
+      const a = document.createElement("a"); // temporary download link (HTMLAnchorElement)
       a.href = url;
       a.download = "v7_config.yaml";
       document.body.appendChild(a);
@@ -102,10 +113,11 @@ export default function App() {
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (e) {
-      setErrors(errorsOf(e));
+      setFileErrors(errorsOf(e));
     }
   };
 
+  const errors = [...fileErrors, ...previewErrors]; // everything shown in config-errors (list[str])
   const imgSize = (config?.canvas?.img_size as number) ?? 256; // tile side (px, int)
 
   return (
@@ -122,7 +134,7 @@ export default function App() {
             data-testid="load-yaml"
             className="hidden-file"
             onChange={(e) => {
-              const f = e.target.files?.[0];
+              const f = e.target.files?.[0]; // chosen YAML file (File | undefined)
               if (f) loadYaml(f);
               e.target.value = ""; // allow re-loading the same file
             }}

@@ -134,8 +134,27 @@ input.single::-webkit-slider-thumb { margin-top: -5px; }
   width: 100%;
   pointer-events: none;
 }
+.dual input[type="range"].on-top { z-index: 3; }
 .dual input[type="range"]::-webkit-slider-runnable-track { height: 22px; background: transparent; }
 .dual input[type="range"]::-webkit-slider-thumb { pointer-events: auto; margin-top: 4px; }
+
+/* Firefox: same thumbs; the input itself ignores the pointer, only thumbs catch it */
+input[type="range"]::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text);
+  border: 2px solid var(--accent);
+  cursor: pointer;
+}
+input[type="range"]:disabled::-moz-range-thumb { cursor: default; border-color: var(--muted); }
+input.single::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right, var(--accent) var(--b), var(--line) var(--b));
+}
+.dual input[type="range"]::-moz-range-track { height: 22px; background: transparent; }
+.dual input[type="range"]::-moz-range-thumb { pointer-events: auto; }
 
 /* ---- main column ---- */
 main { overflow-y: auto; padding: 14px 18px 30px; }

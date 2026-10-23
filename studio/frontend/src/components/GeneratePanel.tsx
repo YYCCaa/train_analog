@@ -22,21 +22,23 @@ export default function GeneratePanel({ config }: Props) {
     getJob().then(setJob).catch(() => undefined);
   }, []);
 
-  const running = job?.state === "running";
+  const running = job?.state === "running"; // a job is in progress (bool)
 
   // poll while running
   useEffect(() => {
     if (!running) return;
-    const id = setInterval(() => {
+    const id = setInterval(() => { // poll interval handle (number)
       getJob().then(setJob).catch(() => undefined);
     }, POLL_MS);
     return () => clearInterval(id);
   }, [running]);
 
+  // POST /api/generate with the typed settings; shows 400/409/422 errors; () => Promise<void>
   const start = async () => {
     if (!config) return;
     setMessage([]);
-    const n = parseInt(numImages, 10);
+    const n = parseInt(numImages, 10); // requested image count (int | NaN)
+    // worker count (int | NaN), or null when blank = generator default
     const w = workers.trim() === "" ? null : parseInt(workers, 10);
     try {
       await startGenerate({
@@ -53,6 +55,7 @@ export default function GeneratePanel({ config }: Props) {
     }
   };
 
+  // POST cancel; the running poll then picks up "cancelled"; () => Promise<void>
   const cancel = async () => {
     try {
       setJob(await cancelJob());
