@@ -129,3 +129,29 @@ def test_load_config_none_and_path(tmp_path):
     p = tmp_path / "c.yaml"
     p.write_text("shadows:\n  prob: 0.9\n", encoding="utf-8")
     assert vc.load_config(str(p))["shadows"]["prob"] == 0.9
+
+
+FLOAT_RANGES = [  # keys the old code draws with random.uniform
+    "geometry.displacement_range", "geometry.ptr_displacement_range",
+    "geometry.hole_disp_range", "geometry.arc_gap_range",
+    "ticks.angle_jitter_range", "digits.dist_jitter_range",
+    "digits.angle_jitter_range", "digits.gap_range",
+    "pointer.gradient_range", "shadows.offset_range",
+    "geometry.scale_range", "jitter.contrast_range",
+]
+INT_RANGES = [  # keys the old code draws with random.randint
+    "ticks.len_range", "ticks.per_digit_range", "cut_tip.radius_range",
+    "tri_artifacts.count_range", "dataset.angle_deg_range",
+    "shadows.opacity_range", "digits.font_size_range",
+]
+
+
+def test_range_types_match_draw_kind():
+    schema = _leaves(vc.load_schema())
+    cfg = _leaves(vc.default_config())
+    for name in FLOAT_RANGES:
+        assert schema[name]["type"] == "float_range", name
+        assert all(isinstance(x, float) for x in cfg[name]), name
+    for name in INT_RANGES:
+        assert schema[name]["type"] == "int_range", name
+        assert all(isinstance(x, int) for x in cfg[name]), name

@@ -16,14 +16,14 @@ geometry:
   hub_ratio_range: {type: float_range, min: 0.2, max: 0.6, step: 0.01, help: "Hub radius as a fraction of dial radius."}
   chord_ratio_range: {type: float_range, min: 0.5, max: 1.0, step: 0.01, help: "Pointer base chord length / hub diameter."}
   hole_ratio_range: {type: float_range, min: 0.5, max: 1.5, step: 0.01, help: "Mounting hole radius / hub radius."}
-  hole_disp_range: {type: int_range, min: -20, max: 20, step: 1, help: "Mounting hole offset from pointer centre (px)."}
+  hole_disp_range: {type: float_range, min: -20.0, max: 20.0, step: 0.5, help: "Mounting hole offset from pointer centre (px)."}
   tip_variation: {type: float, min: 0.0, max: 0.1, step: 0.005, help: "Fractional jitter of pointer tip distance."}
-  displacement_range: {type: int_range, min: -10, max: 10, step: 1, help: "Whole-dial displacement from canvas centre (px)."}
-  ptr_displacement_range: {type: int_range, min: -10, max: 10, step: 1, help: "Pointer + hole offset from dial centre (px)."}
+  displacement_range: {type: float_range, min: -10.0, max: 10.0, step: 0.5, help: "Whole-dial displacement from canvas centre (px)."}
+  ptr_displacement_range: {type: float_range, min: -10.0, max: 10.0, step: 0.5, help: "Pointer + hole offset from dial centre (px)."}
   stretch_h_range: {type: float_range, min: 0.8, max: 1.2, step: 0.01, help: "Horizontal stretch factor inside the dial."}
   stretch_v_range: {type: float_range, min: 0.8, max: 1.2, step: 0.01, help: "Vertical stretch factor inside the dial."}
   canvas_margin: {type: int, min: 10, max: 30, step: 1, help: "Px beyond the dial radius in the tight canvas."}
-  arc_gap_range: {type: int_range, min: 0, max: 350, step: 1, help: "Arc gap width on the dial circle and its shadow (degrees)."}
+  arc_gap_range: {type: float_range, min: 0.0, max: 350.0, step: 1, help: "Arc gap width on the dial circle and its shadow (degrees)."}
 
 outer:
   scale_range: {type: float_range, min: 1.05, max: 1.4, step: 0.01, help: "Outer boundary radius / dial radius."}
@@ -31,18 +31,18 @@ outer:
 
 ticks:
   per_digit_range: {type: int_range, min: 1, max: 10, step: 1, help: "Subdivision ticks between consecutive digits."}
-  angle_jitter_range: {type: int_range, min: -10, max: 10, step: 1, help: "Shared angular offset of all ticks (degrees)."}
+  angle_jitter_range: {type: float_range, min: -10.0, max: 10.0, step: 0.1, help: "Shared angular offset of all ticks (degrees)."}
   len_range: {type: int_range, min: 1, max: 20, step: 1, help: "Major tick length (px); minor ticks are half."}
   width_range: {type: int_range, min: 1, max: 8, step: 1, help: "Major tick width (px); minor = max(1, width-1)."}
   gray_range: {type: int_range, min: 0, max: 255, step: 1, help: "Tick gray level (0 = black)."}
 
 digits:
-  dist_jitter_range: {type: int_range, min: 0, max: 10, step: 1, help: "Bidirectional radial jitter of digits (px)."}
-  angle_jitter_range: {type: int_range, min: 0, max: 10, step: 1, help: "Shared angular jitter of digits (degrees)."}
+  dist_jitter_range: {type: float_range, min: 0.0, max: 10.0, step: 0.1, help: "Bidirectional radial jitter of digits (px)."}
+  angle_jitter_range: {type: float_range, min: 0.0, max: 10.0, step: 0.1, help: "Shared angular jitter of digits (degrees)."}
   font_size_range: {type: int_range, min: 8, max: 40, step: 1, help: "Digit font size (px)."}
   show_prob: {type: float, min: 0.0, max: 1.0, step: 0.05, help: "Probability that digits are drawn."}
   gray_range: {type: int_range, min: 0, max: 255, step: 1, help: "Digit gray level (0 = black)."}
-  gap_range: {type: int_range, min: 0, max: 10, step: 1, help: "Clearance between digits and ticks (px)."}
+  gap_range: {type: float_range, min: 0.0, max: 10.0, step: 0.1, help: "Clearance between digits and ticks (px)."}
   inside_prob: {type: float, min: 0.0, max: 1.0, step: 0.05, help: "Probability that digits sit inside the ticks."}
 
 palette:
@@ -54,10 +54,10 @@ palette:
 pointer:
   gray_range: {type: int_range, min: 0, max: 255, step: 1, help: "Pointer body gray level (uniform draw)."}
   darker_frac_range: {type: float_range, min: 0.0, max: 1.0, step: 0.01, help: "Hole/edge gray as a fraction of the pointer gray."}
-  gradient_range: {type: int_range, min: -100, max: 100, step: 1, help: "Lengthwise brightness shift from hub to tip."}
-  noise_range: {type: int, min: 0, max: 64, step: 1, help: "Per-pixel noise amplitude on the pointer body (+/-)."}
+  gradient_range: {type: float_range, min: -100.0, max: 100.0, step: 1, help: "Lengthwise brightness shift from hub to tip."}
+  noise_amplitude: {type: int, min: 0, max: 64, step: 1, help: "Per-pixel noise amplitude on the pointer body (+/-)."}
   edge_thickness_range: {type: int_range, min: 1, max: 8, step: 1, help: "Pointer edge band width (px)."}
-  edge_noise_range: {type: int, min: 0, max: 32, step: 1, help: "Per-pixel noise amplitude on the pointer edge (+/-)."}
+  edge_noise_amplitude: {type: int, min: 0, max: 32, step: 1, help: "Per-pixel noise amplitude on the pointer edge (+/-)."}
 
 background:
   lowfreq_size: {type: int, min: 2, max: 32, step: 1, help: "Low-frequency background tile resolution (NxN)."}
@@ -72,7 +72,7 @@ cut_tip:
 
 shadows:
   prob: {type: float, min: 0.0, max: 1.0, step: 0.05, help: "Probability of rendering pointer and rim shadows."}
-  offset_range: {type: int_range, min: 0, max: 40, step: 1, help: "Pointer shadow displacement (px)."}
+  offset_range: {type: float_range, min: 0.0, max: 40.0, step: 0.5, help: "Pointer shadow displacement (px)."}
   opacity_range: {type: int_range, min: 0, max: 255, step: 1, help: "Pointer shadow alpha (0-255)."}
   blur_radius: {type: float, min: 0.0, max: 10.0, step: 0.1, help: "Gaussian blur radius of the pointer shadow (px)."}
   gray_range: {type: int_range, min: 0, max: 255, step: 1, help: "Shadow gray level (dark = low)."}
