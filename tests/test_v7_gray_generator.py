@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 
 import numpy as np
+import pytest
 import yaml
 from PIL import Image
 
@@ -53,7 +54,7 @@ def test_cli_outputs(tmp_path):
     for row in rows:
         im = Image.open(out / row["filename"])
         assert im.mode == "L" and im.size == (256, 256)
-        assert 0 <= float(row["tip_x"]) <= 256 and 0 <= float(row["tip_y"]) <= 256
+        assert 0 <= float(row["tip_x"]) < 256 and 0 <= float(row["tip_y"]) < 256
     doc = read_run(out)
     run = doc["run"]
     assert v7_config.strip_run(doc) == v7_config.default_config()
@@ -129,3 +130,19 @@ def test_cancel_leaves_consistent_folder(tmp_path):
     assert pngs == {r["filename"] for r in read_labels(out)}
     assert len(pngs) >= 20
     assert read_run(out)["run"]["completed"] is False
+
+
+def test_worker_error_leaves_consistent_folder(tmp_path):
+    out = tmp_path / "o"
+
+    def cb(done, total):
+        if done >= 10:
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        generate_dataset(v7_config.default_config(), str(out), 200, workers=4,
+                         progress_cb=cb)
+    pngs = {p.name for p in out.glob("dial_*.png")}
+    assert pngs == {r["filename"] for r in read_labels(out)}
+    run = read_run(out)["run"]
+    assert run["completed"] is False and run["finished_at"] is not None
