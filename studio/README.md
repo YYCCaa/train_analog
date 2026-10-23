@@ -104,4 +104,6 @@ python -m pytest -q tests/test_studio_e2e.py   # real Chromium against run_studi
 ```
 
 The E2E test needs Playwright's Chromium (`python -m playwright install chromium`).
+The Firefox slider-drag test also needs `python -m playwright install firefox`
+and is skipped when Firefox is missing.
 It builds the frontend through the launcher if `dist/` is missing or stale.
