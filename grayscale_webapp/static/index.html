@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Grayscale</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23222'/%3E%3Cpath d='M16 2a14 14 0 0 1 0 28z' fill='%23ddd'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="page" data-testid="app" data-state="idle">
+    <header class="masthead">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <circle cx="16" cy="16" r="14" class="mark-dark"/>
+          <path d="M16 2a14 14 0 0 1 0 28z" class="mark-light"/>
+        </svg>
+        <h1>Grayscale</h1>
+      </div>
+      <p class="tagline">Turn any image into a clean grayscale version. Nothing is stored on the server.</p>
+    </header>
+
+    <main>
+      <section class="panel" aria-labelledby="upload-heading">
+        <h2 id="upload-heading" class="visually-hidden">Choose an image</h2>
+
+        <div class="dropzone" id="drop-zone" data-testid="drop-zone" role="button" tabindex="0"
+             aria-describedby="drop-hint">
+          <svg class="dropzone-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 16V4m0 0-4.5 4.5M12 4l4.5 4.5" />
+            <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
+          </svg>
+          <p class="dropzone-title">Drop an image here</p>
+          <span class="btn btn-primary" data-testid="choose-button">Choose image</span>
+          <p class="dropzone-hint" id="drop-hint">or paste with <kbd>Ctrl</kbd>+<kbd>V</kbd> &middot; PNG, JPEG, WebP, GIF, BMP, TIFF &middot; up to 20&nbsp;MB</p>
+          <input type="file" id="file-input" data-testid="file-input" accept="image/*" class="visually-hidden"
+                 tabindex="-1" aria-hidden="true">
+        </div>
+
+        <div class="options">
+          <div class="field">
+            <label for="method-select">Method</label>
+            <select id="method-select" data-testid="method-select" aria-describedby="method-description">
+              <option value="luma601">Luma (BT.601)</option>
+            </select>
+            <p class="field-help" id="method-description" data-testid="method-description"></p>
+          </div>
+          <div class="field">
+            <label for="format-select">Output format</label>
+            <select id="format-select" data-testid="format-select">
+              <option value="same">Same as input</option>
+              <option value="png">PNG</option>
+              <option value="jpeg">JPEG</option>
+              <option value="webp">WebP</option>
+            </select>
+            <p class="field-help">GIF, BMP and TIFF inputs are saved as PNG.</p>
+          </div>
+        </div>
+
+        <div class="error" id="error-box" data-testid="error-box" role="alert" hidden></div>
+      </section>
+
+      <section class="results" id="results" data-testid="results" aria-labelledby="results-heading" hidden>
+        <div class="results-head">
+          <h2 id="results-heading">Result</h2>
+          <p class="status" id="status" data-testid="status" role="status" aria-live="polite"></p>
+        </div>
+
+        <div class="previews">
+          <figure class="preview">
+            <div class="preview-frame">
+              <img id="original-img" data-testid="original-img" alt="Original image preview">
+            </div>
+            <figcaption>
+              <span class="preview-label">Original</span>
+              <span class="preview-meta" id="original-meta" data-testid="original-meta"></span>
+            </figcaption>
+          </figure>
+          <figure class="preview">
+            <div class="preview-frame" id="result-frame">
+              <img id="result-img" data-testid="result-img" alt="Grayscale result preview" hidden>
+              <div class="spinner" id="spinner" data-testid="loading" aria-hidden="true" hidden></div>
+            </div>
+            <figcaption>
+              <span class="preview-label">Grayscale</span>
+              <span class="preview-meta" id="result-meta" data-testid="result-meta"></span>
+            </figcaption>
+          </figure>
+        </div>
+
+        <div class="actions">
+          <a class="btn btn-primary btn-disabled" id="download-button" data-testid="download-button"
+             href="#" download aria-disabled="true">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0-4.5-4.5M12 16l4.5-4.5M5 20h14"/></svg>
+            Download
+          </a>
+          <button type="button" class="btn btn-secondary" id="reset-button" data-testid="reset-button">Convert another</button>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">Animated images are converted from their first frame. Transparency is kept for PNG and WebP.</footer>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
