@@ -54,10 +54,14 @@ of the hub, apex pointing outward.  Label = apex pixel coordinates.
 
 import argparse
 import csv
+import datetime
+import glob
 import math
 import multiprocessing as mp
 import os
 import random
+import sys
+import threading
 import zlib
 from dataclasses import dataclass
 
@@ -634,7 +638,7 @@ def render_image(cfg, image_seed):
                         angle_deg=angle_deg)
 
 
-# ── Multiprocessing worker plumbing (minimal; Task 3 rewrites the driver) ─
+# ── Multiprocessing worker plumbing + dataset driver ──────────────────────
 #
 # Each image index gets its own seed (_seed_for_index), so output is
 # bit-exact regardless of worker count.  Windows uses 'spawn': the cfg
@@ -663,6 +667,107 @@ def _worker_task(idx):
             "tip_x": round(res.tip_x, 2), "tip_y": round(res.tip_y, 2)}
 
 
+LABEL_FIELDS = ["filename", "angle_deg", "tip_x", "tip_y"]  # labels.csv columns (list[str])
+GENERATOR_NAME = "generate_synthetic_v7_mp.py"  # recorded in config.yaml run block (str)
+
+
+class OutputDirNotEmpty(RuntimeError):
+    """Output folder already holds dial_*.png / labels.csv / config.yaml and
+    overwrite was not requested."""
+
+
+def _dataset_files(output_dir):
+    """Files generate_dataset owns in output_dir -> list[str] of absolute paths
+    (dial_*.png, labels.csv, config.yaml); other files are never touched."""
+    found = glob.glob(os.path.join(output_dir, "dial_*.png"))
+    for name in ("labels.csv", "config.yaml"):
+        path = os.path.join(output_dir, name)
+        if os.path.exists(path):
+            found.append(path)
+    return found
+
+
+def _write_config(cfg, output_dir, run):
+    """Write config.yaml = cfg + run block (run: dict[str, int|str|bool])."""
+    with open(os.path.join(output_dir, "config.yaml"), "w", encoding="utf-8") as f:
+        f.write(v7_config.dump_config(cfg, run=run))
+
+
+def generate_dataset(cfg, output_dir, num_images, seed=0, workers=None, chunksize=4,
+                     overwrite=False, progress_cb=None, cancel_event=None):
+    """Render num_images dials into output_dir with PNGs, labels.csv, config.yaml.
+
+    cfg: validated config dict; progress_cb(done, total) is called after every
+    finished image; cancel_event (threading.Event) stops the run, keeping only
+    finished PNGs whose rows are in labels.csv.
+    Returns {"completed": bool, "done": int, "output_dir": str}.
+    Raises OutputDirNotEmpty if dataset files exist and overwrite is False.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    existing = _dataset_files(output_dir)
+    if existing:
+        if not overwrite:
+            raise OutputDirNotEmpty(
+                f"'{output_dir}' already contains dataset files "
+                f"({len(existing)} of dial_*.png/labels.csv/config.yaml); "
+                f"pass --overwrite to replace them")
+        for path in existing:
+            os.remove(path)
+
+    n_workers = max(1, min(workers or os.cpu_count() or 1, num_images))
+    run = {"num_images": num_images, "seed": seed, "workers": n_workers,
+           "chunksize": chunksize, "generator": GENERATOR_NAME,
+           "completed": False, "finished_at": None}
+    _write_config(cfg, output_dir, run)  # provisional, overwritten at the end
+
+    written = []  # label rows already in labels.csv, list[dict]
+    cancelled = False
+    with open(os.path.join(output_dir, "labels.csv"), "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=LABEL_FIELDS)
+        writer.writeheader()
+
+        def accept(label):
+            """Record one finished label row; True if a cancel was requested."""
+            writer.writerow(label)
+            written.append(label)
+            if progress_cb is not None:
+                progress_cb(len(written), num_images)
+            return cancel_event is not None and cancel_event.is_set()
+
+        indices = range(num_images)
+        if n_workers == 1:
+            _worker_init(output_dir, seed, cfg)
+            for idx in indices:
+                if accept(_worker_task(idx)):
+                    cancelled = True
+                    break
+        else:
+            pool = mp.Pool(processes=n_workers, initializer=_worker_init,
+                           initargs=(output_dir, seed, cfg))
+            try:
+                for label in pool.imap(_worker_task, indices, chunksize=chunksize):
+                    if accept(label):
+                        cancelled = True
+                        break
+            finally:
+                pool.terminate()
+                pool.join()
+        f.flush()
+
+    if len(written) < num_images:
+        cancelled = True
+    if cancelled:
+        # in-flight workers may have written later PNGs; keep only labelled ones
+        keep = {r["filename"] for r in written}
+        for path in glob.glob(os.path.join(output_dir, "dial_*.png")):
+            if os.path.basename(path) not in keep:
+                os.remove(path)
+    run["completed"] = not cancelled
+    run["finished_at"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    _write_config(cfg, output_dir, run)
+    return {"completed": not cancelled, "done": len(written), "output_dir": output_dir}
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate native-grayscale synthetic dial images "
@@ -670,7 +775,7 @@ def main():
     parser.add_argument("--config", default=None,
                         help="YAML config merged over configs/v7_default.yaml")
     parser.add_argument("--output-dir", default=OUTPUT_DIR,
-                        help=f"directory for PNGs and labels.csv (default: {OUTPUT_DIR})")
+                        help=f"directory for PNGs, labels.csv, config.yaml (default: {OUTPUT_DIR})")
     parser.add_argument("--num-images", type=int, default=NUM_IMAGES,
                         help=f"number of images (default: {NUM_IMAGES})")
     parser.add_argument("--seed", type=int, default=0, help="base RNG seed (default: 0)")
@@ -678,28 +783,27 @@ def main():
                         help="worker processes (default: os.cpu_count())")
     parser.add_argument("--chunksize", type=int, default=4,
                         help="Pool.imap chunksize (default: 4)")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="delete existing dial_*.png, labels.csv, config.yaml first")
     args = parser.parse_args()
     if args.num_images <= 0:
         parser.error("--num-images must be a positive integer")
 
-    cfg = v7_config.load_config(args.config)
-    os.makedirs(args.output_dir, exist_ok=True)
-    csv_path = os.path.join(args.output_dir, "labels.csv")
-    n_workers = max(1, min(args.workers, args.num_images))
-    indices = list(range(args.num_images))
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["filename", "angle_deg", "tip_x", "tip_y"])
-        writer.writeheader()
-        if n_workers == 1:
-            _worker_init(args.output_dir, args.seed, cfg)
-            for idx in indices:
-                writer.writerow(_worker_task(idx))
-        else:
-            with mp.Pool(processes=n_workers, initializer=_worker_init,
-                         initargs=(args.output_dir, args.seed, cfg)) as pool:
-                for label in pool.imap(_worker_task, indices, chunksize=args.chunksize):
-                    writer.writerow(label)
-    print(f"Generated {args.num_images} images in '{args.output_dir}/'")
+    try:
+        cfg = v7_config.load_config(args.config)
+    except v7_config.ConfigError as e:
+        print("Invalid config:", file=sys.stderr)
+        for err in e.errors:
+            print(f"  {err}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        res = generate_dataset(cfg, args.output_dir, args.num_images, seed=args.seed,
+                               workers=args.workers, chunksize=args.chunksize,
+                               overwrite=args.overwrite)
+    except OutputDirNotEmpty as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Generated {res['done']} images in '{args.output_dir}/'")
 
 
 if __name__ == "__main__":
