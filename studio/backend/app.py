@@ -1,20 +1,20 @@
 """FastAPI backend for the v7 studio: schema/config endpoints, preview pool, job."""
-import base64
-import io
 import os
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from PIL import Image
 from pydantic import BaseModel
 
 import studio.backend  # noqa: F401  (puts repo root on sys.path)
 import v7_config
 import generate_synthetic_v7_mp as gen
 from studio.backend.jobs import JobRunner
+from studio.backend.preview_worker import render_tile
 
 
 class ConfigBody(BaseModel):
@@ -48,15 +48,9 @@ def _errors(errs, status=422):
     return JSONResponse({"errors": list(errs)}, status_code=status)
 
 
-def _render_tile(cfg, seed):
-    """Worker-side: render one preview -> dict(seed int, png_b64 str of an "L"
-    256x256 PNG, tip_x/tip_y/angle_deg float)."""
-    res = gen.render_image(cfg, seed)
-    buf = io.BytesIO()
-    Image.fromarray(res.image).save(buf, format="PNG")
-    return {"seed": seed, "png_b64": base64.b64encode(buf.getvalue()).decode("ascii"),
-            "tip_x": float(res.tip_x), "tip_y": float(res.tip_y),
-            "angle_deg": float(res.angle_deg)}
+def _new_pool():
+    """Fresh preview ProcessPoolExecutor, max_workers=min(8, cpu) (int)."""
+    return ProcessPoolExecutor(max_workers=min(8, os.cpu_count() or 1))
 
 
 def create_app(frontend_dist=None):
@@ -65,7 +59,7 @@ def create_app(frontend_dist=None):
     @asynccontextmanager
     async def lifespan(app):
         # preview pool, separate from the job's own multiprocessing.Pool
-        app.state.pool = ProcessPoolExecutor(max_workers=min(8, os.cpu_count() or 1))
+        app.state.pool = _new_pool()
         try:
             yield
         finally:
@@ -76,6 +70,13 @@ def create_app(frontend_dist=None):
     app = FastAPI(lifespan=lifespan)
     app.state.jobs = JobRunner()
     jobs = app.state.jobs  # the single JobRunner
+
+    @app.exception_handler(RequestValidationError)
+    async def _bad_body(request, exc):
+        """Malformed body -> 422 {"errors": ["<loc>: <msg>", ...]} (list[str])."""
+        errs = [".".join(str(p) for p in e["loc"] if p != "body") + ": " + e["msg"]
+                for e in exc.errors()]
+        return _errors(errs or ["request body: invalid"])
 
     @app.get("/api/schema")
     def schema():
@@ -108,8 +109,22 @@ def create_app(frontend_dist=None):
             v7_config.validate_config(body.config)
         except v7_config.ConfigError as e:
             return _errors(e.errors)
-        futs = [app.state.pool.submit(_render_tile, body.config, s) for s in body.seeds]
-        return {"tiles": [f.result() for f in futs]}
+        for attempt in (0, 1):
+            try:
+                futs = [app.state.pool.submit(render_tile, body.config, s)
+                        for s in body.seeds]
+                return {"tiles": [f.result() for f in futs]}
+            except BrokenProcessPool:
+                # a worker died: replace the pool and retry once
+                try:
+                    app.state.pool.shutdown(wait=False, cancel_futures=True)
+                except Exception:
+                    pass
+                app.state.pool = _new_pool()
+                if attempt == 1:
+                    return _errors(["preview render failed: BrokenProcessPool"], 500)
+            except Exception as e:
+                return _errors([f"preview render failed: {type(e).__name__}: {e}"], 500)
 
     @app.post("/api/generate", status_code=202)
     def generate(body: GenerateBody):

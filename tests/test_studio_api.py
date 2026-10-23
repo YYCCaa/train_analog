@@ -102,3 +102,75 @@ def test_generate_conflict_and_cancel(client, tmp_path):
     with open(os.path.join(out, "labels.csv"), newline="") as f:
         labels = {row["filename"] for row in csv.DictReader(f)}
     assert pngs == labels
+    import yaml
+    with open(os.path.join(out, "config.yaml"), encoding="utf-8") as f:
+        assert yaml.safe_load(f)["run"]["completed"] is False
+
+
+def _gen_body(out, n, **kw):
+    """Generate request body (dict) with default cfg; kw overrides fields."""
+    body = {"config": v7_config.default_config(), "output_dir": out,
+            "num_images": n, "seed": 0, "workers": 2, "overwrite": False}
+    body.update(kw)
+    return body
+
+
+def test_preview_recovers_from_broken_pool(client):
+    from concurrent.futures.process import BrokenProcessPool
+
+    class Dead:
+        """Pool stand-in whose submit raises like a dead ProcessPoolExecutor."""
+
+        def submit(self, *a, **k):
+            raise BrokenProcessPool("dead")
+
+        def shutdown(self, *a, **k):
+            pass
+
+    client.app.state.pool = Dead()
+    r = client.post("/api/preview", json={"config": v7_config.default_config(), "seeds": [4]})
+    assert r.status_code == 200 and len(r.json()["tiles"]) == 1
+
+
+def test_malformed_bodies_use_errors_contract(client):
+    r = client.post("/api/preview", json={"config": 5, "seeds": ["a"]})
+    assert r.status_code == 422 and r.json()["errors"]
+    r = client.post("/api/preview", content="{not json",
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 422 and r.json()["errors"]
+    r = client.post("/api/generate", json=_gen_body("/x", "many"))
+    assert r.status_code == 422 and r.json()["errors"]
+
+
+def test_overwrite_replaces_previous_run(client, tmp_path):
+    out = str(tmp_path / "o")
+    assert client.post("/api/generate", json=_gen_body(out, 6)).status_code == 202
+    _wait_state(client, {"done", "error", "cancelled"})
+    assert client.post("/api/generate", json=_gen_body(out, 3, overwrite=True)).status_code == 202
+    st = _wait_state(client, {"done", "error", "cancelled"})
+    assert st["state"] == "done"
+    assert len([f for f in os.listdir(out) if f.startswith("dial_")]) == 3
+
+
+def test_generate_bad_config_and_zero_images(client, tmp_path):
+    cfg = v7_config.default_config()
+    cfg["ticks"]["len_range"] = [9, 6]
+    r = client.post("/api/generate", json=_gen_body(str(tmp_path / "b"), 2, config=cfg))
+    assert r.status_code == 422 and any("ticks.len_range" in e for e in r.json()["errors"])
+    r = client.post("/api/generate", json=_gen_body(str(tmp_path / "b"), 0))
+    assert r.status_code == 422
+
+
+def test_preview_works_during_generation(client, tmp_path):
+    out = str(tmp_path / "p")
+    assert client.post("/api/generate", json=_gen_body(out, 300)).status_code == 202
+    r = client.post("/api/preview", json={"config": v7_config.default_config(), "seeds": [1]})
+    assert r.status_code == 200
+    client.post("/api/jobs/current/cancel")
+    _wait_state(client, {"done", "error", "cancelled"})
+
+
+def test_cancel_when_idle():
+    with TestClient(create_app()) as c:
+        r = c.post("/api/jobs/current/cancel")
+        assert r.status_code == 200 and r.json()["state"] == "idle"
