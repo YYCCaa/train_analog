@@ -6,6 +6,7 @@ base seed.  Usage: python tools/compare_v7_look.py [n] [seed]
 """
 
 import csv
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -47,6 +48,7 @@ def _image_stats(folder):
         rows = list(csv.DictReader(f))
     out = {k: [] for k in ("mean", "std", "dial", "bezel", "pointer", "contrast")}
     annulus = (DIST >= 0.55 * R) & (DIST <= 0.9 * R)  # (256, 256) bool
+    # bezel ring at FIXED R: mixes rim, outer and background pixels (not one palette entry)
     bezel = (DIST >= 1.05 * R) & (DIST <= 1.2 * R)  # (256, 256) bool
     for row in rows:
         im = np.asarray(Image.open(folder / row["filename"]), dtype=np.float64)  # (256,256)
@@ -81,11 +83,12 @@ def _summary(s):
     }
 
 
-def compare(n=500, seed=0, workdir="tmp_smoke/look"):
+def compare(n=500, seed=0, workdir="tmp_smoke/look", new_config=None):
     """Generate n images with old and new v7 and compare look statistics.
 
     Returns dict[metric, {"old", "new", "diff"}] (floats, diff = new - old) and
-    prints a table.  workdir is resolved against the repo root if relative.
+    prints a table.  new_config (str path or None) is passed as --config to the
+    new generator.  workdir is resolved against the repo root if relative.
     """
     wd = Path(workdir)
     if not wd.is_absolute():
@@ -95,12 +98,15 @@ def compare(n=500, seed=0, workdir="tmp_smoke/look"):
     src = subprocess.run(["git", "show", f"{OLD_COMMIT}:generate_synthetic_v7_mp.py"],
                          cwd=REPO_ROOT, timeout=60, capture_output=True, check=True).stdout
     old_py.write_bytes(src)
+    for sub in ("old", "new"):  # clear stale output of a reused workdir
+        shutil.rmtree(wd / sub, ignore_errors=True)
     workers = "4"
     _run([sys.executable, str(old_py), "--output-dir", str(wd / "old"),
           "--num-images", str(n), "--seed", str(seed), "--workers", workers], "old v7")
     _run([sys.executable, str(REPO_ROOT / "generate_synthetic_v7_mp.py"),
           "--output-dir", str(wd / "new"), "--num-images", str(n),
-          "--seed", str(seed), "--workers", workers, "--overwrite"], "new v7")
+          "--seed", str(seed), "--workers", workers, "--overwrite"]
+         + (["--config", str(new_config)] if new_config else []), "new v7")
     old, new = _summary(_image_stats(wd / "old")), _summary(_image_stats(wd / "new"))
     res = {k: {"old": old[k], "new": new[k], "diff": new[k] - old[k]} for k in old}
     print(f"{'metric':<20}{'old':>10}{'new':>10}{'diff':>10}")
