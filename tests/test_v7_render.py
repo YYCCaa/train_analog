@@ -63,7 +63,9 @@ def test_render_deterministic():
 def test_no_colour_code_in_v7():
     with open(SRC_PATH, "r", encoding="utf-8") as f:
         src = f.read()
-    for banned in ("colorsys", '"RGB"', '"RGBA"', "hsv"):
+    for banned in ("colorsys", "hsv"):  # any casing
+        assert banned not in src.lower(), f"found {banned!r} in generate_synthetic_v7_mp.py"
+    for banned in ('"RGB"', '"RGBA"'):  # quoted image-mode literals, exact case
         assert banned not in src, f"found {banned!r} in generate_synthetic_v7_mp.py"
 
 
@@ -95,6 +97,7 @@ def _overlay_footprint(cfg, seed):
 
 
 def test_tick_change_isolated():
+    # contrast pin is defensive here: jitter runs before the overlay composite
     base = _cfg(**{"jitter.contrast_range": [1.0, 1.0]})
     changed = _cfg(**{"jitter.contrast_range": [1.0, 1.0],
                       "ticks.len_range": [12, 14],
@@ -117,6 +120,27 @@ def test_tick_change_isolated():
     assert any_diff, "tick change had no visible effect"
 
 
+def test_light_overlay_has_no_dark_halo():
+    # white ticks/digits must only brighten pixels: a non-premultiplied
+    # stretch of the overlay would pull fringe values toward 0 (dark halo)
+    pins = {"ticks.gray_range": [255, 255], "digits.gray_range": [255, 255],
+            "background.dial_circle_blur": False,
+            "jitter.brightness_range": [1.0, 1.0],
+            "jitter.contrast_range": [1.0, 1.0],
+            "jitter.sharpness_range": [1.0, 1.0]}
+    shown = _cfg(**pins, **{"digits.show_prob": 1.0})
+    hidden = _cfg(**pins, **{"digits.show_prob": 0.0})  # same draws, no overlay
+    for seed in range(6):
+        a = g7.render_image(shown, seed).image.astype(np.int16)  # (256, 256)
+        b = g7.render_image(hidden, seed).image.astype(np.int16)  # (256, 256)
+        footprint = a != b  # (256, 256) bool, pixels the overlay touched
+        assert footprint.any(), f"seed {seed}: overlay invisible"
+        darker = footprint & (a < b - 1)  # overlay made a pixel darker
+        assert not darker.any(), (
+            f"seed {seed}: {int(darker.sum())} overlay pixels darkened, "
+            f"worst {int((b - a)[darker].max())} levels")
+
+
 def _dilate(mask, steps):
     """Binary 4-neighbour dilation of a (H, W) bool mask, `steps` times."""
     out = mask.copy()
@@ -131,6 +155,7 @@ def _dilate(mask, steps):
 
 
 def test_tri_change_isolated():
+    # contrast pin is defensive here: jitter runs before the triangles are drawn
     flat = {"jitter.contrast_range": [1.0, 1.0]}
     base = _cfg(**flat)
     off = _cfg(**flat, **{"tri_artifacts.enabled": False})
@@ -177,25 +202,35 @@ def test_pointer_gray_change_moves_only_pointer():
         assert not np.array_equal(a.image, b.image)
 
 
+# every probability / bool gate forced ON: (section, key, value) triples
+_GATES_ON = [("digits", "show_prob", 1.0), ("shadows", "prob", 1.0),
+             ("cut_tip", "enabled", True), ("background", "dial_circle_blur", True),
+             ("tri_artifacts", "enabled", True)]
+
+
 def _extreme_cfg(which):
-    """Every leaf at its schema min (which=0) or max (which=1)."""
+    """Every leaf at its schema min ("min"), max ("max"), or min with all gates on ("min_gates_on")."""
     schema = v7_config.load_schema()
     cfg = v7_config.default_config()
+    at_max = which == "max"
     for sec, keys in schema.items():
         for key, leaf in keys.items():
-            v = leaf["max"] if which else leaf["min"]
+            v = leaf["max"] if at_max else leaf["min"]
             t = leaf["type"]
             if t == "bool":
-                cfg[sec][key] = bool(which)
+                cfg[sec][key] = at_max
             elif t in ("int_range", "float_range"):
                 cfg[sec][key] = [v, v]
             else:
                 cfg[sec][key] = v
+    if which == "min_gates_on":
+        for sec, key, value in _GATES_ON:
+            cfg[sec][key] = value
     v7_config.validate_config(cfg, schema)
     return cfg
 
 
-@pytest.mark.parametrize("which", [0, 1], ids=["min", "max"])
+@pytest.mark.parametrize("which", ["min", "max", "min_gates_on"])
 def test_render_extremes_do_not_crash(which):
     cfg = _extreme_cfg(which)
     for seed in range(5):
