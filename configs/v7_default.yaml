@@ -17,95 +17,95 @@
 # recipe (commit 69b4769), converting to ITU-R 601 luma and taking [p1, p99].
 
 canvas:
-  img_size: 256                   # output side (px); read-only, training hard-codes 256
+  img_size: 256  # int scalar; output side (px); read-only, training hard-codes 256
 
 dataset:
-  angle_deg_range: [0, 359]       # pointer angle, integer degrees (0 = up, clockwise)
+  angle_deg_range: [0, 359]  # [lo, hi] int; pointer angle, integer degrees (0 = up, clockwise)
 
 geometry:
-  scale_range: [0.9, 1.1]         # dial radius multiplier on img_size//3
-  hub_ratio_range: [0.4, 0.45]    # hub radius / dial radius
-  chord_ratio_range: [0.99, 1.0]  # pointer base chord / hub diameter
-  hole_ratio_range: [1.05, 1.08]  # mounting hole radius / hub radius
-  hole_disp_range: [-8, 8]        # mounting hole offset from pointer centre (px)
-  tip_variation: 0.02             # fractional jitter of tip distance
-  displacement_range: [-3, 3]     # whole-dial displacement (px)
-  ptr_displacement_range: [-5, 5] # pointer+hole offset from dial centre (px)
-  stretch_h_range: [0.98, 1.02]   # horizontal stretch inside dial
-  stretch_v_range: [0.98, 1.02]   # vertical stretch inside dial
-  canvas_margin: 30               # px beyond dial radius in the tight canvas
-  arc_gap_range: [50, 120]        # arc gap width on dial circle / shadow (deg)
+  scale_range: [0.9, 1.1]  # [lo, hi] float; dial radius multiplier on img_size//3
+  hub_ratio_range: [0.4, 0.45]  # [lo, hi] float; hub radius / dial radius
+  chord_ratio_range: [0.99, 1.0]  # [lo, hi] float; pointer base chord / hub diameter
+  hole_ratio_range: [1.05, 1.08]  # [lo, hi] float; mounting hole radius / hub radius
+  hole_disp_range: [-8.0, 8.0]  # [lo, hi] float; mounting hole offset from pointer centre (px)
+  tip_variation: 0.02  # float scalar; fractional jitter of tip distance
+  displacement_range: [-3.0, 3.0]  # [lo, hi] float; whole-dial displacement (px)
+  ptr_displacement_range: [-5.0, 5.0]  # [lo, hi] float; pointer+hole offset from dial centre (px)
+  stretch_h_range: [0.98, 1.02]  # [lo, hi] float; horizontal stretch inside dial
+  stretch_v_range: [0.98, 1.02]  # [lo, hi] float; vertical stretch inside dial
+  canvas_margin: 30  # int scalar; px beyond dial radius in the tight canvas
+  arc_gap_range: [50.0, 120.0]  # [lo, hi] float; arc gap width on dial circle / shadow (deg)
 
 outer:
-  scale_range: [1.25, 1.32]       # outer boundary radius / dial radius
-  rim_width: 3                    # rim band thickness (px)
+  scale_range: [1.25, 1.32]  # [lo, hi] float; outer boundary radius / dial radius
+  rim_width: 3  # int scalar; rim band thickness (px)
 
 ticks:
-  per_digit_range: [1, 5]         # subdivision ticks between digits
-  angle_jitter_range: [-4, 4]     # shared angular offset of all ticks (deg)
-  len_range: [6, 9]               # major tick length (px); minor = half
-  width_range: [2, 4]             # major tick width (px); minor = max(1, w-1)
-  gray_range: [0, 30]             # tick gray level (already gray in old code)
+  per_digit_range: [1, 5]  # [lo, hi] int; subdivision ticks between digits
+  angle_jitter_range: [-4.0, 4.0]  # [lo, hi] float; shared angular offset of all ticks (deg)
+  len_range: [6, 9]  # [lo, hi] int; major tick length (px); minor = half
+  width_range: [2, 4]  # [lo, hi] int; major tick width (px); minor = max(1, w-1)
+  gray_range: [0, 30]  # [lo, hi] int; tick gray level (already gray in old code)
 
 digits:
-  dist_jitter_range: [0, 4]       # bidirectional radial jitter (px)
-  angle_jitter_range: [0, 2]      # shared angular jitter (deg)
-  font_size_range: [16, 26]       # digit font size (px)
-  show_prob: 0.5                  # probability digits are drawn
-  gray_range: [0, 30]             # digit gray level (already gray in old code)
-  gap_range: [0, 1]               # clearance between digits and ticks (px)
-  inside_prob: 0.5                # probability digits sit inside the ticks
+  dist_jitter_range: [0.0, 4.0]  # [lo, hi] float; bidirectional radial jitter (px)
+  angle_jitter_range: [0.0, 2.0]  # [lo, hi] float; shared angular jitter (deg)
+  font_size_range: [16, 26]  # [lo, hi] int; digit font size (px)
+  show_prob: 0.5  # float scalar; probability digits are drawn
+  gray_range: [0, 30]  # [lo, hi] int; digit gray level (already gray in old code)
+  gap_range: [0.0, 1.0]  # [lo, hi] float; clearance between digits and ticks (px)
+  inside_prob: 0.5  # float scalar; probability digits sit inside the ticks
 
 palette:
-  bg_gray_range: [154, 179]       # from HSV V 0.67-0.71, S 0-0.15: luma p1-p99
-  circle_gray_range: [193, 222]   # from HSV V 0.84-0.88, S 0-0.15: luma p1-p99
-  outer_gray_range: [177, 216]    # from HSV V 0.76-0.86, S 0-0.15: luma p1-p99
-  rim_gray_range: [164, 191]      # from HSV V 0.71-0.76, S 0-0.15: luma p1-p99
+  bg_gray_range: [154, 179]  # [lo, hi] int; from HSV V 0.67-0.71, S 0-0.15: luma p1-p99
+  circle_gray_range: [193, 222]  # [lo, hi] int; from HSV V 0.84-0.88, S 0-0.15: luma p1-p99
+  outer_gray_range: [177, 216]  # [lo, hi] int; from HSV V 0.76-0.86, S 0-0.15: luma p1-p99
+  rim_gray_range: [164, 191]  # [lo, hi] int; from HSV V 0.71-0.76, S 0-0.15: luma p1-p99
 
 pointer:
-  gray_range: [0, 255]            # user decision: uniform 0-255 (old: HSV all uniform, luma p1-p99 = 1-232)
-  darker_frac_range: [0.4, 0.6]        # hole/edge gray = fraction of pointer gray
-  gradient_range: [-25, 25]       # lengthwise brightness shift hub-to-tip
-  noise_range: 25                 # per-pixel noise amplitude on body (+/-)
-  edge_thickness_range: [1, 3]    # edge band width (px)
-  edge_noise_range: 5             # per-pixel noise amplitude on edge (+/-)
+  gray_range: [0, 255]  # [lo, hi] int; user decision: uniform 0-255 (old: HSV all uniform, luma p1-p99 = 1-232)
+  darker_frac_range: [0.4, 0.6]  # [lo, hi] float; hole/edge gray = fraction of pointer gray
+  gradient_range: [-25.0, 25.0]  # [lo, hi] float; lengthwise brightness shift hub-to-tip
+  noise_amplitude: 25  # int scalar; per-pixel noise amplitude on body (+/-)
+  edge_thickness_range: [1, 3]  # [lo, hi] int; edge band width (px)
+  edge_noise_amplitude: 5  # int scalar; per-pixel noise amplitude on edge (+/-)
 
 background:
-  lowfreq_size: 8                 # low-frequency gradient tile resolution (NxN)
-  variation: 8                    # max deviation of the low-freq tiles
-  noise_intensity: 3              # per-pixel noise amplitude (+/-)
-  dial_circle_blur: true          # blur inside the dial circle
-  dial_circle_blur_radius: 3      # that blur radius (px)
+  lowfreq_size: 8  # int scalar; low-frequency gradient tile resolution (NxN)
+  variation: 8  # int scalar; max deviation of the low-freq tiles
+  noise_intensity: 3  # int scalar; per-pixel noise amplitude (+/-)
+  dial_circle_blur: true  # bool; blur inside the dial circle
+  dial_circle_blur_radius: 3  # int scalar; that blur radius (px)
 
 cut_tip:
-  enabled: true                   # erase pointer pixels near the apex
-  radius_range: [7, 10]           # erased radius (px)
+  enabled: true  # bool; erase pointer pixels near the apex
+  radius_range: [7, 10]  # [lo, hi] int; erased radius (px)
 
 shadows:
-  prob: 0.5                       # probability of pointer + rim shadows
-  offset_range: [15, 25]          # pointer shadow displacement (px)
-  opacity_range: [160, 180]       # pointer shadow alpha (0-255)
-  blur_radius: 2.5                # pointer shadow Gaussian blur (px)
-  gray_range: [11, 60]            # from HSV V 0.05-0.25, S 0.05-0.2: luma p1-p99
-  rim_offset_frac: [0.15, 0.35]   # crescent offset / dial radius
-  rim_cutout_frac: [0.8, 0.95]    # crescent cutout radius / dial radius
-  rim_opacity_range: [200, 220]   # rim shadow alpha (0-255)
-  rim_blur_range: [4.0, 8.0]      # rim shadow blur radius (px)
+  prob: 0.5  # float scalar; probability of pointer + rim shadows
+  offset_range: [15.0, 25.0]  # [lo, hi] float; pointer shadow displacement (px)
+  opacity_range: [160, 180]  # [lo, hi] int; pointer shadow alpha (0-255)
+  blur_radius: 2.5  # float scalar; pointer shadow Gaussian blur (px)
+  gray_range: [11, 60]  # [lo, hi] int; from HSV V 0.05-0.25, S 0.05-0.2: luma p1-p99
+  rim_offset_frac: [0.15, 0.35]  # [lo, hi] float; crescent offset / dial radius
+  rim_cutout_frac: [0.8, 0.95]  # [lo, hi] float; crescent cutout radius / dial radius
+  rim_opacity_range: [200, 220]  # [lo, hi] int; rim shadow alpha (0-255)
+  rim_blur_range: [4.0, 8.0]  # [lo, hi] float; rim shadow blur radius (px)
 
 jitter:
-  brightness_range: [0.95, 1.35]  # ImageEnhance.Brightness factor
-  contrast_range: [0.8, 1.2]      # ImageEnhance.Contrast factor
-  sharpness_range: [0.7, 1.5]     # ImageEnhance.Sharpness factor
+  brightness_range: [0.95, 1.35]  # [lo, hi] float; ImageEnhance.Brightness factor
+  contrast_range: [0.8, 1.2]  # [lo, hi] float; ImageEnhance.Contrast factor
+  sharpness_range: [0.7, 1.5]  # [lo, hi] float; ImageEnhance.Sharpness factor
 
 hier_noise:
-  blocks: 5                       # coarse noise grid (NxN blocks)
-  block_variance: 15              # per-block amplitude (+/-)
-  pixel_variance: 3               # per-pixel amplitude (+/-)
+  blocks: 5  # int scalar; coarse noise grid (NxN blocks)
+  block_variance: 15  # int scalar; per-block amplitude (+/-)
+  pixel_variance: 3  # int scalar; per-pixel amplitude (+/-)
 
 tri_artifacts:
-  enabled: true                   # master toggle
-  count_range: [0, 6]             # triangles per image
-  size_range: [15, 40]            # triangle base length (px)
-  gray_range: [65, 184]           # from 3 channel means randint(50,200) -> luma p1-p99
-  pixel_var: 5                    # per-pixel noise around the mean (+/-)
-  vertex_dist_range: [0.3, 1.0]   # vertex distance / size
+  enabled: true  # bool; master toggle
+  count_range: [0, 6]  # [lo, hi] int; triangles per image
+  size_range: [15, 40]  # [lo, hi] int; triangle base length (px)
+  gray_range: [65, 184]  # [lo, hi] int; from 3 channel means randint(50,200) -> luma p1-p99
+  pixel_var: 5  # int scalar; per-pixel noise around the mean (+/-)
+  vertex_dist_range: [0.3, 1.0]  # [lo, hi] float; vertex distance / size
