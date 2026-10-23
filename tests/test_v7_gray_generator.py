@@ -1,99 +1,131 @@
-"""CLI-level tests for generate_synthetic_v7_mp.py (grayscale v2_mp port).
+"""CLI-level tests for generate_synthetic_v7_mp.py (native-gray, YAML-driven).
 
-Drives the generator exactly as a user would -- `python
-generate_synthetic_v7_mp.py --output-dir ... --num-images ...` -- and then
-inspects the files it wrote.
+Drives the generator as a user would (`python generate_synthetic_v7_mp.py ...`
+via subprocess) and inspects the files it wrote.  Only the cancel test calls
+generate_dataset directly (a cancel needs an in-process threading.Event).
 """
 
 import csv
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
-import pytest
+import yaml
 from PIL import Image
 
-# REPO_ROOT: repo root containing the generator scripts (pathlib.Path)
-REPO_ROOT = Path(__file__).resolve().parents[1]
-# V7_SCRIPT: the grayscale generator under test (pathlib.Path)
-V7_SCRIPT = REPO_ROOT / "generate_synthetic_v7_mp.py"
-# V2_CANDIDATES: places the (possibly untracked) RGB v2_mp generator may live,
-#                list[pathlib.Path], first existing one wins
-V2_CANDIDATES = [
-    REPO_ROOT / "generate_synthetic_v2_mp.py",
-    Path("C:/Users/Administrator/PycharmProjects/train_dial/generate_synthetic_v2_mp.py"),
-]
-NUM_IMAGES = 6   # images per run (int)
-SEED = 3         # base RNG seed passed via --seed (int)
-IMG_SIZE = 256   # expected output width/height in px (int)
+REPO_ROOT = Path(__file__).resolve().parents[1]  # repo root (pathlib.Path)
+sys.path.insert(0, str(REPO_ROOT))
+
+import v7_config  # noqa: E402
+from generate_synthetic_v7_mp import (  # noqa: E402
+    _seed_for_index, generate_dataset, render_image)
+
+SEED = 3  # base RNG seed passed via --seed (int)
 
 
-def _run(script, out_dir, workers):
-    """Run a generator CLI like a user would; assert it exits cleanly."""
-    cmd = [sys.executable, str(script),
-           "--output-dir", str(out_dir),
-           "--num-images", str(NUM_IMAGES),
-           "--workers", str(workers),
-           "--seed", str(SEED)]
-    proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True,
-                          text=True, timeout=300)
-    assert proc.returncode == 0, (
-        f"{script.name} failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+def run_cli(*args):
+    """Run the generator CLI -> subprocess.CompletedProcess (text output)."""
+    return subprocess.run(
+        [sys.executable, "generate_synthetic_v7_mp.py", *map(str, args)],
+        cwd=REPO_ROOT, timeout=300, capture_output=True, text=True)
 
 
-def _read_labels(out_dir):
-    """Return (header list[str], rows list[dict[str, str]]) of labels.csv."""
-    with open(out_dir / "labels.csv", newline="") as f:
-        reader = csv.DictReader(f)
-        return reader.fieldnames, list(reader)
+def read_labels(folder):
+    """labels.csv -> list[dict[str, str]], one dict per row."""
+    with open(Path(folder) / "labels.csv", newline="") as f:
+        return list(csv.DictReader(f))
 
 
-@pytest.fixture(scope="module")
-def v7_run(tmp_path_factory):
-    """v7 output from --workers 2; returns the output dir (pathlib.Path)."""
-    out = tmp_path_factory.mktemp("v7") / "out"
-    _run(V7_SCRIPT, out, workers=2)
-    return out
+def read_run(folder):
+    """config.yaml -> parsed dict (cfg sections plus 'run')."""
+    return yaml.safe_load((Path(folder) / "config.yaml").read_text(encoding="utf-8"))
 
 
-def test_outputs_are_grayscale_256_with_valid_labels(v7_run):
-    header, rows = _read_labels(v7_run)
-    assert header == ["filename", "angle_deg", "tip_x", "tip_y"]
-    assert len(rows) == NUM_IMAGES
+def test_cli_outputs(tmp_path):
+    out = tmp_path / "o"
+    r = run_cli("--output-dir", out, "--num-images", 6, "--workers", 2, "--seed", SEED)
+    assert r.returncode == 0, r.stderr
+    rows = read_labels(out)
+    assert len(rows) == 6
+    assert list(rows[0].keys()) == ["filename", "angle_deg", "tip_x", "tip_y"]
     for row in rows:
-        with Image.open(v7_run / row["filename"]) as im:
-            assert im.mode == "L"
-            assert im.size == (IMG_SIZE, IMG_SIZE)
-            arr = np.array(im)  # grayscale pixels, (256, 256) uint8
-            assert arr.shape == (IMG_SIZE, IMG_SIZE) and arr.dtype == np.uint8
-        assert 0 <= float(row["tip_x"]) < IMG_SIZE
-        assert 0 <= float(row["tip_y"]) < IMG_SIZE
-        assert 0 <= int(row["angle_deg"]) <= 359
+        im = Image.open(out / row["filename"])
+        assert im.mode == "L" and im.size == (256, 256)
+        assert 0 <= float(row["tip_x"]) <= 256 and 0 <= float(row["tip_y"]) <= 256
+    doc = read_run(out)
+    run = doc["run"]
+    assert v7_config.strip_run(doc) == v7_config.default_config()
+    assert run["completed"] is True and run["num_images"] == 6
 
 
-def test_deterministic_across_worker_counts(v7_run, tmp_path):
-    out1 = tmp_path / "out_w1"
-    _run(V7_SCRIPT, out1, workers=1)
-    assert (out1 / "labels.csv").read_bytes() == (v7_run / "labels.csv").read_bytes()
-    _, rows = _read_labels(v7_run)
-    for row in rows:
-        a = np.array(Image.open(v7_run / row["filename"]))
-        b = np.array(Image.open(out1 / row["filename"]))
-        assert np.array_equal(a, b), row["filename"]
+def test_workers_bit_exact(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    assert run_cli("--output-dir", a, "--num-images", 8, "--workers", 1, "--seed", SEED).returncode == 0
+    assert run_cli("--output-dir", b, "--num-images", 8, "--workers", 4, "--seed", SEED).returncode == 0
+    assert (a / "labels.csv").read_text() == (b / "labels.csv").read_text()
+    for i in range(8):
+        n = f"dial_{i:04d}.png"
+        assert np.array_equal(np.array(Image.open(a / n)), np.array(Image.open(b / n)))
 
 
-def test_pixel_parity_with_v2_mp_converted_to_L(v7_run, tmp_path):
-    v2_script = next((p for p in V2_CANDIDATES if p.exists()), None)
-    if v2_script is None:
-        pytest.skip("generate_synthetic_v2_mp.py not available")
-    out2 = tmp_path / "out_v2"
-    _run(v2_script, out2, workers=2)
-    assert (out2 / "labels.csv").read_bytes() == (v7_run / "labels.csv").read_bytes()
-    _, rows = _read_labels(v7_run)
-    for row in rows:
-        with Image.open(out2 / row["filename"]) as im2:
-            assert im2.mode == "RGB"
-            expected = np.array(im2.convert("L"))  # (256, 256) uint8
-        actual = np.array(Image.open(v7_run / row["filename"]))  # (256, 256) uint8
-        assert np.array_equal(expected, actual), row["filename"]
+def test_preview_equals_disk(tmp_path):
+    out = tmp_path / "o"
+    assert run_cli("--output-dir", out, "--num-images", 6, "--workers", 2, "--seed", SEED).returncode == 0
+    cfg = v7_config.default_config()
+    for idx in range(6):
+        want = render_image(cfg, _seed_for_index(SEED, idx)).image
+        got = np.array(Image.open(out / f"dial_{idx:04d}.png"))
+        assert np.array_equal(want, got)
+
+
+def test_cli_partial_config(tmp_path):
+    cfgp = tmp_path / "c.yaml"
+    cfgp.write_text("ticks:\n  len_range: [12, 14]\n")
+    out = tmp_path / "o"
+    r = run_cli("--config", cfgp, "--output-dir", out, "--num-images", 2, "--workers", 1)
+    assert r.returncode == 0, r.stderr
+    assert read_run(out)["ticks"]["len_range"] == [12, 14]
+
+
+def test_cli_bad_config(tmp_path):
+    cfgp = tmp_path / "c.yaml"
+    cfgp.write_text("ticks:\n  len_range: [9, 6]\n")
+    out = tmp_path / "o"
+    r = run_cli("--config", cfgp, "--output-dir", out, "--num-images", 2)
+    assert r.returncode == 2
+    assert "ticks.len_range" in r.stderr + r.stdout
+
+
+def test_overwrite_semantics(tmp_path):
+    out = tmp_path / "o"
+    out.mkdir()
+    (out / "dial_0099.png").write_bytes(b"x")
+    (out / "labels.csv").write_text("old")
+    (out / "notes.txt").write_text("keep")
+    r = run_cli("--output-dir", out, "--num-images", 2, "--workers", 1)
+    assert r.returncode != 0
+    assert "--overwrite" in r.stderr + r.stdout
+    assert (out / "dial_0099.png").exists()
+    r = run_cli("--output-dir", out, "--num-images", 2, "--workers", 1, "--overwrite")
+    assert r.returncode == 0, r.stderr
+    assert not (out / "dial_0099.png").exists()
+    assert (out / "notes.txt").read_text() == "keep"
+
+
+def test_cancel_leaves_consistent_folder(tmp_path):
+    out = tmp_path / "o"
+    ev = threading.Event()  # cancel flag set by the progress callback
+
+    def cb(done, total):
+        if done >= 20:
+            ev.set()
+
+    res = generate_dataset(v7_config.default_config(), str(out), 400, workers=4,
+                           cancel_event=ev, progress_cb=cb)
+    assert res["completed"] is False
+    pngs = {p.name for p in out.glob("dial_*.png")}
+    assert pngs == {r["filename"] for r in read_labels(out)}
+    assert len(pngs) >= 20
+    assert read_run(out)["run"]["completed"] is False
