@@ -721,50 +721,56 @@ def generate_dataset(cfg, output_dir, num_images, seed=0, workers=None, chunksiz
     _write_config(cfg, output_dir, run)  # provisional, overwritten at the end
 
     written = []  # label rows already in labels.csv, list[dict]
-    cancelled = False
-    with open(os.path.join(output_dir, "labels.csv"), "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=LABEL_FIELDS)
-        writer.writeheader()
+    cancelled = False  # True once a cancel was seen or the run ended early (bool)
+    pool = None  # mp.Pool when n_workers > 1, else None
+    try:
+        with open(os.path.join(output_dir, "labels.csv"), "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=LABEL_FIELDS)
+            writer.writeheader()
 
-        def accept(label):
-            """Record one finished label row; True if a cancel was requested."""
-            writer.writerow(label)
-            written.append(label)
-            if progress_cb is not None:
-                progress_cb(len(written), num_images)
-            return cancel_event is not None and cancel_event.is_set()
+            def accept(label):
+                """Record one finished label row; True if a cancel was requested."""
+                writer.writerow(label)
+                written.append(label)
+                if progress_cb is not None:
+                    progress_cb(len(written), num_images)
+                return cancel_event is not None and cancel_event.is_set()
 
-        indices = range(num_images)
-        if n_workers == 1:
-            _worker_init(output_dir, seed, cfg)
-            for idx in indices:
-                if accept(_worker_task(idx)):
-                    cancelled = True
-                    break
-        else:
-            pool = mp.Pool(processes=n_workers, initializer=_worker_init,
-                           initargs=(output_dir, seed, cfg))
-            try:
+            indices = range(num_images)
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True  # cancel set before start: render nothing
+            elif n_workers == 1:
+                _worker_init(output_dir, seed, cfg)
+                for idx in indices:
+                    if accept(_worker_task(idx)):
+                        cancelled = True
+                        break
+            else:
+                pool = mp.Pool(processes=n_workers, initializer=_worker_init,
+                               initargs=(output_dir, seed, cfg))
                 for label in pool.imap(_worker_task, indices, chunksize=chunksize):
                     if accept(label):
                         cancelled = True
                         break
-            finally:
-                pool.terminate()
-                pool.join()
-        f.flush()
-
-    if len(written) < num_images:
-        cancelled = True
-    if cancelled:
-        # in-flight workers may have written later PNGs; keep only labelled ones
-        keep = {r["filename"] for r in written}
-        for path in glob.glob(os.path.join(output_dir, "dial_*.png")):
-            if os.path.basename(path) not in keep:
-                os.remove(path)
-    run["completed"] = not cancelled
-    run["finished_at"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-    _write_config(cfg, output_dir, run)
+            f.flush()
+    except BaseException:
+        cancelled = True  # worker error, progress_cb error, Ctrl-C: finalize, re-raise
+        raise
+    finally:
+        if pool is not None:
+            pool.terminate()
+            pool.join()
+        if len(written) < num_images:
+            cancelled = True
+        if cancelled:
+            # in-flight workers may have written later PNGs; keep only labelled ones
+            keep = {r["filename"] for r in written}
+            for path in glob.glob(os.path.join(output_dir, "dial_*.png")):
+                if os.path.basename(path) not in keep:
+                    os.remove(path)
+        run["completed"] = not cancelled
+        run["finished_at"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+        _write_config(cfg, output_dir, run)
     return {"completed": not cancelled, "done": len(written), "output_dir": output_dir}
 
 
@@ -803,7 +809,10 @@ def main():
     except OutputDirNotEmpty as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
-    print(f"Generated {res['done']} images in '{args.output_dir}/'")
+    if res["completed"]:
+        print(f"Generated {res['done']} images in '{args.output_dir}/'")
+    else:
+        print(f"Cancelled after {res['done']} images in '{args.output_dir}/'")
 
 
 if __name__ == "__main__":
