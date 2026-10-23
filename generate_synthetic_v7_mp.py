@@ -693,6 +693,17 @@ def _write_config(cfg, output_dir, run):
         f.write(v7_config.dump_config(cfg, run=run))
 
 
+def check_output_dir(output_dir, overwrite):
+    """Raise OutputDirNotEmpty if output_dir (str; may not exist yet) holds dataset
+    files and overwrite (bool) is False. Deletes nothing."""
+    existing = _dataset_files(output_dir)
+    if existing and not overwrite:
+        raise OutputDirNotEmpty(
+            f"'{output_dir}' already contains dataset files "
+            f"({len(existing)} of dial_*.png/labels.csv/config.yaml); "
+            f"pass --overwrite to replace them")
+
+
 def generate_dataset(cfg, output_dir, num_images, seed=0, workers=None, chunksize=4,
                      overwrite=False, progress_cb=None, cancel_event=None):
     """Render num_images dials into output_dir with PNGs, labels.csv, config.yaml.
@@ -704,15 +715,9 @@ def generate_dataset(cfg, output_dir, num_images, seed=0, workers=None, chunksiz
     Raises OutputDirNotEmpty if dataset files exist and overwrite is False.
     """
     os.makedirs(output_dir, exist_ok=True)
-    existing = _dataset_files(output_dir)
-    if existing:
-        if not overwrite:
-            raise OutputDirNotEmpty(
-                f"'{output_dir}' already contains dataset files "
-                f"({len(existing)} of dial_*.png/labels.csv/config.yaml); "
-                f"pass --overwrite to replace them")
-        for path in existing:
-            os.remove(path)
+    check_output_dir(output_dir, overwrite)
+    for path in _dataset_files(output_dir):
+        os.remove(path)
 
     n_workers = max(1, min(workers or os.cpu_count() or 1, num_images))
     run = {"num_images": num_images, "seed": seed, "workers": n_workers,
