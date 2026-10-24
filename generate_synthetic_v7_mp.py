@@ -43,7 +43,8 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
   │ 13 black outside outer ring; erase overlay over pointer;         │
   │    composite overlay                                             │
   │ 14 Gaussian blur inside outer ring; black outside again          │
-  │ 15 edge-mean pad to img_size x img_size (+ displacement)         │
+  │ 15 edge-mean pad to img_size x img_size, always centred          │
+  │    (displacement moves steps 2-7 content inside the canvas)      │
   └──────────────────────────────────────────────────────────────────┘
            v
     RenderResult(image (256, 256) uint8, tip_x, tip_y, angle_deg)
@@ -457,10 +458,12 @@ def render_image(cfg, image_seed):
     dial_radius = int(img_size // 3 * scale)  # int, px
     canvas_size = 2 * (dial_radius + G["canvas_margin"])  # int, even, px
     cx = cy = canvas_size // 2  # canvas centre (int, px)
-    disp_mag = grng.uniform(*G["displacement_range"])  # float px, whole-dial shift length
-    disp_ang = grng.uniform(0, 2 * math.pi)  # float rad, whole-dial shift direction
-    disp_x = int(round(disp_mag * math.cos(disp_ang)))  # int px, applied at padding
-    disp_y = int(round(disp_mag * math.sin(disp_ang)))
+    # content displacement: scale/ticks/digits/pointer move by (disp_x, disp_y)
+    # inside the circle canvas, which itself stays centred in the image
+    disp_mag = grng.uniform(*G["displacement_range"])  # float px, content shift length
+    disp_ang = grng.uniform(0, 2 * math.pi)  # float rad, content shift direction
+    disp_x = disp_mag * math.cos(disp_ang)  # float px, post-stretch content offset x
+    disp_y = disp_mag * math.sin(disp_ang)  # float px, post-stretch content offset y
     hub_radius = dial_radius * grng.uniform(*G["hub_ratio_range"])  # float, px
     chord_half = grng.uniform(*G["chord_ratio_range"]) * hub_radius  # float, px
     max_d = math.sqrt(max(hub_radius ** 2 - chord_half ** 2, 0))
@@ -468,15 +471,19 @@ def render_image(cfg, image_seed):
     tip_dist = (dial_radius - 2) * (1 + grng.uniform(-G["tip_variation"], G["tip_variation"]))
     ptr_disp_mag = grng.uniform(*G["ptr_displacement_range"])  # float px, pointer shift length
     ptr_disp_ang = grng.uniform(0, 2 * math.pi)  # float rad, pointer shift direction
-    ptr_cx = cx + ptr_disp_mag * math.cos(ptr_disp_ang)  # float, pointer centre
-    ptr_cy = cy + ptr_disp_mag * math.sin(ptr_disp_ang)
     hole_r = hub_radius * grng.uniform(*G["hole_ratio_range"])  # float, px
     hd_mag = grng.uniform(*G["hole_disp_range"])
     hd_ang = grng.uniform(0, 2 * math.pi)
-    hole_cx = ptr_cx + hd_mag * math.cos(hd_ang)  # float, hole centre
-    hole_cy = ptr_cy + hd_mag * math.sin(hd_ang)
     stretch_h = grng.uniform(*G["stretch_h_range"])  # float
     stretch_v = grng.uniform(*G["stretch_v_range"])  # float
+    # content centre before stretch (float px); stretch about (cx, cy) maps it
+    # exactly onto (cx + disp_x, cy + disp_y)
+    ccx = cx + disp_x / stretch_h
+    ccy = cy + disp_y / stretch_v
+    ptr_cx = ccx + ptr_disp_mag * math.cos(ptr_disp_ang)  # float, pointer centre
+    ptr_cy = ccy + ptr_disp_mag * math.sin(ptr_disp_ang)
+    hole_cx = ptr_cx + hd_mag * math.cos(hd_ang)  # float, hole centre
+    hole_cy = ptr_cy + hd_mag * math.sin(hd_ang)
 
     # --- palette stream ---
     P, prng = cfg["palette"], rngs["palette"][0]
@@ -497,7 +504,7 @@ def render_image(cfg, image_seed):
     img = Image.fromarray(np.clip(bg_arr, 0, 255).astype(np.uint8))  # canvas, "L" (C, C)
 
     # --- 2 faint dial circle with arc gap ---
-    dial_box = [cx - dial_radius, cy - dial_radius, cx + dial_radius, cy + dial_radius]
+    dial_box = [ccx - dial_radius, ccy - dial_radius, ccx + dial_radius, ccy + dial_radius]
     _arc_or_circle(ImageDraw.Draw(img), dial_box, gap_start_deg, gap_span_deg, circle_gray, 1)
 
     # --- 3 ticks on a separate overlay (digits stream decides visibility) ---
@@ -507,7 +514,7 @@ def render_image(cfg, image_seed):
     td_value, td_alpha = _new_layer(canvas_size)  # overlay value/alpha, "L" (C, C)
     tick_inner_r = None
     if show_digits:
-        tick_inner_r = draw_ticks(td_value, td_alpha, cx, cy, dial_radius,
+        tick_inner_r = draw_ticks(td_value, td_alpha, ccx, ccy, dial_radius,
                                   cfg["ticks"], rngs["ticks"][0])
 
     # --- 4/5 shadows (shadows stream; all fixed-count draws up front) ---
@@ -545,7 +552,7 @@ def render_image(cfg, image_seed):
 
     # --- 6 digits on the overlay ---
     if show_digits:
-        draw_scale_digits(td_value, td_alpha, cx, cy, dial_radius, tick_inner_r,
+        draw_scale_digits(td_value, td_alpha, ccx, ccy, dial_radius, tick_inner_r,
                           D, drng, font_size)
 
     # --- 7 mounting hole + pointer (pointer stream) ---
@@ -670,9 +677,9 @@ def render_image(cfg, image_seed):
     arr[~inside_outer] = 0
     img = Image.fromarray(arr)
 
-    # --- 15 pad to img_size (edge-mean, centred + displacement) ---
-    pad_left = max(0, min((img_size - canvas_size) // 2 + disp_x, img_size - canvas_size))
-    pad_top = max(0, min((img_size - canvas_size) // 2 + disp_y, img_size - canvas_size))
+    # --- 15 pad to img_size (edge-mean, always centred; content already displaced) ---
+    pad_left = max(0, min((img_size - canvas_size) // 2, img_size - canvas_size))
+    pad_top = max(0, min((img_size - canvas_size) // 2, img_size - canvas_size))
     img = pad_to_target(img, img_size, pad_left, pad_top)
 
     return RenderResult(image=np.array(img, dtype=np.uint8),

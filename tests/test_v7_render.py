@@ -5,6 +5,7 @@ generator tests live in tests/test_v7_gray_generator.py.
 """
 
 import copy
+import math
 import os
 
 import numpy as np
@@ -280,11 +281,12 @@ def test_pick_pointer_gray():
 
 # sha256 hex (str) of default-config renders with digits hidden (so the
 # digit-jitter change cannot touch them), seeds 0-2, recorded BEFORE any code
-# change for min_bg_contrast
+# change for min_bg_contrast; re-pinned when displacement moved from the
+# canvas pad to the content inside the centred circle canvas (expected change)
 _PRE_CONTRAST_HASHES = {
-    0: "50fc055ffa21e675ec6793cfb32031d8c2da3df451fb46a815f7bed2c0909b5f",
-    1: "6b847f9fa7706ec9784108ee7cd2a7c7e1166936555b042730c25207fd2ca9a9",
-    2: "27dd2901219733872dea37d5e927f08bacda741ab5bf1e564ac8540bf5803c1b",
+    0: "6111b5736b6b650b43030ec99891fa7fa28f2b0e0014871acba6dc140f4ab9a6",
+    1: "051f2f4a7cd261b7b213fe7f2c027a0946841ee6b25e51237e4fcd89d91f2e4e",
+    2: "cd90825be489a07332ec987358d5a09caa3d3b933095e39250ba8cd5ed5c931d",
 }
 
 
@@ -363,3 +365,57 @@ def test_digit_jitter_direction():
         for seed in range(4):
             assert np.array_equal(g7.render_image(a, seed).image,
                                   g7.render_image(b, seed).image), (other, seed)
+
+
+# ── displacement moves the content inside a centred circle canvas ───────
+
+# "section.key" -> value pins (dict): fixed dial size (radius 85, outer
+# 110.5), no stretch, and every frame-overlapping extra (shadows, triangles,
+# digits, blur) off, so the outer annulus is a pure frame feature; exposure
+# jitter off so the pointer footprint stays local
+_DISP_PINS = {"geometry.scale_range": [1.0, 1.0], "outer.scale_range": [1.3, 1.3],
+              "geometry.stretch_h_range": [1.0, 1.0], "geometry.stretch_v_range": [1.0, 1.0],
+              "shadows.prob": 0.0, "tri_artifacts.enabled": False,
+              "digits.show_prob": 0.0, "background.dial_circle_blur": False,
+              "jitter.contrast_range": [1.0, 1.0], "jitter.brightness_range": [1.0, 1.0],
+              "jitter.sharpness_range": [1.0, 1.0]}
+
+
+def _disp_cfg(d):
+    """_DISP_PINS cfg with displacement_range pinned to [d, d] (d: float px)."""
+    return _cfg(**_DISP_PINS, **{"geometry.displacement_range": [d, d]})
+
+
+def _centroid(mask):
+    """(x, y) float centroid of a (H, W) bool mask."""
+    ys, xs = np.nonzero(mask)
+    return float(xs.mean()), float(ys.mean())
+
+
+def test_circle_canvas_centred_regardless_of_displacement():
+    for seed in range(4):
+        a = g7.render_image(_disp_cfg(0.0), seed)
+        b = g7.render_image(_disp_cfg(10.0), seed)
+        # circle canvas = every non-black pixel (outside the outer ring is 0
+        # and the edge-mean pad of a black edge is 0 too), (256, 256) bool
+        ca, cb = _centroid(a.image > 0), _centroid(b.image > 0)  # (x, y) float
+        assert abs(ca[0] - cb[0]) < 0.5 and abs(ca[1] - cb[1]) < 0.5, (seed, ca, cb)
+        assert abs(cb[0] - IMG / 2) < 1.5 and abs(cb[1] - IMG / 2) < 1.5, (seed, cb)
+        # the tip moved by the full (stretch-free) displacement length
+        d = math.hypot(b.tip_x - a.tip_x, b.tip_y - a.tip_y)  # float px
+        assert abs(d - 10.0) < 0.5, (seed, d)
+
+
+def test_displacement_moves_content_not_frame():
+    r = _radius_grid()  # (256, 256) float64
+    frame = (r > 95) & (r < 106)  # (256, 256) bool, outer-annulus band (frame only)
+    for seed in range(4):
+        cfg_a, cfg_b = _disp_cfg(0.0), _disp_cfg(10.0)
+        a, b = g7.render_image(cfg_a, seed), g7.render_image(cfg_b, seed)
+        assert np.array_equal(a.image[frame], b.image[frame]), f"seed {seed}: frame moved"
+        pa = _centroid(_pointer_footprint(cfg_a, seed))  # (x, y) float, pointer centroid
+        pb = _centroid(_pointer_footprint(cfg_b, seed))
+        dx, dy = b.tip_x - a.tip_x, b.tip_y - a.tip_y  # float px, displacement vector
+        assert math.hypot(dx, dy) > 9.5, (seed, dx, dy)
+        assert abs((pb[0] - pa[0]) - dx) < 0.75 and abs((pb[1] - pa[1]) - dy) < 0.75, \
+            (seed, pa, pb, dx, dy)
