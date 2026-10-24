@@ -544,3 +544,75 @@ def test_preview_count_survives_reshuffle(page):
     # growing after a reshuffle keeps the 5 and appends random (non-sequential) seeds
     _set_count(page, "7", 7)
     assert _tile_seeds(page)[:5] == after
+
+
+def _reset_btn(page, param):
+    """Reset button (Locator) of control param (str, 'section.key')."""
+    return page.get_by_test_id(f"reset-{param}")
+
+
+def _wait_applied_after(page, old):
+    """Wait until grid applied seq (int) exceeds old (int) and the preview settled."""
+    page.wait_for_function(
+        f"() => Number(document.querySelector('[data-testid=preview-grid]')"
+        f".dataset.appliedSeq) > {old}", timeout=UI_TIMEOUT)
+    _wait_settled(page)
+
+
+def test_reset_slider_to_default(page):
+    base_srcs = _tile_srcs(page)  # default-config tile srcs, list[str] (9)
+    rng = _reset_btn(page, "ticks.len_range")  # range reset button (Locator)
+    sca = _reset_btn(page, "digits.show_prob")  # scalar reset button (Locator)
+    assert rng.is_disabled() and sca.is_disabled()
+    _commit_and_wait(page, _num(page, "ticks.len_range", "hi"), "14")
+    _commit_and_wait(page, _num(page, "digits.show_prob"), "0.9")
+    assert rng.is_enabled() and sca.is_enabled()
+    assert _tile_srcs(page) != base_srcs
+    old = _applied_seq(page)
+    rng.click()
+    _wait_applied_after(page, old)
+    old = _applied_seq(page)
+    sca.click()
+    _wait_applied_after(page, old)
+    assert _num(page, "ticks.len_range", "lo").input_value() == "6"
+    assert _num(page, "ticks.len_range", "hi").input_value() == "9"
+    assert _num(page, "digits.show_prob").input_value() == "0.5"
+    assert rng.is_disabled() and sca.is_disabled()
+    assert _tile_srcs(page) == base_srcs
+    assert "Reset to default" in rng.get_attribute("title")
+    assert _reset_btn(page, "canvas.img_size").count() == 0 \
+        or _reset_btn(page, "canvas.img_size").is_disabled()
+
+
+def test_reset_toggle_to_default(page):
+    box = page.locator('[data-param="tri_artifacts.enabled"] input[type=checkbox]')
+    btn = _reset_btn(page, "tri_artifacts.enabled")  # toggle reset button (Locator)
+    assert box.is_checked() and btn.is_disabled()
+    old = _applied_seq(page)
+    box.uncheck()
+    _wait_applied_after(page, old)
+    assert btn.is_enabled()
+    old = _applied_seq(page)
+    btn.click()
+    _wait_applied_after(page, old)
+    assert box.is_checked() and btn.is_disabled()
+
+
+def test_reset_after_yaml_load_uses_builtin_default(page, tmp_path):
+    saved = tmp_path / "default.yaml"  # downloaded default YAML (Path)
+    text = _save_yaml(page, saved)
+    import re
+    patched = re.sub(r"show_prob:\s*0\.5", "show_prob: 0.9", text)  # YAML with 0.9 (str)
+    assert patched != text
+    saved.write_text(patched, encoding="utf-8")
+    old = _applied_seq(page)
+    page.get_by_test_id("load-yaml").set_input_files(str(saved))
+    _wait_applied_after(page, old)
+    assert _num(page, "digits.show_prob").input_value() == "0.9"
+    btn = _reset_btn(page, "digits.show_prob")  # scalar reset button (Locator)
+    assert btn.is_enabled()
+    old = _applied_seq(page)
+    btn.click()
+    _wait_applied_after(page, old)
+    assert _num(page, "digits.show_prob").input_value() == "0.5"
+    assert btn.is_disabled()

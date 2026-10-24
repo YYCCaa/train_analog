@@ -36,6 +36,9 @@ export default function App() {
   const [countDraft, setCountDraft] = useState(String(DEFAULT_COUNT));
   // seed scheme used when growing: "seq" = max+1.. (initial), "random" = after a reshuffle
   const [scheme, setScheme] = useState<"seq" | "random">("seq");
+  // built-in default config (configs/v7_default.yaml), section -> key -> Value; set once at
+  // startup and never replaced by a loaded YAML; source of the per-control reset buttons
+  const [defaults, setDefaults] = useState<Config | null>(null);
   const [tiles, setTiles] = useState<Tile[]>([]); // latest applied tiles
   const [overlay, setOverlay] = useState(false); // tip markers on/off
   // errors of the last preview request (list[str]); cleared by a successful preview
@@ -57,6 +60,7 @@ export default function App() {
       .then(([s, c]) => {
         setSchema(s);
         setConfig(c);
+        setDefaults(c);
       })
       .catch((e) => setFileErrors(errorsOf(e)));
   }, []);
@@ -204,6 +208,7 @@ export default function App() {
               {Object.entries(keys).map(([key, leaf]) => (
                 <ParamControl key={key} section={section} name={key} leaf={leaf}
                   value={config[section][key]}
+                  defaultValue={defaults?.[section]?.[key]}
                   onChange={(v) => setParam(section, key, v)} />
               ))}
             </section>
