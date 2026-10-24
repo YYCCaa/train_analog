@@ -44,7 +44,8 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
   │ 13 black outside outer ring; erase overlay over pointer;         │
   │    composite overlay; apply shadow out = round(in * (1 - d))     │
   │    (d zeroed outside the dial face, on the rim, pointer, hole)   │
-  │ 13c cover glass, inside B: reflections out = in - sum(dk * m_k), │
+  │ 13c cover glass, inside B: m_k = transformed bank silhouettes;   │
+  │    reflections out = in - sum(dk * m_k),                         │
   │    then glares out = lerp(out, V, m) one by one (glare wins);    │
   │    glare m zeroed within clear_distance of the visible tip       │
   │ 14 Gaussian blur inside outer ring; black outside again          │
@@ -66,19 +67,25 @@ for the pointer (s_p) and rim (s_r) shadows; overlapping shadows of the
 one light do not compound (max, not product).  Ticks, digits, noise and
 triangles under a shadow are darkened by the same factor.
 
-Reflections and glares sit on the cover glass.  Each item cuts a random
-square patch (side ~ patch_size_range) from a random Places365 photo
-(PLACES_DIR / $V7_PLACES_DIR, sorted list cached per folder), randomly
-flipped / rotated, keeps the pixels at or above a random brightness
-percentile as its shape m (0-1, edge softened by edge_soft), and lands at a
-centre uniform in the disc of B:
+Reflections and glares sit on the cover glass.  Each item takes a random
+SAM object silhouette from the shape bank (SHAPE_BANK / $V7_SHAPE_BANK, an
+.npz baked offline by tools/build_shape_bank.py; packed arrays cached per
+file), gives it a continuous random transform, softens its edge by
+edge_soft into the shape m (0-1), and lands it at a centre uniform in the
+disc of B:
 
-    photo ──crop s x s──> patch ──lum >= p-th pct──> m ──blur──> placed m
+    bank row k ──unpack──> sil (h, w) bool, longest side 128
+        │ resize (INTER_AREA): longest side = s ~ U(size_range)
+        │ affine about the centre: rotate(θ) · shear(k) · aspect(√a, 1/√a)
+        │ elastic warp: 4x4 (dx, dy) grid ~ U(-A, A), bicubic-upsampled
+        │ threshold 0.5, Gaussian blur edge_soft, crop to m > 0.01
+        v
+    m (h', w') float32 0-1 ──> placed m (C, C), zero outside B
     reflection: out = in - darken * m     (values, overlaps add)
     glare:      out = in*(1-m) + V*m      (after all reflections; not near tip)
 
-The folder is only read when an image gets at least one item, so prob 0
-(the default) needs no dataset.
+The bank is only opened when an image gets at least one item, so prob 0
+(the default) needs no bank.
 """
 
 import argparse
@@ -112,14 +119,18 @@ SECTIONS = ("angle", "geometry", "outer", "ticks", "digits", "palette",
             "pointer", "background", "cut_tip", "shadows", "jitter",
             "hier_noise", "tri_artifacts", "reflections", "glares")
 
-# Places365 photo folder (str, may hold "~") that reflection / glare shapes are
-# cut from; scanned recursively.  V7_PLACES_DIR overrides it, read again at
-# every lookup (see places_dir) so tests and spawned workers can repoint it.
-PLACES_DIR = os.environ.get("V7_PLACES_DIR", "~/places365")
-_PLACES_EXTS = (".jpg", ".jpeg", ".png")  # photo file suffixes (tuple[str], lower case)
-# sorted photo paths per resolved folder: dict[str, list[str]]; only
-# non-empty scans are cached, so a dataset downloaded later is picked up
-_PLACES_CACHE = {}
+# Shape-bank file (str, may hold "~"): .npz of SAM object silhouettes that
+# reflection / glare shapes come from (format: masks (N, 2048) uint8 packed
+# 128x128 frames, hw (N, 2) uint16, src (N,) int32, meta 0-d json str).
+# V7_SHAPE_BANK overrides it, read again at every lookup (see
+# shape_bank_path) so tests and spawned workers can repoint it.
+SHAPE_BANK = os.environ.get("V7_SHAPE_BANK", "~/places365_shapes.npz")
+_BANK_FRAME = 128  # int px, side of one packed bank frame
+# loaded banks per resolved path: dict[str, tuple[stamp, dict]], stamp =
+# (mtime_ns, size) so a re-baked file is picked up; only valid banks are cached
+_BANK_CACHE = {}
+# shape-bank keys -> (dtype, ndim) the generator requires (dict[str, tuple])
+_BANK_KEYS = {"masks": (np.uint8, 2), "hw": (np.uint16, 2), "src": (np.int32, 1)}
 
 
 def section_rngs(image_seed):
@@ -474,65 +485,173 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
 
 # ── main render ────────────────────────────────────────────────────────
 
-# ── reflections + glares (cover glass, shapes from Places365 patches) ────
+# ── reflections + glares (cover glass, shapes from the SAM silhouette bank) ─
 
-def places_dir():
-    """Resolved Places365 folder (str): V7_PLACES_DIR if set, else PLACES_DIR."""
-    return os.path.abspath(os.path.expanduser(os.environ.get("V7_PLACES_DIR", PLACES_DIR)))
+_BANK_HINT = ("Run `python tools/build_shape_bank.py` to bake it "
+              "(or point V7_SHAPE_BANK at a bank file).")  # str, appended to bank errors
+_SIL_SMOOTH = 1.0  # float px (at the 128-px bank scale), pre-blur that rounds the NEAREST stair steps
 
 
-def places_files(folder=None):
-    """Sorted list[str] of every *.jpg / *.jpeg / *.png under folder (recursive).
+def shape_bank_path():
+    """Resolved shape-bank file (str): V7_SHAPE_BANK if set, else SHAPE_BANK."""
+    return os.path.abspath(os.path.expanduser(os.environ.get("V7_SHAPE_BANK", SHAPE_BANK)))
 
-    folder: str or None (-> places_dir()).  Cached per resolved folder.
-    Raises RuntimeError naming the folder when it holds no photos.
+
+def _load_bank(path):
+    """Read + validate the bank at path -> dict(masks (N, 2048) uint8, hw (N, 2) uint16).
+
+    Raises RuntimeError naming path (and the bake script) on any problem.
     """
-    folder = places_dir() if folder is None else os.path.abspath(os.path.expanduser(folder))
-    files = _PLACES_CACHE.get(folder)  # list[str] or None
-    if files is None:
-        files = sorted(os.path.join(root, f) for root, _, names in os.walk(folder)
-                       for f in names if f.lower().endswith(_PLACES_EXTS))
-        if files:
-            _PLACES_CACHE[folder] = files
-    if not files:
-        raise RuntimeError(
-            f"reflections/glares need Places365 photos, but none (*.jpg, *.jpeg, "
-            f"*.png) were found in {folder}. Run `python download_places365.py` "
-            f"(or point V7_PLACES_DIR at a folder of photos).")
-    return files
+    def bad(why):
+        return RuntimeError(f"reflections/glares need the shape bank {path}, but {why}. "
+                            + _BANK_HINT)
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            missing = [k for k in (*_BANK_KEYS, "meta") if k not in z.files]  # list[str]
+            if missing:
+                raise bad(f"it lacks the key(s) {missing}")
+            arrs = {k: z[k] for k in (*_BANK_KEYS, "meta")}  # dict[str, np.ndarray]
+    except RuntimeError:
+        raise
+    except Exception as e:  # unreadable / not an npz
+        raise bad(f"it could not be read ({type(e).__name__}: {e})") from e
+    for key, (dtype, ndim) in _BANK_KEYS.items():
+        a = arrs[key]
+        if a.dtype != dtype or a.ndim != ndim:
+            raise bad(f"'{key}' is {a.dtype} with {a.ndim} dims, expected {np.dtype(dtype)} "
+                      f"with {ndim}")
+    masks, hw, src = arrs["masks"], arrs["hw"], arrs["src"]
+    n = len(masks)  # int, number of silhouettes
+    if n == 0 or masks.shape[1] != _BANK_FRAME * _BANK_FRAME // 8:
+        raise bad(f"'masks' has shape {masks.shape}, expected (N >= 1, "
+                  f"{_BANK_FRAME * _BANK_FRAME // 8})")
+    if hw.shape != (n, 2) or src.shape != (n,):
+        raise bad(f"'hw' {hw.shape} / 'src' {src.shape} do not match {n} masks")
+    if hw.min() < 1 or hw.max() > _BANK_FRAME or (hw.max(axis=1) != _BANK_FRAME).any():
+        raise bad(f"'hw' values must be 1..{_BANK_FRAME} with max(h, w) == {_BANK_FRAME}")
+    meta = arrs["meta"]
+    if meta.ndim != 0 or meta.dtype.kind not in "US":
+        raise bad("'meta' is not a 0-d json string")
+    return {"masks": masks, "hw": hw}
 
 
-def _patch_shape(rng, sec, files):
-    """Shape mask of one effect from a random Places365 patch.
+def shape_bank():
+    """The loaded shape bank (dict: masks (N, 2048) uint8, hw (N, 2) uint16).
 
-    rng: the section's random.Random; sec: reflections / glares config
-    section (dict); files: sorted photo paths (list[str]).  Draws, in order:
-    file index, patch side, x0, y0, flip, rot90 count, percentile.  Keeps the
-    patch pixels at or above the p-th brightness percentile, then softens the
-    edge with a Gaussian blur of radius edge_soft (the patch is zero-padded by
-    3 * edge_soft first so the softened edge is not cut off).
-    Returns (S', S') float32 in 0-1, S' = s + 2 * pad.
+    Cached per resolved path and file stamp (mtime_ns, size), so a re-baked
+    bank is picked up.  Raises RuntimeError (naming the path and
+    tools/build_shape_bank.py) when the file is missing or invalid.
     """
-    path = files[rng.randrange(len(files))]  # str, chosen photo
-    with Image.open(path) as photo:
-        gray = photo.convert("L")  # "L" photo, (h, w)
-    s = rng.randint(*sec["patch_size_range"])  # int px, patch side
-    s = max(1, min(s, gray.width, gray.height))
-    x0 = rng.randint(0, gray.width - s)  # int px, patch left
-    y0 = rng.randint(0, gray.height - s)  # int px, patch top
-    patch = np.asarray(gray.crop((x0, y0, x0 + s, y0 + s)), dtype=np.float32)  # (s, s)
-    if rng.random() < 0.5:
-        patch = patch[:, ::-1]
-    patch = np.rot90(patch, rng.randint(0, 3))
-    thr = np.percentile(patch, rng.uniform(*sec["threshold_pct_range"]))  # float gray
-    m = (patch >= thr).astype(np.float32)  # (s, s) float32, 1 = shape
-    soft = float(sec["edge_soft"])  # float px, blur radius
-    if soft > 0:
-        pad = int(math.ceil(3 * soft))  # int px of zero border around the patch
-        m_img = Image.fromarray(np.pad(m * 255, pad).astype(np.uint8))  # "L" (s+2p, s+2p)
-        m = np.asarray(m_img.filter(ImageFilter.GaussianBlur(radius=soft)),
+    path = shape_bank_path()
+    try:
+        st = os.stat(path)
+    except OSError:
+        raise RuntimeError(f"reflections/glares need the shape bank {path}, but it does "
+                           f"not exist. " + _BANK_HINT) from None
+    stamp = (st.st_mtime_ns, st.st_size)  # tuple[int, int]
+    hit = _BANK_CACHE.get(path)  # (stamp, bank dict) or None
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    bank = _load_bank(path)
+    _BANK_CACHE[path] = (stamp, bank)
+    return bank
+
+
+def bank_silhouette(bank, k):
+    """Unpack row k of the bank -> (h, w) bool silhouette (tight bbox, longest side 128)."""
+    side = _BANK_FRAME
+    frame = np.unpackbits(bank["masks"][k])[:side * side].reshape(side, side)  # (128, 128) uint8
+    h, w = int(bank["hw"][k, 0]), int(bank["hw"][k, 1])
+    return frame[:h, :w].astype(bool)
+
+
+def transform_shape(sil, size, rotation_deg, aspect, shear, warp, edge_soft):
+    """Continuous random transform of one silhouette -> shape mask m.
+
+    sil: (h, w) bool silhouette; size: int px, longest side after scaling;
+    rotation_deg: float, > 0 turns the shape counter-clockwise as displayed
+    (image y down; +90 equals np.rot90(., 1)); aspect: float a, x *= sqrt(a),
+    y /= sqrt(a); shear: float k, x += k * y; warp: (2, 4, 4) float px grid
+    of (dx, dy) displacements, or None for rigid; edge_soft: float px blur.
+
+        sil ─pre-blur 1 px─> float ─INTER_AREA─> (s-scaled) ─remap(bilinear):
+        q -> L^-1 (q + d(q) - c_out) + c_src─> >= 0.5 ─blur─> crop m > 0.01
+
+    The pre-blur (_SIL_SMOOTH at the 128 scale) turns the bank's NEAREST
+    stair-stepped edges into smooth curves before the re-binarisation.
+    L = rotate · shear · aspect, applied about the shape centre.
+    Returns (h', w') float32 in 0-1 cropped to its tight bbox
+    ((1, 1) zeros if nothing is left).
+    """
+    import cv2
+    h, w = sil.shape
+    f = size / float(max(h, w))  # float, scale factor to the target size
+    sw, sh = max(1, int(round(w * f))), max(1, int(round(h * f)))  # int px, scaled w / h
+    src = cv2.GaussianBlur(sil.astype(np.float32), (0, 0), _SIL_SMOOTH,
+                           borderType=cv2.BORDER_CONSTANT)  # (h, w) float32 0-1, smoothed
+    # area averaging when shrinking (anti-aliased), bilinear when enlarging (smooth)
+    interp = cv2.INTER_AREA if f < 1 else cv2.INTER_LINEAR  # int cv2 flag
+    src = cv2.resize(src, (sw, sh), interpolation=interp)  # (sh, sw) float32
+    if src.ndim == 1:
+        src = src.reshape(sh, sw)
+    th = math.radians(rotation_deg)  # float rad
+    c, s_ = math.cos(th), math.sin(th)
+    ra = math.sqrt(aspect)  # float, x stretch (y gets 1 / ra)
+    # (2, 2) float64 linear map, centred source coords -> centred output coords
+    lin = (np.array([[c, s_], [-s_, c]]) @ np.array([[1.0, shear], [0.0, 1.0]])
+           @ np.diag([ra, 1.0 / ra]))
+    # half extents of the transformed source box (pixel edges at -0.5 .. n - 0.5)
+    corners = np.array([[-sw, -sh], [sw, -sh], [-sw, sh], [sw, sh]], dtype=np.float64) / 2.0
+    ext = np.abs(corners @ lin.T).max(axis=0)  # (2,) float px, half width / height
+    amp = 0.0 if warp is None else float(np.abs(warp).max())  # float px, max displacement
+    margin = int(math.ceil(amp)) + int(math.ceil(3 * edge_soft)) + 1  # int px border
+    ow = int(math.ceil(2 * ext[0] - 1e-6)) + 2 * margin  # int px, output width
+    oh = int(math.ceil(2 * ext[1] - 1e-6)) + 2 * margin  # int px, output height
+    gy, gx = np.mgrid[:oh, :ow].astype(np.float32)  # (oh, ow) float32 output pixel grids
+    if warp is not None and amp > 0:
+        dx = np.clip(cv2.resize(np.asarray(warp[0], np.float32), (ow, oh),
+                                interpolation=cv2.INTER_CUBIC), -amp, amp)  # (oh, ow) float32
+        dy = np.clip(cv2.resize(np.asarray(warp[1], np.float32), (ow, oh),
+                                interpolation=cv2.INTER_CUBIC), -amp, amp)  # (oh, ow) float32
+        gx, gy = gx + dx, gy + dy
+    inv = np.linalg.inv(lin)  # (2, 2) float64, output -> source
+    qx, qy = gx - (ow - 1) / 2.0, gy - (oh - 1) / 2.0  # (oh, ow) float, centred output coords
+    map_x = (inv[0, 0] * qx + inv[0, 1] * qy + (sw - 1) / 2.0).astype(np.float32)  # (oh, ow)
+    map_y = (inv[1, 0] * qx + inv[1, 1] * qy + (sh - 1) / 2.0).astype(np.float32)  # (oh, ow)
+    out = cv2.remap(src, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=0)  # (oh, ow) float32
+    m = (out >= 0.5).astype(np.float32)  # (oh, ow) float32, binary shape
+    if edge_soft > 0:
+        m_img = Image.fromarray((m * 255).astype(np.uint8))  # "L" (oh, ow)
+        m = np.asarray(m_img.filter(ImageFilter.GaussianBlur(radius=edge_soft)),
                        dtype=np.float32) / 255.0
-    return np.clip(m, 0, 1)
+    ys, xs = np.nonzero(m > 0.01)
+    if len(ys) == 0:
+        return np.zeros((1, 1), dtype=np.float32)
+    return np.clip(m[ys.min():ys.max() + 1, xs.min():xs.max() + 1], 0, 1)
+
+
+def _bank_shape(rng, nrng, sec, bank):
+    """Shape mask of one effect: a random bank silhouette, randomly transformed.
+
+    rng / nrng: the section's random.Random / np.random.Generator; sec:
+    reflections / glares config section (dict); bank: shape_bank() dict.
+    Fixed-count draws, in order: bank index, size, rotation, aspect
+    (log-uniform), shear (all rng), then 16 dx + 16 dy (nrng, U(-A, A),
+    drawn even when A = 0).  Returns (h', w') float32 in 0-1.
+    """
+    k = rng.randrange(len(bank["hw"]))  # int, bank row
+    size = rng.randint(*sec["size_range"])  # int px, longest side
+    rot = rng.uniform(*sec["rotation_range"])  # float deg
+    lo, hi = sec["aspect_range"]
+    aspect = math.exp(rng.uniform(math.log(lo), math.log(hi)))  # float, log-uniform stretch
+    shear = rng.uniform(*sec["shear_range"])  # float shear factor
+    amp = float(sec["warp_amplitude"])  # float px
+    dx = nrng.uniform(-amp, amp, 16)  # (16,) float px
+    dy = nrng.uniform(-amp, amp, 16)  # (16,) float px
+    warp = np.stack([dx.reshape(4, 4), dy.reshape(4, 4)]) if amp > 0 else None  # (2, 4, 4)
+    return transform_shape(bank_silhouette(bank, k), size, rot, aspect, shear, warp,
+                           float(sec["edge_soft"]))
 
 
 def _place_shape(rng, m, canvas_size, bcx, bcy, b_radius, inside_outer):
@@ -563,7 +682,8 @@ def _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy, b_radius, tip, xs, ys
 
     img: canvas "L" (C, C); rngs: section_rngs dict; tip: visible tip (x, y)
     float px in canvas coords; xs (1, C) / ys (C, 1) int pixel grids.
-    The photo folder is only read when an image actually gets an effect.
+    Shapes are shape-bank silhouettes (_bank_shape); the bank is only opened
+    when an image actually gets an effect.
     Returns the canvas as an "L" image (C, C).
     """
     canvas_size = img.size[0]  # int px, C
@@ -575,12 +695,13 @@ def _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy, b_radius, tip, xs, ys
         plan.append((name, sec, rng, n if active else 0))
     if not any(n for *_, n in plan):
         return img
-    files = places_files()  # list[str], sorted photo paths
+    bank = shape_bank()  # dict: masks (N, 2048) uint8, hw (N, 2) uint16
     work = np.asarray(img, dtype=np.float32)  # (C, C) float32 working canvas
     (_, R, rrng, n_r), (_, Gl, grng, n_g) = plan
+    rnrng, gnrng = rngs["reflections"][1], rngs["glares"][1]  # np.random.Generator per section
     dark = np.zeros_like(work)  # (C, C) float32, summed reflection darkening
     for _ in range(n_r):
-        m = _patch_shape(rrng, R, files)
+        m = _bank_shape(rrng, rnrng, R, bank)
         delta = rrng.randint(*R["darken_range"])  # int gray levels subtracted
         dark += delta * _place_shape(rrng, m, canvas_size, bcx, bcy, b_radius, inside_outer)
     work = np.clip(work - dark, 0, 255)
@@ -589,7 +710,7 @@ def _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy, b_radius, tip, xs, ys
         # (C, C) bool, pixels a glare may never cover (around the visible tip)
         near_tip = (xs - tip[0]) ** 2 + (ys - tip[1]) ** 2 <= clear ** 2
         for _ in range(n_g):
-            m = _patch_shape(grng, Gl, files)
+            m = _bank_shape(grng, gnrng, Gl, bank)
             v = grng.randint(*Gl["value_range"])  # int gray level of the glare
             mc = _place_shape(grng, m, canvas_size, bcx, bcy, b_radius, inside_outer)
             mc[near_tip] = 0

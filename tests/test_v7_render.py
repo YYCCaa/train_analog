@@ -609,36 +609,91 @@ def test_tip_label_on_pointer_pixels():
         assert px(a.tip_x, a.tip_y) >= dark, (seed, "old apex")
 
 
-# ── reflections + glares from Places365 patches ─────────────────────────
+# ── reflections + glares from the SAM silhouette shape bank ──────────────
 
-def _write_places(folder, kind):
-    """Fill `folder` (pathlib.Path, created) with fixture photos -> folder.
+_FRAME = 128  # int px, side of one bank frame (shape-bank contract)
 
-    kind "rect": a few small photos, each a white rectangle on black (a
-    known bright blob), as PNG and JPEG, in nested folders.  kind "white":
-    one 256x256 all-white PNG, so any threshold keeps the whole patch.
+
+def _sil_ellipse():
+    """Filled ellipse silhouette: (80, 128) bool, longest side 128."""
+    ys, xs = np.mgrid[:80, :128]  # (80, 128) int grids
+    return ((xs - 63.5) / 64.0) ** 2 + ((ys - 39.5) / 40.0) ** 2 <= 1.0
+
+
+def _sil_L():
+    """L-shape silhouette: (128, 96) bool, vertical bar + bottom foot."""
+    s = np.zeros((128, 96), dtype=bool)  # (128, 96) bool
+    s[:, :32] = True
+    s[96:, :] = True
+    return s
+
+
+def _sil_star():
+    """Five-point star silhouette: (h, w) bool, tight bbox, longest side 128."""
+    from PIL import Image, ImageDraw
+    pts = []  # list[tuple[float, float]] star vertices, outer / inner alternating
+    for i in range(10):
+        r = 70.0 if i % 2 == 0 else 28.0  # float px vertex radius
+        a = math.pi / 2 + i * math.pi / 5  # float rad
+        pts.append((80 + r * math.cos(a), 80 - r * math.sin(a)))
+    im = Image.new("L", (160, 160), 0)
+    ImageDraw.Draw(im).polygon(pts, fill=255)
+    a = np.asarray(im) > 0  # (160, 160) bool
+    ys, xs = np.nonzero(a)
+    a = a[ys.min():ys.max() + 1, xs.min():xs.max() + 1]  # tight bbox
+    f = 128.0 / max(a.shape)  # float, scale to longest side 128 (NEAREST, as the bake)
+    h, w = max(1, round(a.shape[0] * f)), max(1, round(a.shape[1] * f))
+    return np.asarray(Image.fromarray(a).resize((w, h), Image.NEAREST), dtype=bool)
+
+
+def _sil_square():
+    """Full square silhouette: (128, 128) bool, all True (forces big coverage)."""
+    return np.ones((128, 128), dtype=bool)
+
+
+def _write_bank(path, sils, **corrupt):
+    """Write a fake shape bank per the contract -> path (pathlib.Path).
+
+    sils: list of (h, w) bool silhouettes, longest side 128, anchored
+    top-left in a 128x128 frame.  corrupt: key -> replacement array (or
+    None to drop the key) to build invalid banks.
     """
-    from PIL import Image
-    folder.mkdir(parents=True, exist_ok=True)
-    if kind == "white":
-        Image.new("L", (256, 256), 255).save(folder / "white.png")
-        return folder
-    for i, ext in enumerate(("png", "jpg", "png")):
-        a = np.zeros((96 + 16 * i, 96), dtype=np.uint8)  # (H, 96) uint8 photo
-        a[20 + i:70, 30:80 - i] = 255  # white rectangle = the bright blob
-        sub = folder / f"cat{i}"  # nested: the scan must be recursive
-        sub.mkdir(exist_ok=True)
-        Image.fromarray(a).save(sub / f"p{i}.{ext}")
-    return folder
+    import json
+    frames = np.zeros((len(sils), _FRAME, _FRAME), dtype=bool)  # (N, 128, 128) bool
+    for k, s in enumerate(sils):
+        frames[k, :s.shape[0], :s.shape[1]] = s
+    arrays = {  # dict[str, np.ndarray], the contract's keys
+        "masks": np.stack([np.packbits(f.reshape(-1)) for f in frames]),  # (N, 2048) uint8
+        "hw": np.array([s.shape for s in sils], dtype=np.uint16),  # (N, 2) uint16
+        "src": np.arange(len(sils), dtype=np.int32),  # (N,) int32
+        "meta": np.array(json.dumps({"version": 1, "frame": _FRAME, "model": "fake",
+                                     "n_photos": len(sils), "places_dir": "none",
+                                     "created": "2026-01-01T00:00:00"})),  # 0-d str
+    }
+    for key, val in corrupt.items():
+        if val is None:
+            arrays.pop(key)
+        else:
+            arrays[key] = val
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, **arrays)
+    return path
 
 
 @pytest.fixture(autouse=True)
-def _places(tmp_path, monkeypatch):
-    """Point V7_PLACES_DIR at a fixture folder of rectangle photos for every
-    test in this module (hermetic: the real ~/places365 is never read)."""
-    folder = _write_places(tmp_path / "places_rect", "rect")  # pathlib.Path
-    monkeypatch.setenv("V7_PLACES_DIR", str(folder))
-    return folder
+def _bank(tmp_path, monkeypatch):
+    """Point V7_SHAPE_BANK at a fixture bank (ellipse, L, star) for every
+    test in this module (hermetic: the real ~/places365_shapes.npz is never read)."""
+    path = _write_bank(tmp_path / "bank" / "shapes.npz",
+                       [_sil_ellipse(), _sil_L(), _sil_star()])  # pathlib.Path
+    monkeypatch.setenv("V7_SHAPE_BANK", str(path))
+    return path
+
+
+def _square_bank(tmp_path, monkeypatch):
+    """Repoint V7_SHAPE_BANK at a bank holding only the full square."""
+    path = _write_bank(tmp_path / "square" / "shapes.npz", [_sil_square()])
+    monkeypatch.setenv("V7_SHAPE_BANK", str(path))
 
 
 # "section.key" -> value pins (dict) for the effect tests: no blur, so every
@@ -663,9 +718,9 @@ def _glare(**extra):
 def test_effects_off_by_default_no_io(tmp_path, monkeypatch):
     cfg = v7_config.default_config()
     assert cfg["reflections"]["prob"] == 0.0 and cfg["glares"]["prob"] == 0.0
-    monkeypatch.setenv("V7_PLACES_DIR", str(tmp_path / "does_not_exist"))
+    monkeypatch.setenv("V7_SHAPE_BANK", str(tmp_path / "does_not_exist.npz"))
     test_default_render_unchanged_by_contrast_key()
-    g7.render_image(cfg, 5)  # must not raise without a dataset
+    g7.render_image(cfg, 5)  # must not raise without a bank
 
 
 def test_reflection_darkens_by_value():
@@ -694,9 +749,9 @@ def test_glare_overwrites_with_value():
 
 
 def test_glare_clears_pointer_tip(tmp_path, monkeypatch):
-    monkeypatch.setenv("V7_PLACES_DIR", str(_write_places(tmp_path / "white", "white")))
+    _square_bank(tmp_path, monkeypatch)
     clear = 15.0  # float px, pinned clear distance
-    extra = {"glares.patch_size_range": [128, 128], "glares.count_range": [8, 8],
+    extra = {"glares.size_range": [160, 160], "glares.count_range": [8, 8],
              "glares.clear_distance": clear}
     ys, xs = np.mgrid[:IMG, :IMG]  # (256, 256) int pixel grids
     for seed in range(6):
@@ -710,9 +765,9 @@ def test_glare_clears_pointer_tip(tmp_path, monkeypatch):
 
 
 def test_glare_wins_over_reflection(tmp_path, monkeypatch):
-    monkeypatch.setenv("V7_PLACES_DIR", str(_write_places(tmp_path / "white", "white")))
-    big = {"reflections.patch_size_range": [128, 128], "reflections.count_range": [4, 4],
-           "glares.patch_size_range": [128, 128], "glares.count_range": [4, 4]}
+    _square_bank(tmp_path, monkeypatch)
+    big = {"reflections.size_range": [160, 160], "reflections.count_range": [4, 4],
+           "glares.size_range": [160, 160], "glares.count_range": [4, 4]}
     glare_on = {"glares.prob": 1.0, "glares.value_range": [240, 240], "glares.edge_soft": 0.0}
     both_seen = 0
     for seed in _FX_SEEDS:
@@ -727,12 +782,12 @@ def test_glare_wins_over_reflection(tmp_path, monkeypatch):
 
 
 def test_effects_stay_inside_boundary(tmp_path, monkeypatch):
-    monkeypatch.setenv("V7_PLACES_DIR", str(_write_places(tmp_path / "white", "white")))
+    _square_bank(tmp_path, monkeypatch)
     c = IMG / 2.0  # float px, boundary centre in the image
     outside = _dist_grid(c, c) > _DISP_RB  # (256, 256) bool, outside B
-    fx = {"reflections.prob": 1.0, "reflections.patch_size_range": [128, 128],
+    fx = {"reflections.prob": 1.0, "reflections.size_range": [160, 160],
           "reflections.count_range": [8, 8], "glares.prob": 1.0,
-          "glares.patch_size_range": [128, 128], "glares.count_range": [8, 8],
+          "glares.size_range": [160, 160], "glares.count_range": [8, 8],
           "glares.value_range": [255, 255]}
     for seed in range(4):
         for d in (0.0, 10.0):
@@ -741,15 +796,128 @@ def test_effects_stay_inside_boundary(tmp_path, monkeypatch):
             assert (img == 255).sum() > 100, (seed, d)
 
 
-def test_missing_places_dir_errors(tmp_path, monkeypatch):
-    empty = tmp_path / "empty_places"  # pathlib.Path, folder with no images
-    empty.mkdir()
-    monkeypatch.setenv("V7_PLACES_DIR", str(empty))
+def test_missing_bank_errors(tmp_path, monkeypatch):
+    missing = tmp_path / "no_such_bank.npz"  # pathlib.Path, never created
+    monkeypatch.setenv("V7_SHAPE_BANK", str(missing))
     for cfg in (_refl(), _glare()):
         with pytest.raises(RuntimeError) as ei:
             g7.render_image(cfg, 0)
-        assert "download_places365.py" in str(ei.value)
-        assert "empty_places" in str(ei.value)
+        assert "tools/build_shape_bank.py" in str(ei.value)
+        assert "no_such_bank" in str(ei.value)
+
+
+@pytest.mark.parametrize("corrupt", [
+    {"masks": np.zeros((3, 2048), dtype=np.int64)},  # wrong dtype
+    {"hw": None},  # missing key
+    {"masks": np.zeros((3, 100), dtype=np.uint8)},  # wrong row length
+    {"hw": np.full((3, 2), 200, dtype=np.uint16)},  # h, w beyond the frame
+])
+def test_bank_validation(tmp_path, monkeypatch, corrupt):
+    path = _write_bank(tmp_path / "bad" / "bad_bank.npz",
+                       [_sil_ellipse(), _sil_L(), _sil_star()], **corrupt)
+    monkeypatch.setenv("V7_SHAPE_BANK", str(path))
+    with pytest.raises(RuntimeError) as ei:
+        g7.shape_bank()
+    assert "bad_bank" in str(ei.value)
+    assert "tools/build_shape_bank.py" in str(ei.value)
+    with pytest.raises(RuntimeError):
+        g7.render_image(_refl(), 0)
+
+
+def test_shape_bank_unpacks_contract():
+    bank = g7.shape_bank()
+    assert len(bank["hw"]) == 3
+    assert np.array_equal(g7.bank_silhouette(bank, 1), _sil_L())
+    assert np.array_equal(g7.bank_silhouette(bank, 0), _sil_ellipse())
+
+
+def _iou(a, b):
+    """IoU (float) of two bool masks, zero-padded top-left to a common shape."""
+    h, w = max(a.shape[0], b.shape[0]), max(a.shape[1], b.shape[1])
+    pa = np.zeros((h, w), dtype=bool)  # (h, w) bool
+    pb = np.zeros((h, w), dtype=bool)  # (h, w) bool
+    pa[:a.shape[0], :a.shape[1]] = a
+    pb[:b.shape[0], :b.shape[1]] = b
+    return (pa & pb).sum() / max(1, (pa | pb).sum())
+
+
+# rigid shape-transform kwargs (dict): no rotation / stretch / shear / warp / blur
+_RIGID = dict(rotation_deg=0.0, aspect=1.0, shear=0.0, warp=None, edge_soft=0.0)
+
+
+def _tight(a):
+    """Crop bool mask a to its tight bbox -> (h', w') bool."""
+    ys, xs = np.nonzero(a)
+    return a[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+
+
+def test_shape_transform_rigid_identity():
+    import cv2
+    s = 50  # int px, target longest side
+    for sil in (_sil_ellipse(), _sil_L(), _sil_star()):
+        m = g7.transform_shape(sil, s, **_RIGID)  # (h', w') float32
+        assert m.dtype == np.float32 and s - 4 <= max(m.shape) <= s + 2
+        h, w = sil.shape
+        f = s / max(h, w)  # float scale
+        # reference: plain resize of the raw silhouette, cropped like the output
+        ref = _tight(cv2.resize(sil.astype(np.float32), (max(1, round(w * f)), max(1, round(h * f))),
+                                interpolation=cv2.INTER_AREA) >= 0.5)  # (h', w') bool
+        assert _iou(m > 0.5, ref) > 0.97
+
+
+def test_shape_edges_smoothed_not_stair_stepped():
+    # bank silhouettes are NEAREST-upscaled (stair-stepped edges); the
+    # pre-blur must round a coarse staircase into a smooth edge at 2x scale
+    coarse = np.zeros((64, 64), dtype=bool)  # (64, 64) bool, 45-deg staircase triangle
+    coarse[np.tril_indices(64)] = True
+    sil = np.kron(coarse, np.ones((2, 2), dtype=bool))  # (128, 128) bool, 2-px steps (2x NEAREST)
+    m = g7.transform_shape(sil, 256, **_RIGID) > 0.5  # (h', w') bool at 2x scale
+    rows = m.sum(axis=1)[20:-20].astype(int)  # (n,) int filled width per row, away from corners
+    # a raw 2-px staircase at 2x widens by 4 px every 4 rows (jumps of 4);
+    # a smoothed edge widens by about 1 px per row
+    assert np.abs(np.diff(rows)).max() <= 2
+
+
+def test_shape_transform_rotation():
+    # convention: rotation_deg > 0 turns the shape counter-clockwise as
+    # displayed (image y down), so +90 deg equals np.rot90(rigid, k=1)
+    sil = _sil_L()
+    rigid = g7.transform_shape(sil, 60, **_RIGID) > 0.5  # (h, w) bool
+    rot = g7.transform_shape(sil, 60, **{**_RIGID, "rotation_deg": 90.0}) > 0.5
+    assert _iou(rot, np.rot90(rigid, 1)) > 0.9
+    assert _iou(rot, np.rot90(rigid, -1)) < 0.9  # the direction is really pinned
+
+
+def test_warp_is_smooth_and_bounded():
+    from scipy import ndimage
+    A = 6.0  # float px, warp amplitude
+    sil = _sil_ellipse()
+    flat = g7.transform_shape(sil, 60, **_RIGID) > 0.5  # (h, w) bool, unwarped
+    nrng = np.random.default_rng(3)
+    for _ in range(5):
+        warp = nrng.uniform(-A, A, size=(2, 4, 4))  # (2, 4, 4) float: dx grid, dy grid (px)
+        m = g7.transform_shape(sil, 60, **{**_RIGID, "warp": warp}) > 0.5  # (h', w') bool
+        assert m.shape != flat.shape or (m != flat).any(), "warp changed nothing"
+        _, ncomp = ndimage.label(m)
+        assert ncomp == 1
+        assert abs(int(m.sum()) - int(flat.sum())) <= 0.35 * flat.sum()
+        assert m.shape[0] - flat.shape[0] <= 2 * A + 2
+        assert m.shape[1] - flat.shape[1] <= 2 * A + 2
+
+
+def test_bank_shape_draw_count_fixed():
+    # the per-item draws are fixed-count: after one item the stream state
+    # does not depend on warp_amplitude (the warp grid is drawn even at A = 0)
+    import random
+    cfg = v7_config.default_config()
+    bank = g7.shape_bank()
+    states = []  # list[tuple[float, float]], next draw of each stream
+    for amp in (0.0, 5.0):
+        sec = dict(cfg["reflections"], warp_amplitude=amp)
+        r, n = random.Random(1), np.random.default_rng(1)
+        g7._bank_shape(r, n, sec, bank)
+        states.append((r.random(), float(n.random())))
+    assert states[0] == states[1]
 
 
 def test_effects_deterministic():
