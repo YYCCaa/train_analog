@@ -708,14 +708,14 @@ def test_shadow_strength_darkens_preview(page):
         assert f < n - 2.0, (n, f)
 
 
-# real Places365 folder (Path) the studio server reads glare/reflection shapes from
-_PLACES = Path(os.path.expanduser(os.environ.get("V7_PLACES_DIR", "~/places365")))
+# real SAM silhouette bank (Path, .npz) the studio server reads glare/reflection shapes from
+_SHAPE_BANK = Path(os.path.expanduser(os.environ.get("V7_SHAPE_BANK", "~/places365_shapes.npz")))
 
 
 def test_glares_and_reflections_change_preview(page):
-    # the shapes come from real photos; without the dataset there is nothing to show
-    if not _PLACES.is_dir() or next(_PLACES.rglob("*.jpg"), None) is None:
-        pytest.skip(f"no Places365 photos in {_PLACES}; run `python download_places365.py`")
+    # the shapes come from the baked bank; without it there is nothing to show
+    if not _SHAPE_BANK.is_file():
+        pytest.skip(f"no shape bank at {_SHAPE_BANK}; run `python tools/build_shape_bank.py`")
     # a person makes the glares pure white first (value [255, 255]), then turns them on
     # (typing a value the box already shows sends no new preview, so only
     # the ends that differ are typed; hi first, so lo <= hi at every step)
