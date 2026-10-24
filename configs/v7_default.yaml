@@ -48,7 +48,8 @@ ticks:
   gray_range: [0, 30]  # [lo, hi] int; tick gray level (already gray in old code)
 
 digits:
-  dist_jitter_range: [0.0, 4.0]  # [lo, hi] float; bidirectional radial jitter (px)
+  outside_jitter_range: [0.0, 4.0]  # [lo, hi] float; outward-only radial jitter of outside digits (px)
+  inside_jitter_range: [0.0, 4.0]  # [lo, hi] float; inward-only radial jitter of inside digits (px)
   angle_jitter_range: [0.0, 2.0]  # [lo, hi] float; shared angular jitter (deg)
   font_size_range: [16, 26]  # [lo, hi] int; digit font size (px)
   show_prob: 0.5  # float scalar; probability digits are drawn
@@ -69,6 +70,7 @@ pointer:
   noise_amplitude: 25  # int scalar; per-pixel noise amplitude on body (+/-)
   edge_thickness_range: [1, 3]  # [lo, hi] int; edge band width (px)
   edge_noise_amplitude: 5  # int scalar; per-pixel noise amplitude on edge (+/-)
+  min_bg_contrast: 0  # int scalar; min |pointer gray - bg gray| (bg_gray_range draw); 0 = off
 
 background:
   lowfreq_size: 8  # int scalar; low-frequency gradient tile resolution (NxN)

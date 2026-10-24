@@ -618,6 +618,35 @@ def test_reset_after_yaml_load_uses_builtin_default(page, tmp_path):
     assert btn.is_disabled()
 
 
+def test_min_bg_contrast_slider_changes_preview(page):
+    # pointer gray range straddling the default bg range [154, 179]
+    _commit_and_wait(page, _num(page, "pointer.gray_range", "lo"), "100")
+    _commit_and_wait(page, _num(page, "pointer.gray_range", "hi"), "230")
+    before = _tile_srcs(page)  # tile srcs with contrast off, list[str] (9)
+    btn = _reset_btn(page, "pointer.min_bg_contrast")  # scalar reset button (Locator)
+    assert btn.is_disabled()
+    assert _num(page, "pointer.min_bg_contrast").input_value() == "0"
+    # slider box in CSS px, dict x/y/width/height (floats)
+    slider = page.locator('[data-param="pointer.min_bg_contrast"] input[type=range]')  # (Locator)
+    slider.scroll_into_view_if_needed()  # a person scrolls the panel down to it first
+    box = slider.bounding_box()
+    y = box["y"] + box["height"] / 2  # slider centre line (float px)
+    old = _applied_seq(page)
+    _drag(page, box["x"] + 7, box["x"] + box["width"] * 0.3, y)  # human drag right
+    _wait_input(page, '[data-param="pointer.min_bg_contrast"] input[type=number]', "v > 0")
+    _wait_applied_after(page, old)
+    assert int(_num(page, "pointer.min_bg_contrast").input_value()) > 0
+    after = _tile_srcs(page)  # tile srcs with contrast on, list[str] (9)
+    assert any(a != b for a, b in zip(before, after)), "no tile changed"
+    assert btn.is_enabled()
+    old = _applied_seq(page)
+    btn.click()
+    _wait_applied_after(page, old)
+    assert _num(page, "pointer.min_bg_contrast").input_value() == "0"
+    assert btn.is_disabled()
+    assert _tile_srcs(page) == before
+
+
 def test_preview_count_keeps_seeds_after_reshuffle_and_typing(page):
     old = _applied_seq(page)
     page.get_by_test_id("reshuffle").click()

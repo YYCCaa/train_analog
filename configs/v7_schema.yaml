@@ -44,7 +44,8 @@ ticks:
   gray_range: {type: int_range, min: 0, max: 255, step: 1, help: "Tick gray level (0 = black)."}
 
 digits:
-  dist_jitter_range: {type: float_range, min: 0.0, max: 10.0, step: 0.1, help: "Bidirectional radial jitter of digits (px)."}
+  outside_jitter_range: {type: float_range, min: 0.0, max: 10.0, step: 0.1, help: "Outward-only radial jitter of digits placed outside the ticks (px)."}
+  inside_jitter_range: {type: float_range, min: 0.0, max: 10.0, step: 0.1, help: "Inward-only radial jitter of digits placed inside the ticks (px)."}
   angle_jitter_range: {type: float_range, min: 0.0, max: 10.0, step: 0.1, help: "Shared angular jitter of digits (degrees)."}
   font_size_range: {type: int_range, min: 8, max: 40, step: 1, help: "Digit font size (px)."}
   show_prob: {type: float, min: 0.0, max: 1.0, step: 0.05, help: "Probability that digits are drawn."}
@@ -65,6 +66,7 @@ pointer:
   noise_amplitude: {type: int, min: 0, max: 64, step: 1, help: "Per-pixel noise amplitude on the pointer body (+/-)."}
   edge_thickness_range: {type: int_range, min: 1, max: 8, step: 1, help: "Pointer edge band width (px)."}
   edge_noise_amplitude: {type: int, min: 0, max: 32, step: 1, help: "Per-pixel noise amplitude on the pointer edge (+/-)."}
+  min_bg_contrast: {type: int, min: 0, max: 255, step: 1, help: "Minimum |pointer gray - background gray| (bg_gray_range draw); 0 = off."}
 
 background:
   lowfreq_size: {type: int, min: 2, max: 32, step: 1, help: "Low-frequency background tile resolution (NxN)."}
