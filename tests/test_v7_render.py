@@ -670,7 +670,8 @@ def test_glare_overwrites_with_value():
 
 
 # "section.key" -> value pins (dict): the biggest rigid-ish glyphs, so effects cover a lot
-_BIG = {"size_range": [256, 256], "perspective": 0.0, "warp_strength": 0.0,
+_BIG = {"size_range": [256, 256], "perspective_range": [0.0, 0.0],
+        "warp_strength_range": [0.0, 0.0],
         "aspect_range": [1.0, 1.0], "shear_range": [0.0, 0.0]}
 
 
@@ -832,8 +833,9 @@ def test_perspective_changes_shape():
 def _extreme(section):
     """Dotted overrides putting `section`'s shape keys at the schema maxima."""
     return {f"{section}.aspect_range": [0.1, 10.0], f"{section}.shear_range": [-3.0, 3.0],
-            f"{section}.perspective": 0.9, f"{section}.warp_strength": 1.0,
-            f"{section}.warp_grid": 12, f"{section}.size_range": [8, 256]}
+            f"{section}.perspective_range": [0.9, 0.9],
+            f"{section}.warp_strength_range": [1.0, 1.0],
+            f"{section}.warp_grid_range": [12, 12], f"{section}.size_range": [8, 256]}
 
 
 def test_extreme_ranges_safe():
@@ -861,17 +863,50 @@ def test_extreme_ranges_safe():
 
 
 def test_glyph_shape_draw_count_fixed():
-    # the per-item draws are fixed-count: after one item the stream state
-    # does not depend on warp_strength / perspective (the warp grid is drawn even at 0)
+    # the per-item draws are fixed-count: after one item the streams' state does
+    # not depend on the perspective / warp-strength values, nor on the g drawn
+    # (nrng always advances by exactly 2*G*G, G = warp_grid_range[1])
     import random
     cfg = v7_config.default_config()
     states = []  # list[tuple[float, float]], next draw of each stream
-    for amp, persp in ((0.0, 0.0), (0.5, 0.7)):
-        sec = dict(cfg["reflections"], warp_strength=amp, perspective=persp)
+    for persp, strength in (([0.0, 0.0], [0.0, 0.0]), ([0.7, 0.7], [0.5, 0.5])):
+        sec = dict(cfg["reflections"], perspective_range=persp, warp_strength_range=strength)
         r, n = random.Random(1), np.random.default_rng(1)
         g7._glyph_shape(r, n, sec)
         states.append((r.random(), float(n.random())))
     assert states[0] == states[1]
+    # g varies per item (range 2..12) yet nrng consumption is the same each time
+    sec = dict(cfg["reflections"], warp_grid_range=[2, 12])
+    want = float(np.random.default_rng(5).random(2 * 12 * 12 + 1)[-1])  # float, next draw after 2*G*G
+    for seed in range(8):
+        r, n = random.Random(seed), np.random.default_rng(5)
+        g7._glyph_shape(r, n, sec)
+        assert float(n.random()) == want, seed
+
+
+def test_items_get_different_grid_and_strength():
+    # two items drawn from one section's streams get their own g and strength
+    import random
+    cfg = v7_config.default_config()
+    sec = dict(cfg["reflections"], warp_grid_range=[2, 12], warp_strength_range=[0.0, 1.0],
+               size_range=[64, 64])
+    r, n = random.Random(3), np.random.default_rng(3)
+    seen = []  # list[tuple[int, float]], (g, max |warp| px) per item given to transform_shape
+    orig = g7.transform_shape
+
+    def spy(sil, size, rot, aspect, shear, warp, edge_soft, persp):
+        seen.append(None if warp is None else (warp.shape[1], float(np.abs(warp).max())))
+        return orig(sil, size, rot, aspect, shear, warp, edge_soft, persp)
+
+    g7.transform_shape = spy
+    try:
+        for _ in range(2):
+            g7._glyph_shape(r, n, sec)
+    finally:
+        g7.transform_shape = orig
+    assert len(seen) == 2 and None not in seen
+    assert seen[0][0] != seen[1][0], seen  # different g
+    assert seen[0][1] != seen[1][1], seen  # different strength-scaled amplitude
 
 
 def test_effects_deterministic():

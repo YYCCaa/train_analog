@@ -103,9 +103,9 @@ reflections:
   rotation_range: [0.0, 360.0]  # [lo, hi] float; random rotation of the glyph (deg)
   aspect_range: [0.25, 4.0]  # [lo, hi] float; width/height stretch, drawn log-uniform (1 = unchanged)
   shear_range: [-1.0, 1.0]  # [lo, hi] float; horizontal shear factor of the glyph
-  perspective: 0.4  # float scalar; max projective keystone strength (0 = affine only)
-  warp_strength: 0.15  # float scalar; elastic warp amplitude as a fraction of the glyph size (0 = rigid)
-  warp_grid: 4  # int scalar; warp control grid (g x g); larger = finer, wigglier distortion
+  perspective_range: [0.0, 0.4]  # [lo, hi] float; projective keystone strength, drawn per item (0 = affine only)
+  warp_strength_range: [0.05, 0.2]  # [lo, hi] float; elastic warp amplitude as a fraction of the glyph size, drawn per item (0 = rigid)
+  warp_grid_range: [3, 6]  # [lo, hi] int; warp control grid g (g x g), drawn per item; larger = finer, wigglier distortion
   darken_range: [10, 40]  # [lo, hi] int; gray levels subtracted inside the shape (value, not multiplier)
   edge_soft: 1.5  # float scalar; Gaussian softening of the shape edge (px)
 
@@ -117,9 +117,9 @@ glares:
   rotation_range: [0.0, 360.0]  # [lo, hi] float; random rotation of the glyph (deg)
   aspect_range: [0.25, 4.0]  # [lo, hi] float; width/height stretch, drawn log-uniform (1 = unchanged)
   shear_range: [-1.0, 1.0]  # [lo, hi] float; horizontal shear factor of the glyph
-  perspective: 0.4  # float scalar; max projective keystone strength (0 = affine only)
-  warp_strength: 0.15  # float scalar; elastic warp amplitude as a fraction of the glyph size (0 = rigid)
-  warp_grid: 4  # int scalar; warp control grid (g x g); larger = finer, wigglier distortion
+  perspective_range: [0.0, 0.4]  # [lo, hi] float; projective keystone strength, drawn per item (0 = affine only)
+  warp_strength_range: [0.05, 0.2]  # [lo, hi] float; elastic warp amplitude as a fraction of the glyph size, drawn per item (0 = rigid)
+  warp_grid_range: [3, 6]  # [lo, hi] int; warp control grid g (g x g), drawn per item; larger = finer, wigglier distortion
   value_range: [220, 255]  # [lo, hi] int; gray level the glare overwrites pixels with (value, not multiplier)
   edge_soft: 1.0  # float scalar; Gaussian softening of the shape edge (px)
   clear_distance: 12.0  # float scalar; no glare within this distance of the visible pointer tip (px)
