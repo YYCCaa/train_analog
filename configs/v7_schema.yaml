@@ -6,7 +6,8 @@
 #  2*(int(85*1.15) + 30) = 254).
 # They also keep the tip label on the image for ANY combination of extremes:
 # apex reach from the dial centre, after stretch, must fit the half image
-# minus the largest whole-dial displacement, i.e.
+# minus the largest content displacement (content offset inside the
+# always-centred circle canvas), i.e.
 #   ((int(85*scale_max) - 2) * (1 + tip_variation_max) + |ptr_displacement|max)
 #     * stretch_max <= 127 - |displacement|max
 #   ((97 - 2) * 1.05 + 6) * 1.1 = 116.3 <= 127 - 10 = 117
@@ -25,7 +26,7 @@ geometry:
   hole_ratio_range: {type: float_range, min: 0.5, max: 1.5, step: 0.01, help: "Mounting hole radius / hub radius."}
   hole_disp_range: {type: float_range, min: -20.0, max: 20.0, step: 0.5, help: "Mounting hole offset from pointer centre (px)."}
   tip_variation: {type: float, min: 0.0, max: 0.05, step: 0.005, help: "Fractional jitter of pointer tip distance."}
-  displacement_range: {type: float_range, min: -10.0, max: 10.0, step: 0.5, help: "Whole-dial displacement from canvas centre (px)."}
+  displacement_range: {type: float_range, min: -10.0, max: 10.0, step: 0.5, help: "Dial content (scale, ticks, digits, pointer) offset from the circle-canvas centre (px); the circle canvas itself stays centred in the image."}
   ptr_displacement_range: {type: float_range, min: -6.0, max: 6.0, step: 0.5, help: "Pointer + hole offset from dial centre (px)."}
   stretch_h_range: {type: float_range, min: 0.8, max: 1.1, step: 0.01, help: "Horizontal stretch factor inside the dial."}
   stretch_v_range: {type: float_range, min: 0.8, max: 1.1, step: 0.01, help: "Vertical stretch factor inside the dial."}
