@@ -60,16 +60,23 @@ function NumberField({ value, min, max, step, isInt, handle, disabled, onCommit 
   );
 }
 
+/** Value equality: scalars by ===, ranges element-wise; (a, b: Value) => bool. */
+function sameValue(a: Value, b: Value): boolean {
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => x === b[i]);
+  return a === b;
+}
+
 type Props = {
   section: string; // section name (str), e.g. "ticks"
   name: string; // key inside the section (str), e.g. "len_range"
   leaf: Leaf; // schema leaf: type, min/max/step, help, readonly
   value: Value; // current value: number | boolean | [lo, hi] (2 numbers)
+  defaultValue?: Value; // built-in default: number | boolean | [lo, hi]; undefined until loaded
   onChange: (v: Value) => void; // receives the new value for this leaf
 };
 
 /** Control for section.name, rendered according to leaf.type. */
-export default function ParamControl({ section, name, leaf, value, onChange }: Props) {
+export default function ParamControl({ section, name, leaf, value, defaultValue, onChange }: Props) {
   const disabled = !!leaf.readonly; // read-only leaf -> every input disabled (bool)
   const isInt = leaf.type === "int" || leaf.type === "int_range"; // integer-valued (bool)
   // slider string -> number (int or float per leaf type); (s: str) => number
@@ -130,6 +137,14 @@ export default function ParamControl({ section, name, leaf, value, onChange }: P
       <div className="param-name">
         {name}
         {disabled && <span className="tag">read-only</span>}
+        {!disabled && defaultValue !== undefined && (
+          <button type="button" className="reset" data-testid={`reset-${section}.${name}`}
+            title={`Reset to default (${Array.isArray(defaultValue) ? `[${defaultValue.join(", ")}]` : String(defaultValue)})`}
+            disabled={sameValue(value, defaultValue)}
+            onClick={() => onChange(defaultValue)}>
+            ↺
+          </button>
+        )}
       </div>
       {body}
       <div className="help">{leaf.help}</div>

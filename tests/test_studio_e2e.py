@@ -466,3 +466,153 @@ def test_generate_refuses_non_integer_inputs(page, tmp_path):
         assert status.locator(".state").inner_text() != "running"
 
 
+
+
+def _wait_tile_count(page, n):
+    """Wait until the grid is settled and shows exactly n (int) decoded tiles."""
+    page.wait_for_function(_SETTLED_JS, timeout=UI_TIMEOUT)
+    page.wait_for_function(
+        f"""() => {{
+          const imgs = [...document.querySelectorAll('[data-testid=tile] img')];
+          return imgs.length === {n} && imgs.every(i => i.complete && i.naturalWidth === 256);
+        }}""", timeout=UI_TIMEOUT)
+
+
+def _set_count(page, text, expect_tiles):
+    """Type text (str) into the preview-count input, press Enter, wait for
+    expect_tiles (int) tiles to be shown and settled."""
+    box = page.get_by_test_id("preview-count")  # preview count input (Locator)
+    box.fill(text)
+    box.press("Enter")
+    _wait_tile_count(page, expect_tiles)
+
+
+def _tile_seeds(page):
+    """list[int]: data-seed of each tile in grid order."""
+    return page.eval_on_selector_all("[data-testid=tile]",
+                                     "els => els.map(e => Number(e.dataset.seed))")
+
+
+def _grid_columns(page):
+    """int: number of columns in the computed grid-template-columns of the preview grid."""
+    css = page.eval_on_selector("[data-testid=preview-grid]",
+                                "e => getComputedStyle(e).gridTemplateColumns")
+    return len(css.split())
+
+
+def test_preview_count_changes_tile_count(page):
+    box = page.get_by_test_id("preview-count")  # count input (Locator)
+    assert box.input_value() == "9"
+    base_seeds = _tile_seeds(page)  # seeds of the 9 initial tiles, list[int]
+    base_srcs = _tile_srcs(page)  # their image srcs, list[str]
+    assert base_seeds == list(range(9))
+
+    _set_count(page, "4", 4)
+    assert page.get_by_test_id("tile").count() == 4
+    assert _grid_columns(page) == 2
+    assert _tile_seeds(page) == base_seeds[:4]
+    assert _tile_srcs(page) == base_srcs[:4]
+
+    _set_count(page, "16", 16)
+    assert page.get_by_test_id("tile").count() == 16
+    assert _grid_columns(page) == 4
+    assert _tile_seeds(page)[:4] == base_seeds[:4]
+    assert _tile_srcs(page)[:4] == base_srcs[:4]
+    assert _tile_seeds(page) == list(range(16))  # sequential scheme continues
+
+    _set_count(page, "40", 16)
+    assert box.input_value() == "16"
+    _set_count(page, "0", 1)
+    assert box.input_value() == "1"
+    assert page.get_by_test_id("tile").count() == 1
+    assert _grid_columns(page) == 1
+
+
+def test_preview_count_survives_reshuffle(page):
+    _set_count(page, "5", 5)
+    before = set(_tile_seeds(page))  # seeds before reshuffle, set[int]
+    old = _applied_seq(page)
+    page.get_by_test_id("reshuffle").click()
+    page.wait_for_function(
+        f"() => Number(document.querySelector('[data-testid=preview-grid]')"
+        f".dataset.appliedSeq) > {old}", timeout=UI_TIMEOUT)
+    _wait_tile_count(page, 5)
+    after = _tile_seeds(page)  # seeds after reshuffle, list[int]
+    assert len(after) == 5
+    assert not (set(after) & before), (before, after)
+    assert page.get_by_test_id("preview-count").input_value() == "5"
+    # growing after a reshuffle keeps the 5 and appends random (non-sequential) seeds
+    _set_count(page, "7", 7)
+    assert _tile_seeds(page)[:5] == after
+
+
+def _reset_btn(page, param):
+    """Reset button (Locator) of control param (str, 'section.key')."""
+    return page.get_by_test_id(f"reset-{param}")
+
+
+def _wait_applied_after(page, old):
+    """Wait until grid applied seq (int) exceeds old (int) and the preview settled."""
+    page.wait_for_function(
+        f"() => Number(document.querySelector('[data-testid=preview-grid]')"
+        f".dataset.appliedSeq) > {old}", timeout=UI_TIMEOUT)
+    _wait_settled(page)
+
+
+def test_reset_slider_to_default(page):
+    base_srcs = _tile_srcs(page)  # default-config tile srcs, list[str] (9)
+    rng = _reset_btn(page, "ticks.len_range")  # range reset button (Locator)
+    sca = _reset_btn(page, "digits.show_prob")  # scalar reset button (Locator)
+    assert rng.is_disabled() and sca.is_disabled()
+    _commit_and_wait(page, _num(page, "ticks.len_range", "hi"), "14")
+    _commit_and_wait(page, _num(page, "digits.show_prob"), "0.9")
+    assert rng.is_enabled() and sca.is_enabled()
+    assert _tile_srcs(page) != base_srcs
+    old = _applied_seq(page)
+    rng.click()
+    _wait_applied_after(page, old)
+    old = _applied_seq(page)
+    sca.click()
+    _wait_applied_after(page, old)
+    assert _num(page, "ticks.len_range", "lo").input_value() == "6"
+    assert _num(page, "ticks.len_range", "hi").input_value() == "9"
+    assert _num(page, "digits.show_prob").input_value() == "0.5"
+    assert rng.is_disabled() and sca.is_disabled()
+    assert _tile_srcs(page) == base_srcs
+    assert "Reset to default" in rng.get_attribute("title")
+    assert _reset_btn(page, "canvas.img_size").count() == 0 \
+        or _reset_btn(page, "canvas.img_size").is_disabled()
+
+
+def test_reset_toggle_to_default(page):
+    box = page.locator('[data-param="tri_artifacts.enabled"] input[type=checkbox]')
+    btn = _reset_btn(page, "tri_artifacts.enabled")  # toggle reset button (Locator)
+    assert box.is_checked() and btn.is_disabled()
+    old = _applied_seq(page)
+    box.uncheck()
+    _wait_applied_after(page, old)
+    assert btn.is_enabled()
+    old = _applied_seq(page)
+    btn.click()
+    _wait_applied_after(page, old)
+    assert box.is_checked() and btn.is_disabled()
+
+
+def test_reset_after_yaml_load_uses_builtin_default(page, tmp_path):
+    saved = tmp_path / "default.yaml"  # downloaded default YAML (Path)
+    text = _save_yaml(page, saved)
+    import re
+    patched = re.sub(r"show_prob:\s*0\.5", "show_prob: 0.9", text)  # YAML with 0.9 (str)
+    assert patched != text
+    saved.write_text(patched, encoding="utf-8")
+    old = _applied_seq(page)
+    page.get_by_test_id("load-yaml").set_input_files(str(saved))
+    _wait_applied_after(page, old)
+    assert _num(page, "digits.show_prob").input_value() == "0.9"
+    btn = _reset_btn(page, "digits.show_prob")  # scalar reset button (Locator)
+    assert btn.is_enabled()
+    old = _applied_seq(page)
+    btn.click()
+    _wait_applied_after(page, old)
+    assert _num(page, "digits.show_prob").input_value() == "0.5"
+    assert btn.is_disabled()

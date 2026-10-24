@@ -1,4 +1,4 @@
-// 3x3 preview grid; optional client-side tip marker overlay on each tile.
+// Preview grid (ceil(sqrt(count)) columns); optional client-side tip marker overlay on each tile.
 import type { Tile } from "../api";
 
 type Props = {
@@ -8,12 +8,13 @@ type Props = {
   sentSeq: number; // newest preview request number sent (int)
   appliedSeq: number; // request number whose response is shown (int)
   busy: boolean; // debounce pending or latest request in flight
+  count: number; // preview tile count, int in [1,16]; sets the column count
 };
 
 /** Marker side in CSS px (int); the marker is centred on the tip. */
 const MARKER = 18;
 
-export default function PreviewGrid({ tiles, imgSize, overlay, sentSeq, appliedSeq, busy }: Props) {
+export default function PreviewGrid({ tiles, imgSize, overlay, sentSeq, appliedSeq, busy, count }: Props) {
   return (
     <div
       className={"grid" + (busy ? " busy" : "")}
@@ -21,8 +22,10 @@ export default function PreviewGrid({ tiles, imgSize, overlay, sentSeq, appliedS
       data-sent-seq={sentSeq}
       data-applied-seq={appliedSeq}
       data-busy={busy ? "true" : "false"}
+      // ceil(sqrt(count)) equal columns (str)
+      style={{ gridTemplateColumns: `repeat(${Math.ceil(Math.sqrt(count))}, minmax(0, 1fr))` }}
     >
-      {tiles.map((t, i) => (
+      {tiles.slice(0, count).map((t, i) => (
         <figure key={i} data-testid="tile" data-seed={t.seed}>
           <div className="frame">
             <img src={`data:image/png;base64,${t.png_b64}`} alt={`seed ${t.seed}`} draggable={false} />

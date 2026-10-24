@@ -219,3 +219,7 @@ main { overflow-y: auto; padding: 14px 18px 30px; }
 .state-done .state { color: var(--ok); }
 .state-cancelled .state, .state-error .state { color: var(--danger); }
 .gen-status .err { color: var(--danger); margin-top: 4px; }
+.toolbar .count { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+.toolbar .count input { width: 56px; }
+.param-name .reset { margin-left: 6px; padding: 0 5px; font-size: 12px; line-height: 16px; cursor: pointer; }
+.param-name .reset:disabled { opacity: 0.35; cursor: default; }

@@ -8,10 +8,15 @@ import GeneratePanel from "./components/GeneratePanel";
 
 /** Preview debounce after the last control change (ms, int). */
 const DEBOUNCE_MS = 150;
-/** Number of preview tiles (int). */
-const TILE_COUNT = 9;
-/** Initial fixed preview seeds, list[int] of length TILE_COUNT. */
-const INITIAL_SEEDS = Array.from({ length: TILE_COUNT }, (_, i) => i);
+/** Default number of preview tiles (int). */
+const DEFAULT_COUNT = 9;
+/** Smallest / largest preview tile count the backend accepts (int, int). */
+const MIN_COUNT = 1;
+const MAX_COUNT = 16;
+/** Initial fixed preview seeds, list[int] of length DEFAULT_COUNT. */
+const INITIAL_SEEDS = Array.from({ length: DEFAULT_COUNT }, (_, i) => i);
+/** A fresh random preview seed, int in [0, 2^31). */
+const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
 
 /** Errors of any thrown value as list[str]. */
 function errorsOf(e: unknown): string[] {
@@ -25,7 +30,15 @@ function errorsOf(e: unknown): string[] {
 export default function App() {
   const [schema, setSchema] = useState<Schema | null>(null); // section -> key -> Leaf
   const [config, setConfig] = useState<Config | null>(null); // current UI config
-  const [seeds, setSeeds] = useState<number[]>(INITIAL_SEEDS); // preview seeds (9 ints)
+  const [seeds, setSeeds] = useState<number[]>(INITIAL_SEEDS); // preview seeds, list[int] of length count
+  const [count, setCount] = useState(DEFAULT_COUNT); // preview tile count, int in [1,16]
+  // text typed in the count box, str; may be non-numeric until committed or blurred
+  const [countDraft, setCountDraft] = useState(String(DEFAULT_COUNT));
+  // seed scheme used when growing: "seq" = max+1.. (initial), "random" = after a reshuffle
+  const [scheme, setScheme] = useState<"seq" | "random">("seq");
+  // built-in default config (configs/v7_default.yaml), section -> key -> Value; set once at
+  // startup and never replaced by a loaded YAML; source of the per-control reset buttons
+  const [defaults, setDefaults] = useState<Config | null>(null);
   const [tiles, setTiles] = useState<Tile[]>([]); // latest applied tiles
   const [overlay, setOverlay] = useState(false); // tip markers on/off
   // errors of the last preview request (list[str]); cleared by a successful preview
@@ -47,6 +60,7 @@ export default function App() {
       .then(([s, c]) => {
         setSchema(s);
         setConfig(c);
+        setDefaults(c);
       })
       .catch((e) => setFileErrors(errorsOf(e)));
   }, []);
@@ -86,9 +100,31 @@ export default function App() {
     setConfig((c) => (c ? { ...c, [section]: { ...c[section], [key]: v } } : c));
   }, []);
 
-  // pick 9 new random preview seeds (ints in [0, 2^31)); () => void
-  const reshuffle = () =>
-    setSeeds(Array.from({ length: TILE_COUNT }, () => Math.floor(Math.random() * 2 ** 31)));
+  // pick `count` new random preview seeds (ints in [0, 2^31)); () => void
+  const reshuffle = () => {
+    setScheme("random");
+    setSeeds(Array.from({ length: count }, randomSeed));
+  };
+
+  // apply the count box text (str): whole numbers are clamped to 1..16 and resize the
+  // seed list (keep order, truncate or append per scheme); anything else is ignored
+  const commitCount = (text: string) => {
+    const t = text.trim(); // trimmed text (str)
+    if (!/^[+-]?\d+$/.test(t)) return;
+    const n = Math.min(MAX_COUNT, Math.max(MIN_COUNT, parseInt(t, 10))); // clamped count (int)
+    setCountDraft(String(n));
+    if (n === count) return;
+    setCount(n);
+    setSeeds((prev) => {
+      if (n <= prev.length) return prev.slice(0, n);
+      const next = prev.slice(); // grown seed list (list[int])
+      const top = prev.length ? Math.max(...prev) : -1; // highest seed so far (int)
+      for (let i = prev.length; i < n; i++) {
+        next.push(scheme === "seq" ? top + 1 + (i - prev.length) : randomSeed());
+      }
+      return next;
+    });
+  };
 
   // read a YAML File, parse it server-side, adopt the config or show its errors;
   // (file: File) => Promise<void>
@@ -152,6 +188,14 @@ export default function App() {
               onChange={(e) => setOverlay(e.target.checked)} />
             tip overlay
           </label>
+          <label className="count">
+            Preview images
+            <input type="number" data-testid="preview-count" min={MIN_COUNT} max={MAX_COUNT}
+              step={1} value={countDraft}
+              onChange={(e) => { setCountDraft(e.target.value); commitCount(e.target.value); }}
+              onKeyDown={(e) => { if (e.key === "Enter") commitCount(countDraft); }}
+              onBlur={() => setCountDraft(String(count))} />
+          </label>
           <button data-testid="reshuffle" onClick={reshuffle}>Reshuffle seeds</button>
         </div>
       </header>
@@ -164,6 +208,7 @@ export default function App() {
               {Object.entries(keys).map(([key, leaf]) => (
                 <ParamControl key={key} section={section} name={key} leaf={leaf}
                   value={config[section][key]}
+                  defaultValue={defaults?.[section]?.[key]}
                   onChange={(v) => setParam(section, key, v)} />
               ))}
             </section>
@@ -177,7 +222,7 @@ export default function App() {
           ))}
         </div>
         <PreviewGrid tiles={tiles} imgSize={imgSize} overlay={overlay}
-          sentSeq={sentSeq} appliedSeq={appliedSeq} busy={busy} />
+          sentSeq={sentSeq} appliedSeq={appliedSeq} busy={busy} count={count} />
         <GeneratePanel config={config} />
       </main>
     </div>
