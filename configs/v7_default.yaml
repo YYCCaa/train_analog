@@ -95,27 +95,31 @@ shadows:
   rim_blur_range: [4.0, 8.0]  # [lo, hi] float; rim shadow blur radius (px)
 
 reflections:
-  # cover-glass reflections: shape = a SAM object silhouette from the shape bank, randomly
-  # scaled / rotated / stretched / sheared / elastically warped; out = in - darken x shape
-  prob: 0.0  # float scalar; probability an image gets reflections (0 = off, no bank needed)
+  # cover-glass reflections: shape = an ASCII glyph (A-Z a-z 0-9, random font), randomly
+  # scaled / rotated / stretched / sheared / keystoned / elastically warped; out = in - darken x shape
+  prob: 0.0  # float scalar; probability an image gets reflections (0 = off)
   count_range: [1, 3]  # [lo, hi] int; reflections per image
-  size_range: [24, 72]  # [lo, hi] int; longest side of the silhouette after scaling (px)
-  rotation_range: [0.0, 360.0]  # [lo, hi] float; random rotation of the silhouette (deg)
-  aspect_range: [0.7, 1.4]  # [lo, hi] float; width/height stretch, drawn log-uniform (1 = unchanged)
-  shear_range: [-0.25, 0.25]  # [lo, hi] float; horizontal shear factor of the silhouette
-  warp_amplitude: 4.0  # float scalar; max displacement of the smooth elastic warp (px); 0 = rigid
+  size_range: [24, 96]  # [lo, hi] int; longest side of the glyph after scaling (px)
+  rotation_range: [0.0, 360.0]  # [lo, hi] float; random rotation of the glyph (deg)
+  aspect_range: [0.25, 4.0]  # [lo, hi] float; width/height stretch, drawn log-uniform (1 = unchanged)
+  shear_range: [-1.0, 1.0]  # [lo, hi] float; horizontal shear factor of the glyph
+  perspective: 0.4  # float scalar; max projective keystone strength (0 = affine only)
+  warp_strength: 0.15  # float scalar; elastic warp amplitude as a fraction of the glyph size (0 = rigid)
+  warp_grid: 4  # int scalar; warp control grid (g x g); larger = finer, wigglier distortion
   darken_range: [10, 40]  # [lo, hi] int; gray levels subtracted inside the shape (value, not multiplier)
   edge_soft: 1.5  # float scalar; Gaussian softening of the shape edge (px)
 
 glares:
   # cover-glass glares: shape as above; out = lerp(in, value, shape), applied after reflections
-  prob: 0.0  # float scalar; probability an image gets glares (0 = off, no bank needed)
+  prob: 0.0  # float scalar; probability an image gets glares (0 = off)
   count_range: [1, 2]  # [lo, hi] int; glares per image
-  size_range: [16, 56]  # [lo, hi] int; longest side of the silhouette after scaling (px)
-  rotation_range: [0.0, 360.0]  # [lo, hi] float; random rotation of the silhouette (deg)
-  aspect_range: [0.7, 1.4]  # [lo, hi] float; width/height stretch, drawn log-uniform (1 = unchanged)
-  shear_range: [-0.25, 0.25]  # [lo, hi] float; horizontal shear factor of the silhouette
-  warp_amplitude: 3.0  # float scalar; max displacement of the smooth elastic warp (px); 0 = rigid
+  size_range: [16, 72]  # [lo, hi] int; longest side of the glyph after scaling (px)
+  rotation_range: [0.0, 360.0]  # [lo, hi] float; random rotation of the glyph (deg)
+  aspect_range: [0.25, 4.0]  # [lo, hi] float; width/height stretch, drawn log-uniform (1 = unchanged)
+  shear_range: [-1.0, 1.0]  # [lo, hi] float; horizontal shear factor of the glyph
+  perspective: 0.4  # float scalar; max projective keystone strength (0 = affine only)
+  warp_strength: 0.15  # float scalar; elastic warp amplitude as a fraction of the glyph size (0 = rigid)
+  warp_grid: 4  # int scalar; warp control grid (g x g); larger = finer, wigglier distortion
   value_range: [220, 255]  # [lo, hi] int; gray level the glare overwrites pixels with (value, not multiplier)
   edge_soft: 1.0  # float scalar; Gaussian softening of the shape edge (px)
   clear_distance: 12.0  # float scalar; no glare within this distance of the visible pointer tip (px)

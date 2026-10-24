@@ -109,27 +109,11 @@ Only to the folder typed into the Generate panel:
 To reproduce a dataset from the CLI:
 `python generate_synthetic_v7_mp.py --config <folder>/config.yaml ...`.
 
-## Shape bank for reflections/glares
+## Reflection/glare shapes
 
-Reflections and glares take real-object silhouettes from a shape bank. It is
-baked once, offline, by running SAM ViT-B (`pip install segment-anything`) over
-Places365 photos:
-
-```
-python tools/build_shape_bank.py            # ~/places365 -> ~/places365_shapes.npz
-python tools/build_shape_bank.py --resume   # continue after a crash or Ctrl-C
-```
-
-The defaults are 5000 photos, at most 10 masks per photo and 30000 masks in
-total. On an RTX 4090 this takes about 0.5 s per photo, so about 45 minutes,
-and yields about 9 masks per photo. The SAM weights
-(`~/.cache/sam/sam_vit_b_01ec64.pth`, 375 MB) download on first run. Every 250
-photos the script writes a `places365_shapes.partial.npz` checkpoint and a
-`.progress.json` file next to the output.
-
-The generator reads `~/places365_shapes.npz` by default. Set
-`V7_SHAPE_BANK=<path>` to use a different bank. The file format is in the
-`tools/build_shape_bank.py` docstring and is checked by `load_bank`.
+Reflections and glares take their shapes from ASCII glyphs (`A-Z a-z 0-9`,
+random system font), rendered in memory and randomly transformed; no data
+files are needed.
 
 ## Tests
 
