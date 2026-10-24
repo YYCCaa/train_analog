@@ -286,8 +286,9 @@ def test_overlay_marker_on_apex(page):
     for g in geo:
         scale = g["iw"] / 256.0  # displayed px per image px (float)
         t = tips[g["seed"]]  # tile dict of this figure's seed
-        assert abs(g["cx"] - (g["ix"] + t["tip_x"] * scale)) <= 3, (g, t)
-        assert abs(g["cy"] - (g["iy"] + t["tip_y"] * scale)) <= 3, (g, t)
+        # pixel-centre labels: image px i's centre is drawn at (i + 0.5) * scale
+        assert abs(g["cx"] - (g["ix"] + (t["tip_x"] + 0.5) * scale)) <= 1, (g, t)
+        assert abs(g["cy"] - (g["iy"] + (t["tip_y"] + 0.5) * scale)) <= 1, (g, t)
 
 
 def test_rapid_drag_shows_latest(page, server):
@@ -608,22 +609,27 @@ def test_cut_tip_toggle_moves_marker_to_visible_tip(page):
     old = _applied_seq(page)
     box.uncheck()
     _wait_applied_after(page, old)
-    off = _marker_geometry(page)  # cut off: marker on the apex, list[dict] (9)
+    off = _marker_geometry(page)  # cut off: marker on the visible apex end, list[dict] (9)
     old = _applied_seq(page)
     box.check()
     _wait_applied_after(page, old)
     on2 = _marker_geometry(page)  # cut on again, list[dict] (9)
+    shifts = []  # list[float], marker shift per tile in image px
     for a, b, c in zip(on1, off, on2):
         assert a["seed"] == b["seed"] == c["seed"]
         assert abs(a["cx"] - c["cx"]) < 0.5 and abs(a["cy"] - c["cy"]) < 0.5, (a, c)
         scale = b["iw"] / 256.0  # displayed px per image px (float)
         mid_x, mid_y = b["ix"] + b["iw"] / 2.0, b["iy"] + b["iw"] / 2.0  # tile centre (CSS px)
-        # marker shift in image px (float): radius_range default [7, 10]
+        # marker shift in image px (float): radius_range default [7, 10], minus
+        # what the edge ring / rim already hid with the cut off (the label is
+        # the visible end), so anything from 0 (tip under the rim) to ~11
         shift = math.hypot(a["cx"] - b["cx"], a["cy"] - b["cy"]) / scale
-        assert 6.0 <= shift <= 11.0, (a, b, shift)
+        assert shift <= 11.0, (a, b, shift)
+        shifts.append(shift)
         d_on = math.hypot(a["cx"] - mid_x, a["cy"] - mid_y)  # float CSS px
         d_off = math.hypot(b["cx"] - mid_x, b["cy"] - mid_y)  # float CSS px
-        assert d_on < d_off, (a, b)
+        assert d_on <= d_off + 0.5, (a, b)  # the cut never pushes the tip outward
+    assert max(shifts) >= 3.0, shifts  # the user does see the marker move
 
 
 def test_reset_after_yaml_load_uses_builtin_default(page, tmp_path):

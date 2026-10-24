@@ -56,9 +56,15 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
     RenderResult(image (256, 256) uint8, tip_x, tip_y, angle_deg)
 
 The pointer: a hub circle + an isosceles triangle whose base is a chord
-of the hub, apex pointing outward.  Label = the visible tip in pixel
-coordinates: the apex, or, when cut_tip is on, the centre of the cut arc on
-the pointer axis (apex - cut_r * unit pointer direction).
+of the hub, apex pointing outward.  Label = the visible end of the pointer on
+its axis, in pixel coordinates (pixel i's centre at i), after the edge ring
+and the cut: the ideal apex walked back along the axis to the level of the
+farthest pointer pixel that still shows (edge-band weight > 1/2 through the
+same bicubic stretch as the image, not under the rim band / outer fill),
+searched within TIP_STRIP px of the axis.  With a big cut this is ~ the centre
+of the cut arc on the axis; with a small or no cut it accounts for the 1-px
+background ring at the acute apex.  params["derived"] also records the ideal
+apex (ideal_apex_x/y) and tip_recession (px from it to the label, pre-stretch).
 
 Shadows are physical: a shadow blocks the direct light and keeps only the
 ambient light, so it scales the surface by an albedo-independent factor,
@@ -111,7 +117,7 @@ bool, str, list); positions are image px unless named otherwise.
     shadows        active, light_angle, s_p, s_r, rim_offset_frac,
                    rim_cutout_frac, rim_blur, offset
     pointer        gray, hole_gray, edge_gray, gradient, edge_thickness
-    cut_tip        enabled, cut_r
+    cut_tip        enabled, cut_r, ideal_apex_x / _y, tip_recession
     jitter         brightness, contrast, sharpness
     hier_noise     block_min, block_max, block_std (of the block offsets)
     tri_artifacts  enabled, count_drawn, n, items[n] {gray, center_x,
@@ -122,7 +128,8 @@ bool, str, list); positions are image px unless named otherwise.
     glares         same as reflections with value instead of darken
     blur           enabled, radius
     derived        img_size, canvas_offset_x / _y, dial_rx, dial_ry,
-                   outer_rx, outer_ry, tip_x, tip_y
+                   outer_rx, outer_ry, tip_x, tip_y, ideal_apex_x / _y,
+                   tip_recession
 """
 
 import argparse
@@ -180,8 +187,8 @@ def section_rngs(image_seed):
 class RenderResult:
     """One rendered dial and its label."""
     image: np.ndarray  # gray dial image, (img_size, img_size) uint8
-    tip_x: float  # visible pointer tip x in image pixels (float; apex or cut-arc centre)
-    tip_y: float  # visible pointer tip y in image pixels (float; apex or cut-arc centre)
+    tip_x: float  # visible pointer end x on its axis, image px (float; edge ring + cut aware)
+    tip_y: float  # visible pointer end y on its axis, image px (float; edge ring + cut aware)
     angle_deg: int  # pointer angle, whole degrees (0 = up, clockwise)
     # sampled per-image values, dict[str, dict]: section name -> key -> JSON-plain
     # value (int / float rounded to 4 decimals / bool / str / list); see "Params"
@@ -434,24 +441,39 @@ def _pointer_variation(img, mask, cx, cy, angle_deg, tip_dist, grad_strength,
     return Image.fromarray(arr.astype(np.uint8))
 
 
-def _draw_pointer_edge(img, mask, edge_gray, bg_arr, thickness, noise_amp, nrng):
-    """Variable-thickness edge band on the pointer mask boundary.
+def _erosion_dist(m, thickness):
+    """Erosion-ring index of every pixel of a pointer mask.
 
-    The outermost erosion ring blends toward the pre-pointer background
-    (bg_arr, (C, C) uint8), inner rings toward edge_gray; each pixel gets
-    independent noise from nrng.
+    m         : (C, C) uint8 pointer mask (0 / 255)
+    thickness : int >= 0, number of 4-neighbour roll-erosion steps
+    Returns dist, (C, C) float32: the step at which a mask pixel is eroded away
+    (0 = outermost ring) or `thickness` for pixels deeper than the band and for
+    every pixel outside the mask.  Shared by _draw_pointer_edge and the visible
+    mask in draw_pointer so the two always agree.
     """
-    m = np.array(mask)  # (C, C) uint8
-    arr = np.array(img)  # (C, C) uint8
-    # dist[y, x] = erosion steps survived (0 = outermost ring), (C, C) float32
-    dist = np.full(m.shape, thickness, dtype=np.float32)
-    current = m.copy()
+    dist = np.full(m.shape, thickness, dtype=np.float32)  # (C, C) float32
+    current = m.copy()  # (C, C) uint8, mask still standing after `step` erosions
     for step in range(thickness):
         e1 = np.minimum(np.roll(current, 1, 0), np.roll(current, -1, 0))
         e2 = np.minimum(np.roll(current, 1, 1), np.roll(current, -1, 1))
         eroded = np.minimum(e1, e2) & current
         dist[(current > 0) & (eroded == 0)] = step
         current = eroded
+    return dist
+
+
+def _draw_pointer_edge(img, mask, edge_gray, bg_arr, thickness, noise_amp, nrng):
+    """Variable-thickness edge band on the pointer mask boundary.
+
+    The outermost erosion ring blends toward the pre-pointer background
+    (bg_arr, (C, C) uint8), inner rings toward edge_gray; each pixel gets
+    independent noise from nrng.  Because ring 0 is repainted with the
+    background (blend = 0), the visible pointer is the mask minus ring 0.
+    """
+    m = np.array(mask)  # (C, C) uint8
+    arr = np.array(img)  # (C, C) uint8
+    # dist[y, x] = erosion steps survived (0 = outermost ring), (C, C) float32
+    dist = _erosion_dist(m, thickness)
 
     ys, xs = np.where((m > 0) & (dist < thickness))
     if len(ys) == 0:
@@ -503,8 +525,12 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
                  edge_thickness, cut_tip_radius):
     """Draw the pointer on the "L" canvas.
 
-    Returns (img, apex, base_left, base_right, mask) where mask is the "L"
-    pointer mask with the apex disc erased when cut_tip_radius is not None.
+    Returns (img, apex, base_left, base_right, mask, vis) where mask is the "L"
+    pointer mask with the apex disc erased when cut_tip_radius is not None, and
+    vis, (C, C) float32 in [0, 1], is the VISIBLE pointer: that (cut) mask
+    weighted by how far _draw_pointer_edge blends each edge ring away from the
+    background (ring 0 = background = 0, same erosion of the uncut mask), plus,
+    with the cut off, the outline-only pixels the img draw adds (weight 1).  apex is the ideal triangle apex, (x, y) float px.
     """
     a = math.radians(angle_deg - 90)
     apex = (cx + tip_dist * math.cos(a), cy + tip_dist * math.sin(a))
@@ -531,12 +557,77 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
     img = _draw_pointer_edge(img, mask, edge_gray, bg_arr, edge_thickness,
                              pcfg["edge_noise_amplitude"], nrng)
 
+    m_uncut = np.array(mask)  # (C, C) uint8, uncut pointer mask (before the cut)
     if cut_tip_radius is not None:
-        mask_arr = np.array(mask)
+        mask_arr = m_uncut.copy()  # (C, C) uint8, mask to cut
         ys_t, xs_t = np.ogrid[:mask_arr.shape[0], :mask_arr.shape[1]]
         mask_arr[(xs_t - apex[0]) ** 2 + (ys_t - apex[1]) ** 2 <= cut_tip_radius ** 2] = 0
         mask = Image.fromarray(mask_arr)
-    return img, apex, base_left, base_right, mask
+    # visible pointer, (C, C) float32 in [0, 1]: how much each pixel shows the
+    # pointer rather than the background.  0 outside the (cut) mask; ring k of
+    # the edge band of the uncut mask blends bg -> edge gray by
+    # k / max(t - 1, 1) (see _draw_pointer_edge), so it gets that weight (ring 0
+    # = pure background = 0); deeper pixels 1.  Thickness 0 draws no band.
+    dist = _erosion_dist(m_uncut, edge_thickness)  # (C, C) float32 ring index
+    vis = np.where(dist < edge_thickness, dist / max(edge_thickness - 1, 1),
+                   1.0).astype(np.float32)  # (C, C) float32, band weight
+    vis[np.array(mask) == 0] = 0.0
+    if cut_tip_radius is None:
+        # the img polygon / ellipse are drawn WITH an outline, which can paint a
+        # sliver of pixels the fill-only mask lacks (thin apex); they keep the
+        # flat ptr_gray (weight 1).  With the cut on, render_image restores
+        # everything outside the cut mask, so they vanish there.
+        drawn = Image.new("L", img.size, 0)  # "L" (C, C), pixels the img draw painted
+        ddraw = ImageDraw.Draw(drawn)
+        ddraw.polygon([apex, base_left, base_right], fill=255, outline=255)
+        ddraw.ellipse(hub_box, fill=255, outline=255)
+        vis[(np.array(drawn) > 0) & (m_uncut == 0)] = 1.0
+    return img, apex, base_left, base_right, mask, vis
+
+
+# float px, half-width of the strip about the pointer axis in which visible
+# pixels count toward the tip: catches a 1-px apex sliver drawn just off-axis
+# and the two "horns" a cut arc leaves where it meets the triangle sides
+TIP_STRIP = 6.0
+
+
+def _visible_tip(vis, apex, u, max_back, fallback=None, cover=None):
+    """Visible end of the pointer on its axis.
+
+    vis      : (C, C) bool or float in [0, 1], visible-pointer weight; pixel
+               centres at integer coords (ImageDraw convention)
+    apex     : (x, y) float px, ideal triangle apex
+    u        : (ux, uy) float, unit pointer direction (hub -> apex)
+    max_back : float px, how far back from the apex to search
+    fallback : (x, y) float px (or None), returned when no visible pixel is found
+    cover    : None, or (C, C) bool, pixels painted over the pointer later
+               (rim band / outer fill); they never count as visible
+    A pixel is visible when its weight is > 0.5 (more pointer than background;
+    an even 50/50 edge ring does not count) and it is not covered.  The
+    tip is the point on the axis, apex - t * u, level with the farthest visible
+    pixel (largest projection on u) inside the strip |lateral| <= TIP_STRIP and
+    at most max_back behind the apex; t is rounded up to the 0.05 px walk grid
+    (so the label never sits beyond that pixel).  Returns (x, y) float px.
+    """
+    reach = int(math.ceil(max_back + TIP_STRIP)) + 2  # int px, search window half-size
+    h, w = vis.shape
+    xa, ya = int(math.floor(apex[0])), int(math.floor(apex[1]))  # int px, window anchor
+    x_lo, x_hi = max(xa - reach, 0), min(xa + reach + 1, w)  # int px column range
+    y_lo, y_hi = max(ya - reach, 0), min(ya + reach + 1, h)  # int px row range
+    if x_lo >= x_hi or y_lo >= y_hi:
+        return fallback
+    ys, xs = np.mgrid[y_lo:y_hi, x_lo:x_hi]  # (h', w') int pixel coords of the window
+    ok = vis[y_lo:y_hi, x_lo:x_hi] > 0.5  # (h', w') bool, more pointer than background
+    if cover is not None:
+        ok &= ~cover[y_lo:y_hi, x_lo:x_hi]
+    dx, dy = xs - apex[0], ys - apex[1]  # (h', w') float64 offsets from the apex
+    back = -(dx * u[0] + dy * u[1])  # (h', w') float64, distance behind the apex
+    lat = np.abs(-dx * u[1] + dy * u[0])  # (h', w') float64, distance off the axis
+    sel = ok & (lat <= TIP_STRIP) & (back <= max_back)  # (h', w') bool
+    if not sel.any():
+        return fallback
+    t = math.ceil(round(float(back[sel].min()) / 0.05, 6)) * 0.05  # float px on the grid
+    return apex[0] - t * u[0], apex[1] - t * u[1]
 
 
 # ── main render ────────────────────────────────────────────────────────
@@ -1011,17 +1102,16 @@ def render_image(cfg, image_seed):
     cut_r = rngs["cut_tip"][0].randint(*C["radius_range"])  # int px
     rec["cut_tip"] = {"enabled": bool(C["enabled"]), "cut_r": cut_r}
     bg_pre_ptr = img.copy() if C["enabled"] else None  # pre-pointer canvas, "L"
-    img, apex, _, _, ptr_mask = draw_pointer(
+    img, apex, _, _, ptr_mask, ptr_vis = draw_pointer(
         img, ptr_cx, ptr_cy, angle_deg, hub_radius, tip_dist, chord_half,
         chord_dist, ptr_gray, edge_gray, grad_strength, PT, ptr_np,
         edge_thickness, cut_r if C["enabled"] else None)
     if bg_pre_ptr is not None:
         img.paste(bg_pre_ptr, mask=Image.fromarray(255 - np.array(ptr_mask)))
-        # label = visible tip: the centre of the cut arc on the pointer axis,
-        # apex - cut_r * u with u = (cos a, sin a) the unit pointer direction
-        a_ptr = math.radians(angle_deg - 90)  # float rad, canvas pointer angle
-        apex = (apex[0] - cut_r * math.cos(a_ptr),
-                apex[1] - cut_r * math.sin(a_ptr))  # (x, y) float px, visible tip
+    # label inputs; the label itself is found after step 10 (it must see the rim)
+    a_ptr = math.radians(angle_deg - 90)  # float rad, canvas pointer angle
+    u_ptr = (math.cos(a_ptr), math.sin(a_ptr))  # (ux, uy) float, unit direction
+    ideal_apex = apex  # (x, y) float px, ideal triangle apex (canvas, pre-stretch)
 
     # --- 8 horizontal / vertical stretch inside dial ---
     # inverse affine (output -> input) coefficients, 6-tuple of float: stretch about (cx, cy)
@@ -1038,7 +1128,6 @@ def render_image(cfg, image_seed):
         # darkening follows the canvas through the same affine, (C, C) float32
         shade = np.asarray(Image.fromarray(shade).transform(
             size2, Image.AFFINE, affine, resample=Image.BILINEAR), dtype=np.float32)
-    apex = (cx + (apex[0] - cx) * stretch_h, cy + (apex[1] - cy) * stretch_v)
     dial_rx, dial_ry = dial_radius * stretch_h, dial_radius * stretch_v  # float px
 
     # --- 9 exposure jitter ---
@@ -1066,6 +1155,29 @@ def render_image(cfg, image_seed):
     r_norm = np.sqrt(inner_r2)  # (C, C) float64, radius / dial ellipse radius
     rim_half = O["rim_width"] / min(max(dial_rx, 1), max(dial_ry, 1))
     arr[(r_norm > 1 - rim_half) & (r_norm < 1 + rim_half)] = rim_gray
+
+    # label = visible tip: the visible end of the pointer on its axis, after the
+    # background-blended edge ring 0, the cut and the rim band / outer fill that
+    # paint over it (raster-exact walk back from the ideal apex along -u,
+    # u = (cos a, sin a) the unit pointer direction), then stretched like the image
+    covered = r_norm > 1 - rim_half  # (C, C) bool, rim band + outer fill + outside
+    # visible weight through the same bicubic stretch as the canvas: the image
+    # is bg + w * (pointer - bg) with w resampled exactly like it, (C, C) float32
+    vis_s = np.asarray(Image.fromarray(np.round(ptr_vis * 255).astype(np.uint8)).transform(
+        size2, Image.AFFINE, affine, resample=Image.BICUBIC), dtype=np.float32) / 255.0
+    ideal_apex = (cx + (ideal_apex[0] - cx) * stretch_h,
+                  cy + (ideal_apex[1] - cy) * stretch_v)  # (x, y) float px, stretched
+    v_s = (u_ptr[0] * stretch_h, u_ptr[1] * stretch_v)  # stretched axis direction
+    v_n = math.hypot(*v_s)  # float, its length
+    u_s = (v_s[0] / v_n, v_s[1] / v_n)  # (ux, uy) float, unit stretched axis
+    back0 = (cut_r if C["enabled"] else 0) * v_n  # float px, the old formula's recession
+    apex = _visible_tip(vis_s, ideal_apex, u_s, back0 + 20,
+                        fallback=(ideal_apex[0] - back0 * u_s[0],
+                                  ideal_apex[1] - back0 * u_s[1]),
+                        cover=covered)  # (x, y) float px, label on the stretched canvas
+    # px between the ideal apex and the label, measured before the stretch (float)
+    tip_recession = math.hypot((apex[0] - ideal_apex[0]) / stretch_h,
+                               (apex[1] - ideal_apex[1]) / stretch_v)
 
     # --- 11 hierarchical noise inside the outer ring ---
     H, hnp = cfg["hier_noise"], rngs["hier_noise"][1]
@@ -1176,7 +1288,13 @@ def render_image(cfg, image_seed):
     rec["derived"] = {"img_size": img_size, "canvas_offset_x": off_x, "canvas_offset_y": off_y,
                       "dial_rx": dial_rx, "dial_ry": dial_ry,
                       "outer_rx": outer_rx, "outer_ry": outer_ry,
-                      "tip_x": apex[0] + off_x, "tip_y": apex[1] + off_y}
+                      "tip_x": apex[0] + off_x, "tip_y": apex[1] + off_y,
+                      "ideal_apex_x": ideal_apex[0] + off_x,
+                      "ideal_apex_y": ideal_apex[1] + off_y,
+                      "tip_recession": tip_recession}
+    # ideal apex in image px (float) and label recession behind it (float px, pre-stretch)
+    rec["cut_tip"].update(ideal_apex_x=ideal_apex[0] + off_x,
+                          ideal_apex_y=ideal_apex[1] + off_y, tip_recession=tip_recession)
     return RenderResult(image=out,
                         tip_x=apex[0] + off_x, tip_y=apex[1] + off_y,
                         angle_deg=angle_deg, params=_plain(rec))

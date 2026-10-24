@@ -563,15 +563,31 @@ def _unit_dir(angle_deg):
     return math.cos(a), math.sin(a)
 
 
+def _ideal(res):
+    """Ideal triangle apex recorded with a render, image px -> (x, y) floats."""
+    d = res.params["derived"]
+    return d["ideal_apex_x"], d["ideal_apex_y"]
+
+
 def test_tip_label_is_visible_tip():
     for seed in range(6):
         a, b = _cut_pair(seed, **_NO_STRETCH)
         assert a.angle_deg == b.angle_deg
-        dx, dy = b.tip_x - a.tip_x, b.tip_y - a.tip_y  # float px, label shift
-        assert abs(math.hypot(dx, dy) - _CUT_R) < 1e-6, (seed, dx, dy)
+        assert _ideal(a) == _ideal(b)  # the cut does not move the triangle
         ux, uy = _unit_dir(a.angle_deg)  # unit pointer direction (floats)
-        # the shift points from the apex back toward the hub: along -u
-        assert abs(dx * ux + dy * uy + _CUT_R) < 1e-6, (seed, dx, dy)
+        for res in (a, b):
+            ix, iy = _ideal(res)  # ideal apex (floats)
+            dx, dy = res.tip_x - ix, res.tip_y - iy  # float px, label - ideal apex
+            # the label sits ON the pointer axis, behind the ideal apex (along -u)
+            # (params are rounded to 4 decimals, hence the 1e-3 tolerances)
+            assert abs(-dx * uy + dy * ux) < 1e-3, (seed, dx, dy)
+            back = -(dx * ux + dy * uy)  # float px, recession along the axis
+            assert abs(back - res.params["derived"]["tip_recession"]) < 1e-3, seed
+            assert res.params["cut_tip"]["tip_recession"] == res.params["derived"]["tip_recession"]
+        # cut on: the visible end is about cut_r behind the apex (arc + edge ring)
+        rb = b.params["derived"]["tip_recession"]  # float px
+        assert _CUT_R - 1.5 <= rb <= _CUT_R + 3, (seed, rb)
+        assert rb > a.params["derived"]["tip_recession"], seed
 
 
 def test_tip_label_stretched():
@@ -580,9 +596,15 @@ def test_tip_label_stretched():
     for seed in range(4):
         a, b = _cut_pair(seed, **stretch)
         ux, uy = _unit_dir(a.angle_deg)  # unit pointer direction (floats)
-        # visual tip = apex - r*u before the stretch; the stretch scales offsets
-        assert abs(b.tip_x - (a.tip_x - _CUT_R * ux * sh)) < 1e-6, seed
-        assert abs(b.tip_y - (a.tip_y - _CUT_R * uy * sv)) < 1e-6, seed
+        for res in (a, b):
+            ix, iy = _ideal(res)  # ideal apex, stretched (floats)
+            dx, dy = res.tip_x - ix, res.tip_y - iy  # float px, label - ideal apex
+            # on the stretched axis (direction (ux*sh, uy*sv)), behind the apex
+            assert abs(-dx * uy * sv + dy * ux * sh) < 1e-3, seed
+            assert dx * ux * sh + dy * uy * sv <= 1e-3, seed
+            # tip_recession is that offset measured before the stretch
+            rec = math.hypot(dx / sh, dy / sv)  # float px
+            assert abs(rec - res.params["derived"]["tip_recession"]) < 1e-3, seed
 
 
 def test_tip_label_on_pointer_pixels():
@@ -606,7 +628,7 @@ def test_tip_label_on_pointer_pixels():
 
         assert px(b.tip_x - 2 * ux, b.tip_y - 2 * uy) < dark, (seed, "behind label")
         assert px(b.tip_x + 2 * ux, b.tip_y + 2 * uy) >= dark, (seed, "beyond label")
-        assert px(a.tip_x, a.tip_y) >= dark, (seed, "old apex")
+        assert px(*_ideal(b)) >= dark, (seed, "ideal apex is cut away")
 
 
 # ── reflections + glares from ASCII glyph silhouettes ─────────────────────
@@ -976,3 +998,102 @@ def test_params_recording_keeps_render_identical():
     a, b = g7.render_image(cfg, 7), g7.render_image(cfg, 7)
     assert a.params == b.params and np.array_equal(a.image, b.image)
     test_default_render_unchanged_by_contrast_key()
+
+
+# ── tip label = VISIBLE pointer end (edge ring + cut aware) ───────────────
+
+# "section.key" -> value pins (dict): black pointer on a bright, flat, clean face
+# with no noise / blur / shadows / jitter / artifacts, so "pointer-dark" is unambiguous
+_CLEAN_TIP = {
+    "pointer.gray_range": [0, 0], "pointer.noise_amplitude": 0,
+    "pointer.edge_noise_amplitude": 0, "pointer.gradient_range": [0.0, 0.0],
+    "palette.bg_gray_range": [200, 200], "palette.circle_gray_range": [220, 220],
+    "background.noise_intensity": 0, "background.variation": 0,
+    "background.dial_circle_blur": False,
+    "hier_noise.block_variance": 0, "hier_noise.pixel_variance": 0,
+    "jitter.brightness_range": [1.0, 1.0], "jitter.contrast_range": [1.0, 1.0],
+    "jitter.sharpness_range": [1.0, 1.0],
+    "shadows.prob": 0.0, "tri_artifacts.enabled": False,
+    "digits.show_prob": 0.0, "ticks.gray_range": [215, 215]}
+
+# case name (str) -> (cut_tip.enabled bool, cut_tip.radius_range [lo, hi] int)
+_CUT_CASES = {"off": (False, [7, 10]), "r1": (True, [1, 1]), "r2": (True, [2, 2]),
+              "r4": (True, [4, 4]), "r7-10": (True, [7, 10])}
+
+
+def _tip_overshoot(res):
+    """How far (float px) the label sits beyond the last dark pointer pixel,
+    measured along the (stretched) pointer axis in the rendered image, the way a
+    person would judge the tip by eye.  Positive = label floats past the pointer.
+
+    Dark pixels (< 100) within |lateral| < 6 px of the axis and along-axis in
+    (-30, 12) px of the label are the pointer end; overshoot = -max(along).
+    Returns None when no such pixel exists.
+    """
+    g = res.params["geometry"]
+    ux, uy = _unit_dir(res.angle_deg)  # unit pointer direction, unstretched (floats)
+    vx, vy = ux * g["stretch_h"], uy * g["stretch_v"]  # stretched axis direction (floats)
+    n = math.hypot(vx, vy)
+    vx, vy = vx / n, vy / n  # unit stretched axis (floats)
+    ys, xs = np.nonzero(res.image < 100)  # (N,) int64 dark pixel coords
+    dx, dy = xs - res.tip_x, ys - res.tip_y  # (N,) float64, offsets from the label
+    along = dx * vx + dy * vy  # (N,) float64, + = beyond the label
+    lat = -dx * vy + dy * vx  # (N,) float64, perpendicular distance (signed)
+    sel = (np.abs(lat) < 6) & (along > -30) & (along < 12)  # (N,) bool
+    if not sel.any():
+        return None
+    return -float(along[sel].max())
+
+
+@pytest.mark.parametrize("case", list(_CUT_CASES))
+def test_tip_label_on_visible_end(case):
+    enabled, rr = _CUT_CASES[case]
+    cfg = _cfg(**_CLEAN_TIP, **{"cut_tip.enabled": enabled, "cut_tip.radius_range": rr})
+    over = []  # list[float] px, label overshoot per seed
+    for seed in range(60):
+        o = _tip_overshoot(g7.render_image(cfg, seed))
+        assert o is not None, (case, seed)
+        over.append(o)
+    over = np.array(over)  # (60,) float64
+    assert abs(over.mean()) <= 0.35, (case, over.mean(), over.max())
+    assert over.max() <= 1.0, (case, over.mean(), over.max())
+
+
+# ── _visible_tip unit tests (pure helper) ─────────────────────────────────
+
+def _wedge(apex, half_deg, size=64):
+    """Bool mask (size, size) of a wedge opening left from apex (x, y), half-angle half_deg."""
+    ys, xs = np.mgrid[:size, :size]  # (size, size) int pixel grids
+    dx, dy = apex[0] - xs, ys - apex[1]  # (size, size) float, + dx = behind the apex
+    return (dx >= 0) & (np.abs(dy) <= dx * math.tan(math.radians(half_deg)))
+
+
+def test_visible_tip_wedge_recedes():
+    apex = (40.3, 32.0)  # (x, y) float px, ideal apex; the wedge points to +x
+    full = _wedge(apex, 20)  # (64, 64) bool
+    tx, ty = g7._visible_tip(full, apex, (1.0, 0.0), 20)
+    assert ty == apex[1] and abs(tx - 40.0) < 0.05 + 1e-9  # last pixel centre x = 40
+    # erase the outer 3 px of the wedge: the visible end recedes by 3 px
+    trimmed = full & (np.mgrid[:64, :64][1] <= 37)  # (64, 64) bool
+    tx2, ty2 = g7._visible_tip(trimmed, apex, (1.0, 0.0), 20)
+    assert ty2 == apex[1] and abs(tx2 - 37.0) < 0.05 + 1e-9
+
+
+def test_visible_tip_empty_falls_back():
+    vis = np.zeros((32, 32), dtype=bool)  # (32, 32) bool, nothing visible
+    assert g7._visible_tip(vis, (16.0, 16.0), (0.0, -1.0), 20, fallback=(1.5, 2.5)) == (1.5, 2.5)
+    assert g7._visible_tip(vis, (16.0, 16.0), (0.0, -1.0), 20) is None
+    # a covered pointer is not visible either
+    vis[10:20, 14:19] = True
+    assert g7._visible_tip(vis, (16.0, 9.0), (0.0, -1.0), 20, fallback=(0.0, 0.0),
+                           cover=np.ones((32, 32), dtype=bool)) == (0.0, 0.0)
+
+
+def test_visible_tip_square_on_axis():
+    vis = np.zeros((32, 32), dtype=float)  # (32, 32) float weights
+    vis[12:30, 10:21] = 1.0  # flat-ended bar, top row y = 12, pointing up (-y)
+    tx, ty = g7._visible_tip(vis, (15.0, 4.0), (0.0, -1.0), 20)
+    assert tx == 15.0 and abs(ty - 12.0) < 0.05 + 1e-9  # on the axis, at the top row
+    vis[12, :] = 0.5  # an even 50/50 ring does not count
+    tx, ty = g7._visible_tip(vis, (15.0, 4.0), (0.0, -1.0), 20)
+    assert tx == 15.0 and abs(ty - 13.0) < 0.05 + 1e-9
