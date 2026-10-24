@@ -284,10 +284,12 @@ def test_pick_pointer_gray():
 # change for min_bg_contrast; re-pinned when displacement moved from the
 # canvas pad to the content inside the centred circle canvas, and again when
 # displacement became a shift of everything inside a fixed circular boundary
-# (canvas grows by 2 * max|displacement|; expected change)
+# (canvas grows by 2 * max|displacement|; expected change), and again for
+# the physical multiplicative shadow model (only seed 1 has a shadow; seeds
+# 0 and 2 are unchanged, so no other stream moved)
 _PRE_CONTRAST_HASHES = {
     0: "e0c38ede1599cf8d16dcaef4347406454bd2163df2c4866ffa86c1d96a1f6ad6",
-    1: "a8223fad801dc72b92bf99fdd84a912dc18a72b33f9658b325ac4b5c4a17048b",
+    1: "e3545616c3cfe7f4dc5305faabbef780e3ea52d2cdd9cb068c6e684ae080b3a8",
     2: "6da293f03654acd47597967cfd86bd8683143d6add586da6678e09cf2e401717",
 }
 
@@ -440,3 +442,100 @@ def test_boundary_fixed_and_black_outside():
             by = (ys.min() + ys.max()) / 2.0  # float px, bbox centre y
             assert abs(bx - c) <= 1.0 and abs(by - c) <= 1.0, (seed, d, bx, by)
             assert abs(xs.mean() - c) <= 1.0 and abs(ys.mean() - c) <= 1.0, (seed, d)
+
+
+# ── physical multiplicative shadows ─────────────────────────────────────
+
+# "section.key" -> value pins (dict) for the shadow tests: shadow always on
+# (unless overridden), shared strength 0.5 with no jitter, no blur anywhere
+# the config allows it (rim blur has a schema min of 0.5)
+_SHD_PINS = {"shadows.prob": 1.0, "shadows.strength_range": [0.5, 0.5],
+             "shadows.strength_jitter": 0.0, "shadows.blur_radius": 0.0,
+             "shadows.rim_blur_range": [0.5, 0.5],
+             "background.dial_circle_blur": False}
+_SHD_SEEDS = range(6)  # seeds (range of int) every shadow render test uses
+
+
+def _erode(mask, steps):
+    """Binary 4-neighbour erosion of a (H, W) bool mask, `steps` times."""
+    return ~_dilate(~mask, steps)
+
+
+def _umbra(extra, seed):
+    """Shadow umbra of one render plus the matching no-shadow image.
+
+    Renders the pinned cfg (+ extra overrides, dict) at strength 1 and with
+    the shadow off.  Pixels the full-strength shadow turns black while the
+    unshadowed pixel is >= 60 lie where the shape mask is ~1; eroded by 2 px
+    so the bilinear-stretched mask edge cannot reach them.
+    Returns (umbra (256, 256) bool, no_shadow (256, 256) int32).
+    """
+    full = _cfg(**{**_SHD_PINS, **extra, "shadows.strength_range": [1.0, 1.0]})
+    none = _cfg(**{**_SHD_PINS, **extra, "shadows.prob": 0.0})
+    f = g7.render_image(full, seed).image.astype(np.int32)  # (256, 256) int32
+    b = g7.render_image(none, seed).image.astype(np.int32)  # (256, 256) int32
+    return _erode((f == 0) & (b >= 60), 2), b
+
+
+def test_shadow_darkening_is_max_not_compound():
+    m_p = np.array([[1.0, 0.0, 0.5, 1.0]], dtype=np.float32)  # (1, 4) pointer mask
+    m_r = np.array([[1.0, 1.0, 0.5, 0.0]], dtype=np.float32)  # (1, 4) rim mask
+    d = g7.shadow_darkening(m_p, m_r, 0.5, 0.4)  # (1, 4) float32
+    assert d.dtype == np.float32 and d.shape == (1, 4)
+    # overlap of two full umbras: max(0.5, 0.4) = 0.5, not 1 - 0.5 * 0.6 = 0.7
+    np.testing.assert_allclose(d, [[0.5, 0.4, 0.25, 0.5]], atol=1e-6)
+
+
+def test_shadow_never_brightens():
+    for extra in ({}, {"palette.bg_gray_range": [0, 30]}):  # default and very dark face
+        for seed in _SHD_SEEDS:
+            on = _cfg(**{**extra, "shadows.prob": 1.0})
+            off = _cfg(**{**extra, "shadows.prob": 0.0})
+            a = g7.render_image(on, seed).image.astype(np.int16)  # (256, 256)
+            b = g7.render_image(off, seed).image.astype(np.int16)  # (256, 256)
+            assert (a <= b + 1).all(), (extra, seed, int((a - b).max()))
+            assert (a < b - 5).any(), (extra, seed, "shadow invisible")
+
+
+def test_shadow_is_multiplicative():
+    for seed in _SHD_SEEDS:
+        umbra, b = _umbra({}, seed)
+        assert umbra.sum() > 200, (seed, int(umbra.sum()))
+        a = g7.render_image(_cfg(**_SHD_PINS), seed).image.astype(np.int32)
+        # out = round(b * (1 - 0.5)) inside the umbra: within 1 level
+        assert np.abs(a[umbra] - 0.5 * b[umbra]).max() <= 1.0, seed
+        # texture kept: shadowed std ~ 0.5 x unshadowed std, not ~ 0
+        sb, sa = float(b[umbra].std()), float(a[umbra].std())  # float, gray levels
+        assert sb > 2.0, (seed, sb)
+        assert 0.4 * sb <= sa <= 0.6 * sb, (seed, sa, sb)
+
+
+def test_shadow_darkens_ticks():
+    bright = {"digits.show_prob": 1.0, "ticks.gray_range": [220, 230],
+              "digits.gray_range": [220, 230]}  # light overlay, same draw widths
+    dark = {"digits.show_prob": 1.0, "ticks.gray_range": [0, 10],
+            "digits.gray_range": [0, 10]}
+    hit = 0  # int, overlay pixels checked inside the umbra over all seeds
+    for seed in _SHD_SEEDS:
+        umbra, b = _umbra(bright, seed)
+        a = g7.render_image(_cfg(**{**_SHD_PINS, **bright}), seed).image.astype(np.int32)
+        # overlay footprint: same draws, only the tick/digit gray differs
+        foot = (g7.render_image(_cfg(**{**_SHD_PINS, **dark}), seed).image
+                != g7.render_image(_cfg(**{**_SHD_PINS, **bright}), seed).image)
+        sel = foot & umbra & (b >= 200)  # (256, 256) bool, bright overlay in shadow
+        hit += int(sel.sum())
+        if sel.any():
+            assert np.abs(a[sel] - 0.5 * b[sel]).max() <= 1.0, seed
+    assert hit > 20, hit
+
+
+def test_strength_jitter_individual():
+    S = _cfg(**{"shadows.strength_range": [0.5, 0.5],
+                "shadows.strength_jitter": 0.2})["shadows"]
+    pairs = [g7._shadow_strengths(S, g7.section_rngs(s)["shadows"][0])
+             for s in range(10)]  # list of (s_p, s_r) float pairs
+    assert all(0.3 <= p <= 0.7 and 0.3 <= r <= 0.7 for p, r in pairs)
+    assert any(abs(p - r) > 0.01 for p, r in pairs), pairs
+    S0 = dict(S, strength_jitter=0.0)
+    assert all(g7._shadow_strengths(S0, g7.section_rngs(s)["shadows"][0]) == (0.5, 0.5)
+               for s in range(5))
