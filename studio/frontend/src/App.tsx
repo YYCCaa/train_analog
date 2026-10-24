@@ -1,5 +1,5 @@
 // Studio root: schema-driven controls (left), live preview + generate panel (right).
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "./api";
 import type { Config, Schema, Tile, Value } from "./api";
 import ParamControl from "./components/ParamControl";
@@ -30,11 +30,15 @@ function errorsOf(e: unknown): string[] {
 export default function App() {
   const [schema, setSchema] = useState<Schema | null>(null); // section -> key -> Leaf
   const [config, setConfig] = useState<Config | null>(null); // current UI config
-  const [seeds, setSeeds] = useState<number[]>(INITIAL_SEEDS); // preview seeds, list[int] of length count
+  // seed pool, list[int] of length >= count; never shrinks on count edits so shrink-then-grow
+  // (or typing "16" via "1") restores the same tiles; only a reshuffle replaces it
+  const [pool, setPool] = useState<number[]>(INITIAL_SEEDS);
   const [count, setCount] = useState(DEFAULT_COUNT); // preview tile count, int in [1,16]
   // text typed in the count box, str; may be non-numeric until committed or blurred
   const [countDraft, setCountDraft] = useState(String(DEFAULT_COUNT));
   // seed scheme used when growing: "seq" = max+1.. (initial), "random" = after a reshuffle
+  // seeds sent to the preview, list[int] of length count; identity changes only when the shown list does
+  const seeds = useMemo(() => pool.slice(0, count), [pool, count]);
   const [scheme, setScheme] = useState<"seq" | "random">("seq");
   // built-in default config (configs/v7_default.yaml), section -> key -> Value; set once at
   // startup and never replaced by a loaded YAML; source of the per-control reset buttons
@@ -103,11 +107,11 @@ export default function App() {
   // pick `count` new random preview seeds (ints in [0, 2^31)); () => void
   const reshuffle = () => {
     setScheme("random");
-    setSeeds(Array.from({ length: count }, randomSeed));
+    setPool(Array.from({ length: count }, randomSeed));
   };
 
   // apply the count box text (str): whole numbers are clamped to 1..16 and resize the
-  // seed list (keep order, truncate or append per scheme); anything else is ignored
+  // shown seeds (grow the pool per scheme if needed); anything else is ignored
   const commitCount = (text: string) => {
     const t = text.trim(); // trimmed text (str)
     if (!/^[+-]?\d+$/.test(t)) return;
@@ -115,9 +119,9 @@ export default function App() {
     setCountDraft(String(n));
     if (n === count) return;
     setCount(n);
-    setSeeds((prev) => {
-      if (n <= prev.length) return prev.slice(0, n);
-      const next = prev.slice(); // grown seed list (list[int])
+    setPool((prev) => {
+      if (n <= prev.length) return prev; // pool already covers n; slice happens in `seeds`
+      const next = prev.slice(); // grown pool (list[int])
       const top = prev.length ? Math.max(...prev) : -1; // highest seed so far (int)
       for (let i = prev.length; i < n; i++) {
         next.push(scheme === "seq" ? top + 1 + (i - prev.length) : randomSeed());

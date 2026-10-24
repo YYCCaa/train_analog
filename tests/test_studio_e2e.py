@@ -616,3 +616,21 @@ def test_reset_after_yaml_load_uses_builtin_default(page, tmp_path):
     _wait_applied_after(page, old)
     assert _num(page, "digits.show_prob").input_value() == "0.5"
     assert btn.is_disabled()
+
+
+def test_preview_count_keeps_seeds_after_reshuffle_and_typing(page):
+    old = _applied_seq(page)
+    page.get_by_test_id("reshuffle").click()
+    _wait_applied_after(page, old)
+    recorded = _tile_seeds(page)  # the 9 reshuffled seeds, list[int]
+    assert len(recorded) == 9
+    box = page.get_by_test_id("preview-count")  # count input (Locator)
+    box.click()
+    box.press("Control+a")
+    box.press_sequentially("16", delay=50)  # key by key: "1" is applied before "16"
+    box.press("Enter")
+    _wait_tile_count(page, 16)
+    assert _tile_seeds(page)[:9] == recorded
+    _set_count(page, "4", 4)
+    _set_count(page, "9", 9)
+    assert _tile_seeds(page) == recorded
