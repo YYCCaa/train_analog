@@ -286,7 +286,8 @@ def test_pick_pointer_gray():
 # displacement became a shift of everything inside a fixed circular boundary
 # (canvas grows by 2 * max|displacement|; expected change), and again for
 # the physical multiplicative shadow model (only seed 1 has a shadow; seeds
-# 0 and 2 are unchanged, so no other stream moved)
+# 0 and 2 are unchanged, so no other stream moved). Only the image is hashed,
+# so moving the tip label to the visible (cut) tip left these unchanged.
 _PRE_CONTRAST_HASHES = {
     0: "e0c38ede1599cf8d16dcaef4347406454bd2163df2c4866ffa86c1d96a1f6ad6",
     1: "e3545616c3cfe7f4dc5305faabbef780e3ea52d2cdd9cb068c6e684ae080b3a8",
@@ -539,3 +540,70 @@ def test_strength_jitter_individual():
     S0 = dict(S, strength_jitter=0.0)
     assert all(g7._shadow_strengths(S0, g7.section_rngs(s)["shadows"][0]) == (0.5, 0.5)
                for s in range(5))
+
+
+# ── tip label = visible tip (cut_tip aware) ─────────────────────────────
+
+# "section.key" -> value pins (dict): no stretch, so the label shift is exactly r
+_NO_STRETCH = {"geometry.stretch_h_range": [1.0, 1.0], "geometry.stretch_v_range": [1.0, 1.0]}
+_CUT_R = 8  # int px, pinned cut_tip radius for the label tests
+
+
+def _cut_pair(seed, **extra):
+    """Render seed with cut_tip off (A) and on with radius _CUT_R (B), all else
+    equal; extra: "section.key" overrides for both. -> (A, B) RenderResults."""
+    off = _cfg(**extra, **{"cut_tip.enabled": False, "cut_tip.radius_range": [_CUT_R, _CUT_R]})
+    on = _cfg(**extra, **{"cut_tip.enabled": True, "cut_tip.radius_range": [_CUT_R, _CUT_R]})
+    return g7.render_image(off, seed), g7.render_image(on, seed)
+
+
+def _unit_dir(angle_deg):
+    """Unit pointer direction u in image coords (0 = up, clockwise) -> (ux, uy) floats."""
+    a = math.radians(angle_deg - 90)  # float rad, canvas angle of the pointer
+    return math.cos(a), math.sin(a)
+
+
+def test_tip_label_is_visible_tip():
+    for seed in range(6):
+        a, b = _cut_pair(seed, **_NO_STRETCH)
+        assert a.angle_deg == b.angle_deg
+        dx, dy = b.tip_x - a.tip_x, b.tip_y - a.tip_y  # float px, label shift
+        assert abs(math.hypot(dx, dy) - _CUT_R) < 1e-6, (seed, dx, dy)
+        ux, uy = _unit_dir(a.angle_deg)  # unit pointer direction (floats)
+        # the shift points from the apex back toward the hub: along -u
+        assert abs(dx * ux + dy * uy + _CUT_R) < 1e-6, (seed, dx, dy)
+
+
+def test_tip_label_stretched():
+    sh, sv = 1.05, 0.95  # float, pinned horizontal / vertical stretch
+    stretch = {"geometry.stretch_h_range": [sh, sh], "geometry.stretch_v_range": [sv, sv]}
+    for seed in range(4):
+        a, b = _cut_pair(seed, **stretch)
+        ux, uy = _unit_dir(a.angle_deg)  # unit pointer direction (floats)
+        # visual tip = apex - r*u before the stretch; the stretch scales offsets
+        assert abs(b.tip_x - (a.tip_x - _CUT_R * ux * sh)) < 1e-6, seed
+        assert abs(b.tip_y - (a.tip_y - _CUT_R * uy * sv)) < 1e-6, seed
+
+
+def test_tip_label_on_pointer_pixels():
+    # black pointer on a bright, flat, clean face so "pointer-dark" is obvious
+    clean = {**_NO_STRETCH,
+             "pointer.gray_range": [0, 0], "pointer.gradient_range": [0.0, 0.0],
+             "palette.bg_gray_range": [230, 230], "palette.circle_gray_range": [230, 230],
+             "shadows.prob": 0.0, "digits.show_prob": 0.0, "tri_artifacts.enabled": False,
+             "background.dial_circle_blur": False,
+             "jitter.brightness_range": [1.0, 1.0], "jitter.contrast_range": [1.0, 1.0],
+             "jitter.sharpness_range": [1.0, 1.0]}
+    dark = 100  # int gray, below this a pixel counts as pointer-dark
+    for seed in range(6):
+        a, b = _cut_pair(seed, **clean)
+        img = b.image  # (256, 256) uint8, cut-on render
+        ux, uy = _unit_dir(b.angle_deg)  # unit pointer direction (floats)
+
+        def px(x, y):
+            """Gray (int) of the pixel containing float point (x, y)."""
+            return int(img[int(math.floor(y + 0.5)), int(math.floor(x + 0.5))])
+
+        assert px(b.tip_x - 2 * ux, b.tip_y - 2 * uy) < dark, (seed, "behind label")
+        assert px(b.tip_x + 2 * ux, b.tip_y + 2 * uy) >= dark, (seed, "beyond label")
+        assert px(a.tip_x, a.tip_y) >= dark, (seed, "old apex")

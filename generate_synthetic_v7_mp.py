@@ -52,7 +52,9 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
     RenderResult(image (256, 256) uint8, tip_x, tip_y, angle_deg)
 
 The pointer: a hub circle + an isosceles triangle whose base is a chord
-of the hub, apex pointing outward.  Label = apex pixel coordinates.
+of the hub, apex pointing outward.  Label = the visible tip in pixel
+coordinates: the apex, or, when cut_tip is on, the centre of the cut arc on
+the pointer axis (apex - cut_r * unit pointer direction).
 
 Shadows are physical: a shadow blocks the direct light and keeps only the
 ambient light, so it scales the surface by an albedo-independent factor,
@@ -117,8 +119,8 @@ def section_rngs(image_seed):
 class RenderResult:
     """One rendered dial and its label."""
     image: np.ndarray  # gray dial image, (img_size, img_size) uint8
-    tip_x: float  # pointer apex x in image pixels (float)
-    tip_y: float  # pointer apex y in image pixels (float)
+    tip_x: float  # visible pointer tip x in image pixels (float; apex or cut-arc centre)
+    tip_y: float  # visible pointer tip y in image pixels (float; apex or cut-arc centre)
     angle_deg: int  # pointer angle, whole degrees (0 = up, clockwise)
 
 
@@ -595,6 +597,11 @@ def render_image(cfg, image_seed):
         edge_thickness, cut_r if C["enabled"] else None)
     if bg_pre_ptr is not None:
         img.paste(bg_pre_ptr, mask=Image.fromarray(255 - np.array(ptr_mask)))
+        # label = visible tip: the centre of the cut arc on the pointer axis,
+        # apex - cut_r * u with u = (cos a, sin a) the unit pointer direction
+        a_ptr = math.radians(angle_deg - 90)  # float rad, canvas pointer angle
+        apex = (apex[0] - cut_r * math.cos(a_ptr),
+                apex[1] - cut_r * math.sin(a_ptr))  # (x, y) float px, visible tip
 
     # --- 8 horizontal / vertical stretch inside dial ---
     # inverse affine (output -> input) coefficients, 6-tuple of float: stretch about (cx, cy)
