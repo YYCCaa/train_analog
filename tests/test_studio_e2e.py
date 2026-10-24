@@ -3,6 +3,7 @@ way a person would -- clicks, typing, file pickers -- against a live
 `studio/run_studio.py` server on port 8799."""
 import csv
 import json
+import math
 import os
 import socket
 import subprocess
@@ -596,6 +597,33 @@ def test_reset_toggle_to_default(page):
     btn.click()
     _wait_applied_after(page, old)
     assert box.is_checked() and btn.is_disabled()
+
+
+def test_cut_tip_toggle_moves_marker_to_visible_tip(page):
+    # a user flips cut_tip off and on and watches the tip marker on each tile
+    page.get_by_test_id("overlay-toggle").check()
+    box = page.locator('[data-param="cut_tip.enabled"] input[type=checkbox]')  # (Locator)
+    assert box.is_checked()
+    on1 = _marker_geometry(page)  # cut on (default), list[dict] (9)
+    old = _applied_seq(page)
+    box.uncheck()
+    _wait_applied_after(page, old)
+    off = _marker_geometry(page)  # cut off: marker on the apex, list[dict] (9)
+    old = _applied_seq(page)
+    box.check()
+    _wait_applied_after(page, old)
+    on2 = _marker_geometry(page)  # cut on again, list[dict] (9)
+    for a, b, c in zip(on1, off, on2):
+        assert a["seed"] == b["seed"] == c["seed"]
+        assert abs(a["cx"] - c["cx"]) < 0.5 and abs(a["cy"] - c["cy"]) < 0.5, (a, c)
+        scale = b["iw"] / 256.0  # displayed px per image px (float)
+        mid_x, mid_y = b["ix"] + b["iw"] / 2.0, b["iy"] + b["iw"] / 2.0  # tile centre (CSS px)
+        # marker shift in image px (float): radius_range default [7, 10]
+        shift = math.hypot(a["cx"] - b["cx"], a["cy"] - b["cy"]) / scale
+        assert 6.0 <= shift <= 11.0, (a, b, shift)
+        d_on = math.hypot(a["cx"] - mid_x, a["cy"] - mid_y)  # float CSS px
+        d_off = math.hypot(b["cx"] - mid_x, b["cy"] - mid_y)  # float CSS px
+        assert d_on < d_off, (a, b)
 
 
 def test_reset_after_yaml_load_uses_builtin_default(page, tmp_path):

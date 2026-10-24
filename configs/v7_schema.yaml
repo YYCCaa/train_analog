@@ -11,6 +11,7 @@
 #     * stretch_max <= 127 - |displacement|max
 #   ((97 - 2) * 1.05 + 6) * 1.1 = 116.3 <= 127 - 10 = 117
 # (pinned by tests/test_v7_render.py::test_render_extremes_do_not_crash).
+# The bound still holds with cut_tip on: the visible-tip label sits closer to the centre than the apex.
 
 canvas:
   img_size: {type: int, min: 256, max: 256, step: 1, readonly: true, help: "Output image side in px (fixed: training hard-codes 256)."}
@@ -76,7 +77,7 @@ background:
   dial_circle_blur_radius: {type: int, min: 1, max: 16, step: 1, help: "Gaussian blur radius inside the dial circle (px)."}
 
 cut_tip:
-  enabled: {type: bool, min: 0, max: 1, step: 1, help: "Erase pointer pixels near the apex (forces extrapolation)."}
+  enabled: {type: bool, min: 0, max: 1, step: 1, help: "Erase pointer pixels within this radius of the apex; the tip label moves to the visible (cut) tip."}
   radius_range: {type: int_range, min: 1, max: 20, step: 1, help: "Radius of the erased circle around the apex (px)."}
 
 shadows:
