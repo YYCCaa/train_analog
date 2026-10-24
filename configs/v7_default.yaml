@@ -84,14 +84,14 @@ cut_tip:
   radius_range: [7, 10]  # [lo, hi] int; erased radius (px)
 
 shadows:
+  # physical model: out = in x (1 - d), d = max(s_p x pointer shape, s_r x rim shape)
   prob: 0.5  # float scalar; probability of pointer + rim shadows
+  strength_range: [0.50, 0.62]  # [lo, hi] float; shared darkening fraction s per image (0 = none, 1 = black)
+  strength_jitter: 0.05  # float scalar; per-shadow +/- jitter of s, drawn separately for pointer and rim
   offset_range: [15.0, 25.0]  # [lo, hi] float; pointer shadow displacement (px)
-  opacity_range: [160, 180]  # [lo, hi] int; pointer shadow alpha (0-255)
   blur_radius: 2.5  # float scalar; pointer shadow Gaussian blur (px)
-  gray_range: [11, 60]  # [lo, hi] int; from HSV V 0.05-0.25, S 0.05-0.2: luma p1-p99
   rim_offset_frac: [0.15, 0.35]  # [lo, hi] float; crescent offset / dial radius
   rim_cutout_frac: [0.8, 0.95]  # [lo, hi] float; crescent cutout radius / dial radius
-  rim_opacity_range: [200, 220]  # [lo, hi] int; rim shadow alpha (0-255)
   rim_blur_range: [4.0, 8.0]  # [lo, hi] float; rim shadow blur radius (px)
 
 jitter:

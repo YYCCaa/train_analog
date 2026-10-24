@@ -87,6 +87,12 @@ def test_merge_does_not_mutate_inputs():
     ("digits:\n  show_prob: true\n", "digits.show_prob"),
     ("bogus:\n  a: 1\n", "bogus"),
     ("canvas:\n  img_size: 128\n", "canvas.img_size"),
+    # removed by the physical shadow model: old YAMLs are rejected
+    ("shadows:\n  gray_range: [11, 60]\n", "shadows.gray_range"),
+    ("shadows:\n  opacity_range: [160, 180]\n", "shadows.opacity_range"),
+    ("shadows:\n  rim_opacity_range: [200, 220]\n", "shadows.rim_opacity_range"),
+    ("shadows:\n  strength_range: [0.2, 1.5]\n", "shadows.strength_range"),
+    ("shadows:\n  strength_jitter: 0.6\n", "shadows.strength_jitter"),
 ])
 def test_invalid_configs_report_key(text, key):
     with pytest.raises(vc.ConfigError) as ei:
@@ -139,11 +145,12 @@ FLOAT_RANGES = [  # keys the old code draws with random.uniform
     "digits.angle_jitter_range", "digits.gap_range",
     "pointer.gradient_range", "shadows.offset_range",
     "geometry.scale_range", "jitter.contrast_range",
+    "shadows.strength_range",
 ]
 INT_RANGES = [  # keys the old code draws with random.randint
     "ticks.len_range", "ticks.per_digit_range", "cut_tip.radius_range",
     "tri_artifacts.count_range", "dataset.angle_deg_range",
-    "shadows.opacity_range", "digits.font_size_range",
+    "digits.font_size_range",
 ]
 
 

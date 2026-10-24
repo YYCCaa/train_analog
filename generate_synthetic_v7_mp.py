@@ -30,18 +30,20 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
   │ 1  background: low-freq tiles (bicubic) + pixel noise   [canvas] │
   │ 2  faint dial circle with arc gap                                │
   │ 3  ticks -> separate overlay (value + alpha)          [td layer] │
-  │ 4  rim crescent shadow  ─┐ only if has_shadow                    │
-  │ 5  pointer + circle shadow (blurred) ─┘                          │
+  │ 4  rim crescent shadow mask m_r    ─┐ only if has_shadow;        │
+  │ 5  pointer + circle shadow mask m_p ┘ masks only, img untouched; │
+  │    d = max(s_p*m_p, s_r*m_r)  float32 darkening  [d layer]       │
   │ 6  digits -> overlay                                  [td layer] │
   │ 7  mounting hole, pointer body (gradient + noise), pointer edge, │
   │    cut-tip (restore pre-pointer pixels near the apex)            │
-  │ 8  stretch h/v (canvas + overlay + apex)                         │
+  │ 8  stretch h/v (canvas + overlay + d + apex)                     │
   │ 9  brightness -> contrast -> sharpness jitter                    │
   │ 10 outer annulus fill, rim band                                  │
   │ 11 hierarchical (block + pixel) noise inside outer ring          │
   │ 12 triangle artifacts (avoid pointer + hole)                     │
   │ 13 black outside outer ring; erase overlay over pointer;         │
-  │    composite overlay                                             │
+  │    composite overlay; apply shadow out = round(in * (1 - d))     │
+  │    (d zeroed outside the dial face, on the rim, pointer, hole)   │
   │ 14 Gaussian blur inside outer ring; black outside again          │
   │ 15 place canvas on a black img_size^2 at centred offset + d;     │
   │    boundary B stays centred (everything inside B shifts by d)    │
@@ -51,6 +53,13 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
 
 The pointer: a hub circle + an isosceles triangle whose base is a chord
 of the hub, apex pointing outward.  Label = apex pixel coordinates.
+
+Shadows are physical: a shadow blocks the direct light and keeps only the
+ambient light, so it scales the surface by an albedo-independent factor,
+out = in * (1 - d).  One shared strength s per image, jittered separately
+for the pointer (s_p) and rim (s_r) shadows; overlapping shadows of the
+one light do not compound (max, not product).  Ticks, digits, noise and
+triangles under a shadow are darkened by the same factor.
 """
 
 import argparse
@@ -76,7 +85,7 @@ NUM_IMAGES = 30000  # default number of images (int) for the CLI
 # Scale: 0-9 clockwise, 36 deg per division, 0 at top (fixed dial layout)
 NUM_DIGITS = 10  # digits on the dial face (int)
 DEG_PER_DIGIT = 360.0 / NUM_DIGITS  # angular pitch of the digits (float, deg)
-CIRCLE_SHADOW_GRAY = 40  # gray level (int) of the dial-circle shadow arc
+SHADOW_ARC_LEVEL = 128  # mask level (int, of 255) of the dial-circle shadow arc: 0.5 x the pointer
 
 # RNG stream names (tuple[str, ...]): every config section that draws random
 # values, plus "angle" for the pointer angle (canvas/dataset draw nothing).
@@ -241,36 +250,34 @@ def draw_scale_digits(td_value, td_alpha, cx, cy, dial_radius, tick_inner_radius
 
 # ── shadows ─────────────────────────────────────────────────────────────
 
-def draw_shadow(s_value, s_alpha, apex, base_left, base_right,
+def draw_shadow(mask, apex, base_left, base_right,
                 cx, cy, hub_radius, dial_radius,
-                offset_dx, offset_dy, opacity,
-                gap_start_deg, gap_span_deg, gray):
-    """Draw the offset pointer shadow and the circle shadow on a gray layer.
+                offset_dx, offset_dy, gap_start_deg, gap_span_deg):
+    """Draw the offset pointer shadow and the circle shadow shape into a mask.
 
-    s_value / s_alpha : layer "L" images; the layer is blurred later, so
-    the tip naturally loses its sharpness.  gray: pointer shadow level.
+    mask : "L" image (C, C), 0 = no shadow.  The triangle + hub are drawn at
+    255 (shape 1.0), the offset dial-circle arc at SHADOW_ARC_LEVEL (~0.5).
+    The arc goes first, so the pointer shape wins where they overlap.  The
+    mask is blurred later, so the tip naturally loses its sharpness.
     """
-    vdraw = ImageDraw.Draw(s_value)  # draws shadow gray into the layer value
-    adraw = ImageDraw.Draw(s_alpha)  # draws shadow opacity into the layer alpha
+    mdraw = ImageDraw.Draw(mask)  # draws the shadow shape into the mask
     tri = [(p[0] + offset_dx, p[1] + offset_dy) for p in (apex, base_left, base_right)]
-    scx, scy = cx + offset_dx, cy + offset_dy
-    hub_box = [scx - hub_radius, scy - hub_radius, scx + hub_radius, scy + hub_radius]
-    for d, fill in ((vdraw, gray), (adraw, opacity)):
-        d.polygon(tri, fill=fill)
-        d.ellipse(hub_box, fill=fill)
-
-    # Offset outer circle (with matching arc gap), lighter than the pointer
+    scx, scy = cx + offset_dx, cy + offset_dy  # float px, shadow hub centre
+    # offset outer circle (with matching arc gap), half as dark as the pointer
     bbox = [scx - dial_radius, scy - dial_radius, scx + dial_radius, scy + dial_radius]
-    _arc_or_circle(vdraw, bbox, gap_start_deg, gap_span_deg, CIRCLE_SHADOW_GRAY, 2)
-    _arc_or_circle(adraw, bbox, gap_start_deg, gap_span_deg, opacity // 2, 2)
+    _arc_or_circle(mdraw, bbox, gap_start_deg, gap_span_deg, SHADOW_ARC_LEVEL, 2)
+    hub_box = [scx - hub_radius, scy - hub_radius, scx + hub_radius, scy + hub_radius]
+    mdraw.polygon(tri, fill=255)
+    mdraw.ellipse(hub_box, fill=255)
 
 
 def draw_rim_shadows(cx, cy, dial_radius, canvas_size, light_angle,
-                     offset_frac, cutout_frac, opacity, blur_r):
-    """Blurred alpha mask of the crescent shadow cast by the bowl rim.
+                     offset_frac, cutout_frac, blur_r):
+    """Blurred shape mask of the crescent shadow cast by the bowl rim.
 
     The crescent is the part of the dial disc outside a cutout circle that
-    is shifted toward the light.  Returns an "L" alpha (canvas, canvas).
+    is shifted toward the light.  Returns float32 (C, C) in 0-1 (crescent
+    = 1.0 before the blur).
     """
     ys, xs = np.ogrid[:canvas_size, :canvas_size]
     dial_mask = (xs - cx) ** 2 + (ys - cy) ** 2 <= dial_radius ** 2  # (C, C) bool
@@ -278,9 +285,37 @@ def draw_rim_shadows(cx, cy, dial_radius, canvas_size, light_angle,
     co_cx = cx + offset_frac * dial_radius * math.cos(light_rad)
     co_cy = cy + offset_frac * dial_radius * math.sin(light_rad)
     cutout = (xs - co_cx) ** 2 + (ys - co_cy) ** 2 <= (cutout_frac * dial_radius) ** 2
-    alpha = np.zeros((canvas_size, canvas_size), dtype=np.uint8)  # (C, C) uint8
-    alpha[dial_mask & ~cutout] = opacity
-    return Image.fromarray(alpha).filter(ImageFilter.GaussianBlur(radius=blur_r))
+    shape = np.zeros((canvas_size, canvas_size), dtype=np.uint8)  # (C, C) uint8, 0/255
+    shape[dial_mask & ~cutout] = 255
+    blurred = Image.fromarray(shape).filter(ImageFilter.GaussianBlur(radius=blur_r))
+    return np.asarray(blurred, dtype=np.float32) / 255.0  # (C, C) float32, 0-1
+
+
+def shadow_darkening(m_p, m_r, s_p, s_r):
+    """Per-pixel darkening fraction of the pointer + rim shadows.
+
+    m_p, m_r : (H, W) float shape masks in 0-1 (pointer / rim shadow)
+    s_p, s_r : float strengths in 0-1 of the two shadows
+    Both shadows block the same light, so they do not compound: the result
+    is max(s_p*m_p, s_r*m_r), not 1 - (1 - a)(1 - b).
+    Returns (H, W) float32 d in 0-1; the shaded pixel is in * (1 - d).
+    """
+    return np.maximum(np.float32(s_p) * np.asarray(m_p, dtype=np.float32),
+                      np.float32(s_r) * np.asarray(m_r, dtype=np.float32))
+
+
+def _shadow_strengths(S, srng):
+    """Draw the shared shadow strength and its two per-shadow jitters.
+
+    S: shadows config section (dict); srng: the shadows random.Random,
+    consumed for exactly 3 draws (s, jitter_p, jitter_r).
+    Returns (s_p, s_r): pointer / rim strengths, floats clipped to 0-1.
+    """
+    s = srng.uniform(*S["strength_range"])  # float, shared strength
+    j = S["strength_jitter"]  # float, jitter amplitude (+/-)
+    jp = srng.uniform(-j, j)  # float, pointer-shadow jitter
+    jr = srng.uniform(-j, j)  # float, rim-shadow jitter
+    return min(max(s + jp, 0.0), 1.0), min(max(s + jr, 0.0), 1.0)
 
 
 # ── pointer ─────────────────────────────────────────────────────────────
@@ -503,18 +538,18 @@ def render_image(cfg, image_seed):
     S, srng = cfg["shadows"], rngs["shadows"][0]
     has_shadow = srng.random() < S["prob"]  # bool
     light_angle = srng.uniform(0, 360)  # deg, 0 = up, CW
-    ptr_shadow_gray = srng.randint(*S["gray_range"])
-    rim_shadow_gray = srng.randint(*S["gray_range"])
-    rim_offset = srng.uniform(*S["rim_offset_frac"])
-    rim_cutout = srng.uniform(*S["rim_cutout_frac"])
-    rim_opacity = srng.randint(*S["rim_opacity_range"])
-    rim_blur = srng.uniform(*S["rim_blur_range"])
-    shd_dist = srng.uniform(*S["offset_range"])
-    shd_opacity = srng.randint(*S["opacity_range"])
+    s_p, s_r = _shadow_strengths(S, srng)  # float pointer / rim strengths, 0-1
+    rim_offset = srng.uniform(*S["rim_offset_frac"])  # float, crescent offset / dial radius
+    rim_cutout = srng.uniform(*S["rim_cutout_frac"])  # float, cutout radius / dial radius
+    rim_blur = srng.uniform(*S["rim_blur_range"])  # float px, rim mask blur
+    shd_dist = srng.uniform(*S["offset_range"])  # float px, pointer shadow offset
+    # shadow darkening fraction on the canvas, (C, C) float32 in 0-1, or None
+    # when the image has no shadow; nothing is composited onto img here, it
+    # is applied once at step 13 as img * (1 - d)
+    shade = None
     if has_shadow:
-        rim_alpha = draw_rim_shadows(cx, cy, dial_radius, canvas_size, light_angle,
-                                     rim_offset, rim_cutout, rim_opacity, rim_blur)
-        img = _composite_gray(img, rim_shadow_gray, rim_alpha)
+        m_r = draw_rim_shadows(cx, cy, dial_radius, canvas_size, light_angle,
+                               rim_offset, rim_cutout, rim_blur)  # (C, C) float32 rim mask
 
         a = math.radians(angle_deg - 90)  # pointer direction (float, rad; 0 = +x, CW in image)
         s_apex = (ptr_cx + tip_dist * math.cos(a), ptr_cy + tip_dist * math.sin(a))
@@ -524,13 +559,13 @@ def render_image(cfg, image_seed):
         s_bl = (bmx + chord_half * perp[0], bmy + chord_half * perp[1])
         s_br = (bmx - chord_half * perp[0], bmy - chord_half * perp[1])
         light_rad = math.radians(light_angle - 90)  # shadow-cast direction (float, rad)
-        s_value, s_alpha = _new_layer(canvas_size)  # shadow layer, "L" (C, C)
-        draw_shadow(s_value, s_alpha, s_apex, s_bl, s_br, ptr_cx, ptr_cy,
+        p_mask = Image.new("L", (canvas_size, canvas_size), 0)  # pointer shadow shape, "L" (C, C)
+        draw_shadow(p_mask, s_apex, s_bl, s_br, ptr_cx, ptr_cy,
                     hub_radius, dial_radius, shd_dist * math.cos(light_rad),
-                    shd_dist * math.sin(light_rad), shd_opacity,
-                    gap_start_deg, gap_span_deg, ptr_shadow_gray)
+                    shd_dist * math.sin(light_rad), gap_start_deg, gap_span_deg)
         blur = ImageFilter.GaussianBlur(radius=S["blur_radius"])  # shadow blur filter (PIL)
-        img = _composite_gray(img, s_value.filter(blur), s_alpha.filter(blur))
+        m_p = np.asarray(p_mask.filter(blur), dtype=np.float32) / 255.0  # (C, C) float32, 0-1
+        shade = shadow_darkening(m_p, m_r, s_p, s_r)  # (C, C) float32
 
     # --- 6 digits on the overlay ---
     if show_digits:
@@ -572,6 +607,10 @@ def render_image(cfg, image_seed):
     td_la = Image.merge("LA", (td_value, td_alpha)).transform(
         size2, Image.AFFINE, affine, resample=Image.BICUBIC)  # "LA" (C, C)
     td_value, td_alpha = td_la.split()  # two "L" images (C, C)
+    if shade is not None:
+        # darkening follows the canvas through the same affine, (C, C) float32
+        shade = np.asarray(Image.fromarray(shade).transform(
+            size2, Image.AFFINE, affine, resample=Image.BILINEAR), dtype=np.float32)
     apex = (cx + (apex[0] - cx) * stretch_h, cy + (apex[1] - cy) * stretch_v)
     dial_rx, dial_ry = dial_radius * stretch_h, dial_radius * stretch_v  # float px
 
@@ -647,6 +686,16 @@ def render_image(cfg, image_seed):
     td_a = np.array(td_alpha)
     td_a[ptr_blocked] = 0
     img = _composite_gray(img, td_value, Image.fromarray(td_a))
+
+    # --- 13b physical shadow: out = round(in * (1 - d)) on the dial face ---
+    if shade is not None:
+        # where a shadow may fall, (C, C) bool: inside the dial ellipse, off
+        # the rim band, not on the stretched pointer or hole (those sit above
+        # the face, as the old overwrite order had it)
+        face = (r_norm <= 1 - rim_half) & ~ptr_blocked
+        d = np.where(face, shade, np.float32(0))  # (C, C) float32 darkening
+        lit = np.asarray(img, dtype=np.float32)  # (C, C) float32 unshadowed canvas
+        img = Image.fromarray(np.clip(np.rint(lit * (1 - d)), 0, 255).astype(np.uint8))
 
     # --- 14 Gaussian blur inside the outer ring ---
     if B["dial_circle_blur"]:

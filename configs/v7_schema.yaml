@@ -81,13 +81,12 @@ cut_tip:
 
 shadows:
   prob: {type: float, min: 0.0, max: 1.0, step: 0.05, help: "Probability of rendering pointer and rim shadows."}
+  strength_range: {type: float_range, min: 0.0, max: 1.0, step: 0.01, help: "Shared shadow darkening fraction per image (0 = none, 1 = black); out = in x (1 - strength x shape)."}
+  strength_jitter: {type: float, min: 0.0, max: 0.5, step: 0.01, help: "Per-shadow +/- jitter of the shared strength, drawn separately for the pointer and rim shadows."}
   offset_range: {type: float_range, min: 0.0, max: 40.0, step: 0.5, help: "Pointer shadow displacement (px)."}
-  opacity_range: {type: int_range, min: 0, max: 255, step: 1, help: "Pointer shadow alpha (0-255)."}
   blur_radius: {type: float, min: 0.0, max: 10.0, step: 0.1, help: "Gaussian blur radius of the pointer shadow (px)."}
-  gray_range: {type: int_range, min: 0, max: 255, step: 1, help: "Shadow gray level (dark = low)."}
   rim_offset_frac: {type: float_range, min: 0.0, max: 0.6, step: 0.01, help: "Rim shadow crescent offset / dial radius."}
   rim_cutout_frac: {type: float_range, min: 0.5, max: 1.0, step: 0.01, help: "Rim shadow cutout radius / dial radius."}
-  rim_opacity_range: {type: int_range, min: 0, max: 255, step: 1, help: "Rim shadow alpha (0-255)."}
   rim_blur_range: {type: float_range, min: 0.5, max: 20.0, step: 0.1, help: "Rim shadow blur radius (px)."}
 
 jitter:

@@ -647,6 +647,39 @@ def test_min_bg_contrast_slider_changes_preview(page):
     assert _tile_srcs(page) == before
 
 
+def _tile_means(page):
+    """list[float]: mean gray (0-255) of each decoded tile image, grid order.
+
+    Reads the pixels the person sees by drawing each <img> onto a canvas.
+    """
+    return page.eval_on_selector_all("[data-testid=tile] img", """els => els.map(e => {
+        const c = document.createElement('canvas');
+        c.width = e.naturalWidth; c.height = e.naturalHeight;
+        const g = c.getContext('2d');
+        g.drawImage(e, 0, 0);
+        const d = g.getImageData(0, 0, c.width, c.height).data;
+        let s = 0;
+        for (let i = 0; i < d.length; i += 4) s += d[i];
+        return s / (d.length / 4);
+    })""")
+
+
+def test_shadow_strength_darkens_preview(page):
+    _commit_and_wait(page, _num(page, "shadows.prob"), "1")  # shadow on every tile
+    # strength [0, 0]: lo first, then hi, so lo <= hi holds at every step
+    _commit_and_wait(page, _num(page, "shadows.strength_range", "lo"), "0")
+    _commit_and_wait(page, _num(page, "shadows.strength_range", "hi"), "0")
+    none_src, none_mean = _tile_srcs(page), _tile_means(page)  # list[str] / list[float] (9)
+    # strength [1, 1]: hi first, then lo
+    _commit_and_wait(page, _num(page, "shadows.strength_range", "hi"), "1")
+    _commit_and_wait(page, _num(page, "shadows.strength_range", "lo"), "1")
+    full_src, full_mean = _tile_srcs(page), _tile_means(page)  # list[str] / list[float] (9)
+    assert all(a != b for a, b in zip(none_src, full_src)), "a tile did not change"
+    # every tile is darker with full-strength shadows, by a visible margin
+    for n, f in zip(none_mean, full_mean):
+        assert f < n - 2.0, (n, f)
+
+
 def test_preview_count_keeps_seeds_after_reshuffle_and_typing(page):
     old = _applied_seq(page)
     page.get_by_test_id("reshuffle").click()
