@@ -193,8 +193,10 @@ def draw_scale_digits(td_value, td_alpha, cx, cy, dial_radius, tick_inner_radius
                       dcfg, rng, font_size):
     """Draw digits 0-9 around the dial on the overlay layer (0 at top, CW).
 
-    Digits sit inside or outside the ticks with a clearance gap; the radial
-    jitter is bidirectional.  dcfg = cfg["digits"]; rng = "digits" stream.
+    Digits sit inside or outside the ticks with a clearance gap.  The radial
+    jitter is one-directional: inside digits move only inward (toward the
+    centre, inside_jitter_range), outside digits only outward (away from the
+    centre, outside_jitter_range).  dcfg = cfg["digits"]; rng = "digits" stream.
     """
     try:
         font = ImageFont.truetype("arial.ttf", font_size)  # FreeTypeFont, digit glyphs
@@ -206,12 +208,14 @@ def draw_scale_digits(td_value, td_alpha, cx, cy, dial_radius, tick_inner_radius
     grey = rng.randint(*dcfg["gray_range"])  # int gray level of all digits
     gap = rng.uniform(*dcfg["gap_range"])  # float, px clearance to ticks
     inside = rng.random() < dcfg["inside_prob"]  # bool
+    # exactly one uniform draw in either branch, so the stream's draw count
+    # does not depend on `inside`
     if inside:
-        base_dist = tick_inner_radius - font_size / 2 - gap
+        base_dist = tick_inner_radius - font_size / 2 - gap  # float, px
+        dist = base_dist - rng.uniform(*dcfg["inside_jitter_range"])  # float px, toward centre
     else:
-        base_dist = dial_radius + font_size / 2 + gap
-    dist_jitter = rng.uniform(*dcfg["dist_jitter_range"]) * rng.choice([-1, 1])  # float, px
-    dist = base_dist + dist_jitter  # float, same for all digits
+        base_dist = dial_radius + font_size / 2 + gap  # float, px
+        dist = base_dist + rng.uniform(*dcfg["outside_jitter_range"])  # float px, away from centre
 
     # anti-aliased digit coverage 0-255, "L" (canvas, canvas).  Text goes to
     # coverage only: the value stays a flat `grey` (straight, not
@@ -327,6 +331,40 @@ def _draw_pointer_edge(img, mask, edge_gray, bg_arr, thickness, noise_amp, nrng)
     blended = (bg + blend * (edge_gray - bg) + noise).astype(np.int16)
     arr[ys, xs] = np.clip(blended, 0, 255).astype(np.uint8)
     return Image.fromarray(arr)
+
+
+def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast):
+    """Draw the pointer body gray (int) with at least `min_contrast` levels of
+    separation from the face background gray.
+
+    rng          : the "pointer" random.Random; exactly ONE randint call is made
+    lo, hi       : int, inclusive pointer.gray_range
+    bg_gray      : int, palette bg_gray_range draw (face background level)
+    min_contrast : int >= 0, pointer.min_bg_contrast; 0 = off
+
+    The allowed set {g in [lo, hi] : |g - bg_gray| >= min_contrast} is at most
+    two contiguous intervals, [lo, bg - c] and [bg + c, hi].  An index drawn
+    with randint(0, n_allowed - 1) is mapped onto them in ascending order:
+
+        lo ......... bg-c | forbidden | bg+c ......... hi
+        [ index 0 .. n_low-1 ]          [ n_low .. n-1 ]
+
+    With c = 0 the set is all of [lo, hi] and randint(0, n-1) + lo equals
+    randint(lo, hi) bit for bit (both are lo + randbelow(n)).  If the set is
+    empty, one randint(lo, hi) draw is still consumed and the endpoint of
+    [lo, hi] farthest from bg_gray is returned (the lower one on a tie).
+    """
+    low_hi = min(hi, bg_gray - min_contrast)  # int, top of the lower interval
+    high_lo = max(lo, bg_gray + min_contrast)  # int, bottom of the upper interval
+    if min_contrast <= 0:  # whole range allowed (c = 0 must not split at bg)
+        low_hi, high_lo = hi, hi + 1
+    n_low = max(0, low_hi - lo + 1)  # int, size of [lo, low_hi]
+    n_high = max(0, hi - high_lo + 1)  # int, size of [high_lo, hi]
+    if n_low + n_high == 0:
+        rng.randint(lo, hi)  # keep the stream's draw count fixed
+        return hi if hi - bg_gray > bg_gray - lo else lo
+    idx = rng.randint(0, n_low + n_high - 1)  # int, index into the allowed set
+    return lo + idx if idx < n_low else high_lo + (idx - n_low)
 
 
 def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
@@ -513,7 +551,8 @@ def render_image(cfg, image_seed):
     # --- 7 mounting hole + pointer (pointer stream) ---
     PT = cfg["pointer"]
     ptr_rng, ptr_np = rngs["pointer"]
-    ptr_gray = ptr_rng.randint(*PT["gray_range"])  # int body gray
+    ptr_gray = _pick_pointer_gray(ptr_rng, *PT["gray_range"], bg_gray,
+                                  PT["min_bg_contrast"])  # int body gray
     hole_gray = int(ptr_gray * ptr_rng.uniform(*PT["darker_frac_range"]))  # int
     edge_gray = int(ptr_gray * ptr_rng.uniform(*PT["darker_frac_range"]))  # int
     grad_strength = ptr_rng.uniform(*PT["gradient_range"])  # float

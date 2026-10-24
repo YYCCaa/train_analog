@@ -246,3 +246,120 @@ def test_render_extremes_do_not_crash(which):
         # the tip label must stay on the image even at the schema extremes
         assert 0 <= res.tip_x <= IMG - 1, (seed, res.tip_x)
         assert 0 <= res.tip_y <= IMG - 1, (seed, res.tip_y)
+
+
+# ── pointer min-bg-contrast + one-directional digit jitter ──────────────
+
+def test_pick_pointer_gray():
+    import random
+    # c = 0: identical to the old randint(lo, hi) draw, for many seeds/ranges
+    for lo, hi in ((0, 255), (40, 41), (7, 7), (100, 230)):
+        for s in range(300):
+            want = random.Random(s).randint(lo, hi)  # int, old draw
+            got = g7._pick_pointer_gray(random.Random(s), lo, hi, 160, 0)  # int, new draw
+            assert got == want, (lo, hi, s)
+    # c > 0: every draw is allowed and both sides of bg appear
+    rng = random.Random(1)  # shared stream (random.Random)
+    vals = [g7._pick_pointer_gray(rng, 0, 255, 160, 60) for _ in range(2000)]  # list[int]
+    assert all(abs(v - 160) >= 60 for v in vals)
+    assert any(v < 160 for v in vals) and any(v > 160 for v in vals)
+    assert set(vals) == set(range(0, 101)) | set(range(220, 256))
+    # one side only: bg near the top of the range
+    vals = {g7._pick_pointer_gray(rng, 100, 200, 190, 50) for _ in range(500)}  # set[int]
+    assert vals == set(range(100, 141))
+    # infeasible: farthest endpoint, lower one on a tie
+    assert g7._pick_pointer_gray(random.Random(0), 100, 200, 120, 200) == 200
+    assert g7._pick_pointer_gray(random.Random(0), 100, 200, 180, 200) == 100
+    assert g7._pick_pointer_gray(random.Random(0), 100, 200, 150, 200) == 100
+    # infeasible still consumes exactly one draw (the same one as randint(lo, hi))
+    c1, c2 = random.Random(9), random.Random(9)  # two identical streams
+    g7._pick_pointer_gray(c1, 100, 200, 150, 200)
+    c2.randint(100, 200)
+    assert c1.random() == c2.random(), "infeasible case must consume one draw"
+
+
+# sha256 hex (str) of default-config renders with digits hidden (so the
+# digit-jitter change cannot touch them), seeds 0-2, recorded BEFORE any code
+# change for min_bg_contrast
+_PRE_CONTRAST_HASHES = {
+    0: "50fc055ffa21e675ec6793cfb32031d8c2da3df451fb46a815f7bed2c0909b5f",
+    1: "6b847f9fa7706ec9784108ee7cd2a7c7e1166936555b042730c25207fd2ca9a9",
+    2: "27dd2901219733872dea37d5e927f08bacda741ab5bf1e564ac8540bf5803c1b",
+}
+
+
+def test_default_render_unchanged_by_contrast_key():
+    import hashlib
+    cfg = _cfg(**{"digits.show_prob": 0.0})
+    assert cfg["pointer"]["min_bg_contrast"] == 0
+    for seed, want in _PRE_CONTRAST_HASHES.items():
+        got = hashlib.sha256(g7.render_image(cfg, seed).image.tobytes()).hexdigest()
+        assert got == want, f"seed {seed}: default render changed"
+
+
+def _pointer_footprint(cfg, seed):
+    """Pixels the pointer body/edge/hole reach, (256, 256) bool (c forced to 0)."""
+    lo, hi = copy.deepcopy(cfg), copy.deepcopy(cfg)
+    for c, g in ((lo, 0), (hi, 255)):
+        c["pointer"]["gray_range"] = [g, g]
+        c["pointer"]["min_bg_contrast"] = 0
+    return g7.render_image(lo, seed).image != g7.render_image(hi, seed).image
+
+
+def test_min_bg_contrast_isolated():
+    flat = {"jitter.contrast_range": [1.0, 1.0]}
+    base = _cfg(**flat)
+    strong = _cfg(**flat, **{"pointer.min_bg_contrast": 90})
+    any_diff = False
+    for seed in range(8):
+        a = g7.render_image(base, seed)
+        b = g7.render_image(strong, seed)
+        assert _same_labels(a, b), f"seed {seed}: label moved"
+        keep = ~_dilate(_pointer_footprint(base, seed), 4)  # (256, 256) bool, non-pointer
+        assert keep.sum() > 0.5 * IMG * IMG
+        assert np.array_equal(a.image[keep], b.image[keep]), f"seed {seed}: non-pointer changed"
+        any_diff |= not np.array_equal(a.image, b.image)
+    assert any_diff, "min_bg_contrast had no visible effect"
+
+
+# "section.key" -> value pins (dict) for the digit-jitter tests: digits always
+# on, no global or pixel-smearing post effects
+_DIGIT_PINS = {"digits.show_prob": 1.0, "jitter.contrast_range": [1.0, 1.0],
+               "jitter.brightness_range": [1.0, 1.0], "jitter.sharpness_range": [1.0, 1.0],
+               "background.dial_circle_blur": False}
+
+
+def _digit_mean_radius(cfg, seed):
+    """Mean distance (float, px) of the digit footprint from the image centre.
+
+    Footprint = pixels that change when only digits.gray_range is shifted by
+    +225 (same draws), (256, 256) bool.
+    """
+    hi = copy.deepcopy(cfg)
+    a, b = cfg["digits"]["gray_range"]
+    hi["digits"]["gray_range"] = [a + 225, b + 225]
+    foot = g7.render_image(cfg, seed).image != g7.render_image(hi, seed).image
+    assert foot.sum() > 50, f"seed {seed}: digits invisible"
+    return float(_radius_grid()[foot].mean())
+
+
+def test_digit_jitter_direction():
+    zero = {"digits.inside_jitter_range": [0.0, 0.0],
+            "digits.outside_jitter_range": [0.0, 0.0]}  # both jitters off
+    for inside_prob, key, sign in ((1.0, "digits.inside_jitter_range", -1),
+                                   (0.0, "digits.outside_jitter_range", +1)):
+        off = _cfg(**_DIGIT_PINS, **zero, **{"digits.inside_prob": inside_prob})
+        on = _cfg(**_DIGIT_PINS, **{**zero, "digits.inside_prob": inside_prob,
+                                    key: [5.0, 5.0]})
+        for seed in range(6):
+            r_off = _digit_mean_radius(off, seed)  # float px
+            r_on = _digit_mean_radius(on, seed)  # float px
+            assert sign * (r_on - r_off) > 2.5, (key, seed, r_off, r_on)
+    # the other branch's range changes nothing (byte-identical)
+    for inside_prob, other in ((1.0, "digits.outside_jitter_range"),
+                               (0.0, "digits.inside_jitter_range")):
+        a = _cfg(**_DIGIT_PINS, **{"digits.inside_prob": inside_prob})
+        b = _cfg(**_DIGIT_PINS, **{"digits.inside_prob": inside_prob, other: [9.0, 9.0]})
+        for seed in range(4):
+            assert np.array_equal(g7.render_image(a, seed).image,
+                                  g7.render_image(b, seed).image), (other, seed)

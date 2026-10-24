@@ -134,7 +134,8 @@ def test_load_config_none_and_path(tmp_path):
 FLOAT_RANGES = [  # keys the old code draws with random.uniform
     "geometry.displacement_range", "geometry.ptr_displacement_range",
     "geometry.hole_disp_range", "geometry.arc_gap_range",
-    "ticks.angle_jitter_range", "digits.dist_jitter_range",
+    "ticks.angle_jitter_range", "digits.outside_jitter_range",
+    "digits.inside_jitter_range",
     "digits.angle_jitter_range", "digits.gap_range",
     "pointer.gradient_range", "shadows.offset_range",
     "geometry.scale_range", "jitter.contrast_range",
