@@ -743,3 +743,82 @@ def test_preview_count_keeps_seeds_after_reshuffle_and_typing(page):
     _set_count(page, "4", 4)
     _set_count(page, "9", 9)
     assert _tile_seeds(page) == recorded
+
+
+# ── per-tile Save: zip of the tile PNG + params.json + config.yaml ──────────
+
+def _slider_keys(page, param, handle, key, times):
+    """Focus the range slider of param (str) / handle ('lo'|'hi') and press key (str)
+    `times` (int) times, the way a keyboard user nudges a slider."""
+    s = page.locator(f'[data-param="{param}"] input[type=range][data-handle="{handle}"]')
+    s.focus()
+    for _ in range(times):
+        s.press(key)
+
+
+def _save_tile(page, index, dest_dir):
+    """Click the Save button of tile `index` (int, 0-based) and unpack the download.
+
+    Returns (zip name str, png bytes, params dict, config.yaml text str)."""
+    import zipfile
+    btn = page.get_by_test_id("tile").nth(index).get_by_test_id("tile-save")  # Locator
+    with page.expect_download() as dl:
+        btn.click()
+    name = dl.value.suggested_filename  # str, e.g. "v7_seed1.zip"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    path = dest_dir / name  # Path of the saved zip
+    dl.value.save_as(str(path))
+    with zipfile.ZipFile(path) as zf:
+        stem = name[:-len(".zip")]  # str, "v7_seed<seed>"
+        return (name, zf.read(f"{stem}.png"), json.loads(zf.read("params.json")),
+                zf.read("config.yaml").decode("utf-8"))
+
+
+def _tile_png(page, index):
+    """PNG bytes shown by tile `index` (int): its data-URL <img> src decoded."""
+    import base64
+    src = _tile_srcs(page)[index]  # str, "data:image/png;base64,..."
+    return base64.b64decode(src.split(",", 1)[1])
+
+
+def test_tile_save_bundles_image_and_params(page, tmp_path):
+    # nudge the ticks.len_range hi slider 9 -> 14 by keyboard, wait for the preview
+    old = _applied_seq(page)
+    _slider_keys(page, "ticks.len_range", "hi", "ArrowRight", 5)
+    _wait_applied_after(page, old)
+    _wait_settled(page)
+    assert _num(page, "ticks.len_range", "hi").input_value() == "14"
+    tile = page.get_by_test_id("tile").nth(1)  # second tile (Locator)
+    seed = int(tile.get_attribute("data-seed"))  # int, its image seed
+    btn = tile.get_by_test_id("tile-save")  # its Save button (Locator)
+    assert btn.get_attribute("aria-label") == f"Save image and parameters for seed {seed}"
+    name, png, params, text = _save_tile(page, 1, tmp_path)
+    assert name == f"v7_seed{seed}.zip"
+    assert png == _tile_png(page, 1)
+    assert params["seed"] == seed and params["sampled"]["angle"]["angle_deg"] is not None
+    assert params["config"]["ticks"]["len_range"] == [6, 14]
+    assert yaml.safe_load(text)["ticks"]["len_range"] == [6, 14]
+
+    # stale-snapshot safety: hold the next preview, move the slider again, Save
+    # before the new tiles arrive -> the bundle still matches the shown tile
+    held = []  # intercepted /api/preview routes not yet answered, list[Route]
+    page.route("**/api/preview", lambda route: held.append(route))
+    shown = _tile_png(page, 1)  # bytes, the tile still on screen
+    _slider_keys(page, "ticks.len_range", "hi", "ArrowRight", 1)
+    deadline = time.time() + 30  # s (float)
+    while not held and time.time() < deadline:
+        page.wait_for_timeout(50)
+    assert held, "the slider move sent no preview request"
+    assert _num(page, "ticks.len_range", "hi").input_value() == "15"
+    name2, png2, params2, text2 = _save_tile(page, 1, tmp_path / "stale")
+    assert png2 == shown == _tile_png(page, 1)
+    assert params2["config"]["ticks"]["len_range"] == [6, 14]
+    assert yaml.safe_load(text2)["ticks"]["len_range"] == [6, 14]
+    for route in held:
+        route.fulfill(response=route.fetch())
+    _wait_settled(page)
+    page.unroute("**/api/preview")
+    # once the new tiles are applied, Save follows the new config
+    _, png3, params3, _ = _save_tile(page, 1, tmp_path / "fresh")
+    assert png3 == _tile_png(page, 1)
+    assert params3["config"]["ticks"]["len_range"] == [6, 15]

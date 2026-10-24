@@ -915,3 +915,64 @@ def test_effects_deterministic():
         a = g7.render_image(cfg, seed)
         b = g7.render_image(cfg, seed)
         assert np.array_equal(a.image, b.image) and _same_labels(a, b), seed
+
+
+# ── sampled per-image params (RenderResult.params) ────────────────────────
+
+# params groups (tuple[str, ...]) every render must record, one per section
+_PARAM_GROUPS = ("angle", "geometry", "outer", "palette", "background", "digits", "ticks",
+                 "shadows", "pointer", "cut_tip", "jitter", "hier_noise", "tri_artifacts",
+                 "reflections", "glares", "blur", "derived")
+
+
+def _json_plain(v):
+    """True if v is built only from dict/list/str/int/float/bool/None (JSON types)."""
+    if isinstance(v, dict):
+        return all(isinstance(k, str) and _json_plain(x) for k, x in v.items())
+    if isinstance(v, list):
+        return all(_json_plain(x) for x in v)
+    return v is None or type(v) in (str, int, float, bool)
+
+
+def test_params_json_serialisable_and_grouped():
+    import json
+    for seed in range(4):
+        res = g7.render_image(v7_config.default_config(), seed)
+        p = res.params  # dict[str, dict], sampled values by section
+        assert _json_plain(p), seed
+        json.dumps(p)
+        for grp in _PARAM_GROUPS:
+            assert isinstance(p.get(grp), dict), (seed, grp)
+        assert p["angle"]["angle_deg"] == res.angle_deg
+        assert p["geometry"]["dial_radius"] > 0
+        assert p["derived"]["tip_x"] == round(res.tip_x, 4)
+
+
+def test_params_effect_items_match_count():
+    cfg = _cfg(**{"reflections.prob": 1.0, "reflections.count_range": [2, 4],
+                  "glares.prob": 1.0, "glares.count_range": [1, 3]})
+    keys = {"char", "font", "size", "rotation", "aspect", "shear", "P", "px", "py",
+            "warp_strength", "g", "center_x", "center_y"}  # set[str], per-item record keys
+    for seed in range(3):
+        p = g7.render_image(cfg, seed).params
+        for name, val in (("reflections", "darken"), ("glares", "value")):
+            sec = p[name]  # dict, one effect section
+            assert sec["active"] is True
+            assert len(sec["items"]) == sec["n"] >= 1, (seed, name)
+            for it in sec["items"]:
+                assert keys | {val} <= set(it), (seed, name, set(it))
+                assert it["char"] in g7.GLYPHS
+
+
+def test_params_effects_off_has_no_items():
+    p = g7.render_image(v7_config.default_config(), 0).params
+    assert p["reflections"]["active"] is False and p["reflections"]["items"] == []
+    assert p["glares"]["items"] == []
+
+
+def test_params_recording_keeps_render_identical():
+    # rendering twice gives identical params, and the pinned hashes still hold
+    cfg = _cfg(**{"reflections.prob": 1.0, "glares.prob": 1.0})
+    a, b = g7.render_image(cfg, 7), g7.render_image(cfg, 7)
+    assert a.params == b.params and np.array_equal(a.image, b.image)
+    test_default_render_unchanged_by_contrast_key()

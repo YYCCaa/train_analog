@@ -190,7 +190,12 @@ main { overflow-y: auto; padding: 14px 18px 30px; }
 }
 .grid img { display: block; width: 100%; height: auto; image-rendering: pixelated; }
 .marker { position: absolute; pointer-events: none; }
-.grid figcaption { color: var(--muted); font-size: 11px; margin-top: 4px; font-family: Consolas, monospace; }
+.grid figcaption {
+  color: var(--muted); font-size: 11px; margin-top: 4px; font-family: Consolas, monospace;
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+}
+/* per-tile Save (zip of PNG + params.json + config.yaml): a compact toolbar button */
+.grid .tile-save { padding: 1px 7px; font-size: 11px; line-height: 1.4; }
 
 /* ---- generate panel ---- */
 .gen {

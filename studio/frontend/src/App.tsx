@@ -44,6 +44,11 @@ export default function App() {
   // startup and never replaced by a loaded YAML; source of the per-control reset buttons
   const [defaults, setDefaults] = useState<Config | null>(null);
   const [tiles, setTiles] = useState<Tile[]>([]); // latest applied tiles
+  // config snapshot the applied tiles were rendered from (section -> key -> Value), or null
+  // before the first preview; per-tile Save bundles with this, never the newer slider state
+  const [appliedConfig, setAppliedConfig] = useState<Config | null>(null);
+  // errors of the last per-tile Save (list[str]); cleared by a successful save
+  const [saveErrors, setSaveErrors] = useState<string[]>([]);
   const [overlay, setOverlay] = useState(false); // tip markers on/off
   // errors of the last preview request (list[str]); cleared by a successful preview
   const [previewErrors, setPreviewErrors] = useState<string[]>([]);
@@ -77,12 +82,14 @@ export default function App() {
     const timer = setTimeout(() => { // debounce timer handle (number)
       pendingRef.current = false;
       const seq = ++seqRef.current; // this request's number (int)
+      const sent = config; // config snapshot sent with this request (Config, never mutated)
       setSentSeq(seq);
       api
-        .preview(config, seeds)
+        .preview(sent, seeds)
         .then((t) => {
           if (seq !== seqRef.current) return; // stale: a newer request was sent
           setTiles(t);
+          setAppliedConfig(sent);
           setPreviewErrors([]);
         })
         .catch((e) => {
@@ -161,7 +168,8 @@ export default function App() {
     }
   };
 
-  const errors = [...fileErrors, ...previewErrors]; // everything shown in config-errors (list[str])
+  // everything shown in config-errors (list[str])
+  const errors = [...fileErrors, ...previewErrors, ...saveErrors];
   const imgSize = (config?.canvas?.img_size as number) ?? 256; // tile side (px, int)
 
   return (
@@ -226,7 +234,8 @@ export default function App() {
           ))}
         </div>
         <PreviewGrid tiles={tiles} imgSize={imgSize} overlay={overlay}
-          sentSeq={sentSeq} appliedSeq={appliedSeq} busy={busy} count={count} />
+          sentSeq={sentSeq} appliedSeq={appliedSeq} busy={busy} count={count}
+          appliedConfig={appliedConfig} onSaveErrors={setSaveErrors} />
         <GeneratePanel config={config} />
       </main>
     </div>

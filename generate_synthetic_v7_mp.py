@@ -89,6 +89,40 @@ disc of B:
     m (h', w') float32 0-1 ──> placed m (C, C), zero outside B
     reflection: out = in - darken * m     (values, overlaps add)
     glare:      out = in*(1-m) + V*m      (after all reflections; not near tip)
+
+Params: RenderResult.params records the values this image actually drew or
+derived, dict[str, dict] grouped by section.  Recording adds no draws and
+changes no pixel.  Values are JSON-plain (int, float rounded to 4 decimals,
+bool, str, list); positions are image px unless named otherwise.
+
+    angle          angle_deg
+    geometry       arc_gap_start_deg, arc_gap_span_deg, scale, dial_radius,
+                   displacement_mag / _angle_rad / _x / _y, hub_radius,
+                   chord_half, chord_dist, tip_dist, ptr_displacement_mag /
+                   _angle_rad, hole_radius, hole_displacement_mag / _angle_rad,
+                   stretch_h, stretch_v, canvas_size
+    outer          scale
+    palette        bg_gray, circle_gray, outer_gray, rim_gray
+    background     lowfreq_min, lowfreq_max, lowfreq_mean (of the tile grid)
+    digits         show, font_size; when shown: angle_jitter, gray, gap,
+                   inside, radial_jitter, dist
+    ticks          drawn; when drawn: angle_jitter, gray, per_digit,
+                   major_lens[10], major_widths[10], inner_radius
+    shadows        active, light_angle, s_p, s_r, rim_offset_frac,
+                   rim_cutout_frac, rim_blur, offset
+    pointer        gray, hole_gray, edge_gray, gradient, edge_thickness
+    cut_tip        enabled, cut_r
+    jitter         brightness, contrast, sharpness
+    hier_noise     block_min, block_max, block_std (of the block offsets)
+    tri_artifacts  enabled, count_drawn, n, items[n] {gray, center_x,
+                   center_y, size, placed}
+    reflections    active, count_drawn, n, items[n] {char, font, size,
+                   rotation, aspect, shear, P, px, py, warp_strength, g,
+                   center_x, center_y, darken}
+    glares         same as reflections with value instead of darken
+    blur           enabled, radius
+    derived        img_size, canvas_offset_x / _y, dial_rx, dial_ry,
+                   outer_rx, outer_ry, tip_x, tip_y
 """
 
 import argparse
@@ -102,7 +136,7 @@ import random
 import string
 import sys
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
@@ -149,6 +183,26 @@ class RenderResult:
     tip_x: float  # visible pointer tip x in image pixels (float; apex or cut-arc centre)
     tip_y: float  # visible pointer tip y in image pixels (float; apex or cut-arc centre)
     angle_deg: int  # pointer angle, whole degrees (0 = up, clockwise)
+    # sampled per-image values, dict[str, dict]: section name -> key -> JSON-plain
+    # value (int / float rounded to 4 decimals / bool / str / list); see "Params"
+    # in the module docstring.  Recorded only, never drawn for.
+    params: dict = field(default_factory=dict)
+
+
+def _plain(v):
+    """JSON-plain copy of a recorded value: bool / int / str kept, floats (and
+    numpy scalars) rounded to 4 decimals, tuples -> lists, dicts recursed."""
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, (float, np.floating)):
+        return round(float(v), 4)
+    if isinstance(v, dict):
+        return {str(k): _plain(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_plain(x) for x in v]
+    return v
 
 
 # ── gray compositing ───────────────────────────────────────────────────
@@ -189,11 +243,12 @@ def _arc_or_circle(draw, bbox, gap_start_deg, gap_span_deg, fill, width):
         draw.arc(bbox, start=arc_start, end=arc_end, fill=fill, width=width)
 
 
-def draw_ticks(td_value, td_alpha, cx, cy, dial_radius, tcfg, rng):
+def draw_ticks(td_value, td_alpha, cx, cy, dial_radius, tcfg, rng, rec=None):
     """Draw the 0-9 scale ticks (+ subdivisions) on the overlay layer.
 
     td_value / td_alpha : overlay "L" images (canvas, canvas)
     tcfg                : cfg["ticks"]; rng: the "ticks" random.Random
+    rec                 : optional dict, filled with the drawn values (no draws added)
     Returns the inner radius (float, px) of the longest major tick.
     """
     vdraw = ImageDraw.Draw(td_value)  # draws tick gray into the overlay value
@@ -207,6 +262,7 @@ def draw_ticks(td_value, td_alpha, cx, cy, dial_radius, tcfg, rng):
 
     sub_deg = DEG_PER_DIGIT / ticks_per_digit  # float, deg between ticks
     max_major_len = 0  # longest major tick (int, px) for digit placement
+    major_lens, major_widths = [], []  # list[int] px per digit, recorded only
 
     for i in range(NUM_DIGITS):
         for s in range(ticks_per_digit):
@@ -216,6 +272,8 @@ def draw_ticks(td_value, td_alpha, cx, cy, dial_radius, tcfg, rng):
                 tick_len = rng.randint(*tcfg["len_range"])
                 tick_w = rng.randint(*tcfg["width_range"])
                 max_major_len = max(max_major_len, tick_len)
+                major_lens.append(tick_len)
+                major_widths.append(tick_w)
             else:  # minor tick
                 tick_len = max(1, rng.randint(*tcfg["len_range"]) // 2)
                 tick_w = max(1, rng.randint(*tcfg["width_range"]) - 1)
@@ -225,17 +283,22 @@ def draw_ticks(td_value, td_alpha, cx, cy, dial_radius, tcfg, rng):
             vdraw.line(seg, fill=grey, width=tick_w)
             adraw.line(seg, fill=255, width=tick_w)
 
+    if rec is not None:
+        rec.update(angle_jitter=angle_jitter, gray=grey, per_digit=ticks_per_digit,
+                   major_lens=major_lens, major_widths=major_widths,
+                   inner_radius=tick_outer - max_major_len)
     return tick_outer - max_major_len
 
 
 def draw_scale_digits(td_value, td_alpha, cx, cy, dial_radius, tick_inner_radius,
-                      dcfg, rng, font_size):
+                      dcfg, rng, font_size, rec=None):
     """Draw digits 0-9 around the dial on the overlay layer (0 at top, CW).
 
     Digits sit inside or outside the ticks with a clearance gap.  The radial
     jitter is one-directional: inside digits move only inward (toward the
     centre, inside_jitter_range), outside digits only outward (away from the
-    centre, outside_jitter_range).  dcfg = cfg["digits"]; rng = "digits" stream.
+    centre, outside_jitter_range).  dcfg = cfg["digits"]; rng = "digits" stream;
+    rec: optional dict, filled with the drawn values (no draws added).
     """
     try:
         font = ImageFont.truetype("arial.ttf", font_size)  # FreeTypeFont, digit glyphs
@@ -255,6 +318,9 @@ def draw_scale_digits(td_value, td_alpha, cx, cy, dial_radius, tick_inner_radius
     else:
         base_dist = dial_radius + font_size / 2 + gap  # float, px
         dist = base_dist + rng.uniform(*dcfg["outside_jitter_range"])  # float px, away from centre
+    if rec is not None:
+        rec.update(angle_jitter=ang_jitter, gray=grey, gap=gap, inside=inside,
+                   radial_jitter=abs(dist - base_dist), dist=dist)
 
     # anti-aliased digit coverage 0-255, "L" (canvas, canvas).  Text goes to
     # coverage only: the value stays a flat `grey` (straight, not
@@ -653,11 +719,13 @@ def transform_shape(sil, size, rotation_deg, aspect, shear, warp, edge_soft,
     return np.clip(m[ys.min():ys.max() + 1, xs.min():xs.max() + 1], 0, 1)
 
 
-def _glyph_shape(rng, nrng, sec):
+def _glyph_shape(rng, nrng, sec, rec=None):
     """Shape mask of one effect: a random glyph in a random font, randomly transformed.
 
     rng / nrng: the section's random.Random / np.random.Generator; sec:
-    reflections / glares config section (dict).  Draws, in order, from rng:
+    reflections / glares config section (dict); rec: optional dict, filled
+    with this item's drawn values (char, font, size, rotation, aspect, shear,
+    P, px, py, warp_strength, g) -- recording adds no draws.  Draws, in order, from rng:
     1 glyph index, 2 font index, 3 size s, 4 rotation, 5 aspect (log-uniform),
     6 shear, 7 P ~ U(perspective_range), 8 px ~ U(-P, P), 9 py ~ U(-P, P),
     10 strength ~ U(warp_strength_range), 11 g ~ randint(warp_grid_range);
@@ -682,20 +750,26 @@ def _glyph_shape(rng, nrng, sec):
     amp = strength * size  # float px, warp amplitude A
     noise = nrng.uniform(-1.0, 1.0, 2 * gmax * gmax)  # (2*G*G,) float64, always fully drawn
     warp = (amp * noise[:2 * g * g].reshape(2, g, g)) if amp > 0 else None  # (2, g, g) float px
+    if rec is not None:
+        rec.update(char=ch, font=fonts[fi], size=size, rotation=rot, aspect=aspect,
+                   shear=shear, P=P, px=persp[0], py=persp[1], warp_strength=strength, g=g)
     return transform_shape(glyph_silhouette(ch, fi), size, rot, aspect, shear, warp,
                            float(sec["edge_soft"]), persp)
 
 
-def _place_shape(rng, m, canvas_size, bcx, bcy, b_radius, inside_outer):
+def _place_shape(rng, m, canvas_size, bcx, bcy, b_radius, inside_outer, rec=None):
     """Paste shape m at a random centre uniform in the disc of boundary B.
 
     m: (h, w) float32 mask; bcx, bcy: B centre (int px, canvas);
-    b_radius: float px; inside_outer: (C, C) bool, inside B.  Draws radius
+    b_radius: float px; inside_outer: (C, C) bool, inside B; rec: optional
+    dict, gets center_x / center_y (float px, canvas coords).  Draws radius
     then angle (polar, sqrt for uniform area).  Returns a (C, C) float32
     canvas mask, cropped at the canvas edges and zero outside B.
     """
     rr = b_radius * math.sqrt(rng.random())  # float px, centre distance from B centre
     th = rng.uniform(0, 2 * math.pi)  # float rad, centre direction
+    if rec is not None:
+        rec.update(center_x=bcx + rr * math.cos(th), center_y=bcy + rr * math.sin(th))
     h, w = m.shape
     x0 = int(round(bcx + rr * math.cos(th) - w / 2.0))  # int px, paste left (canvas)
     y0 = int(round(bcy + rr * math.sin(th) - h / 2.0))  # int px, paste top
@@ -708,22 +782,31 @@ def _place_shape(rng, m, canvas_size, bcx, bcy, b_radius, inside_outer):
     return out
 
 
-def _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy, b_radius, tip, xs, ys):
+def _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy, b_radius, tip, xs, ys,
+                   rec=None):
     """Step 13c: reflections (out = in - sum darken*m), then glares
     (out = lerp(out, V, m), glare zeroed within clear_distance of the tip).
 
     img: canvas "L" (C, C); rngs: section_rngs dict; tip: visible tip (x, y)
     float px in canvas coords; xs (1, C) / ys (C, 1) int pixel grids.
-    Shapes are transformed font glyphs (_glyph_shape).
+    Shapes are transformed font glyphs (_glyph_shape).  rec: optional dict,
+    gets rec["reflections"] / rec["glares"] = {active bool, count_drawn int,
+    n int (items rendered), items list[dict] (one _glyph_shape record +
+    center_x/center_y canvas px + darken / value int each)}.
     Returns the canvas as an "L" image (C, C).
     """
     canvas_size = img.size[0]  # int px, C
     plan = []  # list of (name, section dict, random.Random, item count int)
+    # per-section records, dict[str, dict] (filled below; discarded when rec is None)
+    recs = {}
     for name in ("reflections", "glares"):
         sec, rng = cfg[name], rngs[name][0]
         active = rng.random() < sec["prob"]  # bool, fixed-count draw 1
         n = rng.randint(*sec["count_range"])  # int, fixed-count draw 2
         plan.append((name, sec, rng, n if active else 0))
+        recs[name] = {"active": active, "count_drawn": n, "n": n if active else 0, "items": []}
+    if rec is not None:
+        rec.update(recs)
     if not any(n for *_, n in plan):
         return img
     work = np.asarray(img, dtype=np.float32)  # (C, C) float32 working canvas
@@ -731,18 +814,24 @@ def _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy, b_radius, tip, xs, ys
     rnrng, gnrng = rngs["reflections"][1], rngs["glares"][1]  # np.random.Generator per section
     dark = np.zeros_like(work)  # (C, C) float32, summed reflection darkening
     for _ in range(n_r):
-        m = _glyph_shape(rrng, rnrng, R)
+        it = {}  # dict, this item's record
+        m = _glyph_shape(rrng, rnrng, R, it)
         delta = rrng.randint(*R["darken_range"])  # int gray levels subtracted
-        dark += delta * _place_shape(rrng, m, canvas_size, bcx, bcy, b_radius, inside_outer)
+        it["darken"] = delta
+        dark += delta * _place_shape(rrng, m, canvas_size, bcx, bcy, b_radius, inside_outer, it)
+        recs["reflections"]["items"].append(it)
     work = np.clip(work - dark, 0, 255)
     if n_g:
         clear = float(Gl["clear_distance"])  # float px
         # (C, C) bool, pixels a glare may never cover (around the visible tip)
         near_tip = (xs - tip[0]) ** 2 + (ys - tip[1]) ** 2 <= clear ** 2
         for _ in range(n_g):
-            m = _glyph_shape(grng, gnrng, Gl)
+            it = {}  # dict, this item's record
+            m = _glyph_shape(grng, gnrng, Gl, it)
             v = grng.randint(*Gl["value_range"])  # int gray level of the glare
-            mc = _place_shape(grng, m, canvas_size, bcx, bcy, b_radius, inside_outer)
+            it["value"] = v
+            mc = _place_shape(grng, m, canvas_size, bcx, bcy, b_radius, inside_outer, it)
+            recs["glares"]["items"].append(it)
             mc[near_tip] = 0
             work = work * (1 - mc) + v * mc
     return Image.fromarray(np.clip(np.rint(work), 0, 255).astype(np.uint8))
@@ -788,6 +877,23 @@ def render_image(cfg, image_seed):
     # outer boundary radius / dial radius (float): the first and only draw of
     # the outer stream, drawn here so the canvas can be sized to cover B
     outer_scale = rngs["outer"][0].uniform(*O["scale_range"])  # float
+    # sampled values of this image, dict[str, dict]: section -> key -> value
+    # (raw; made JSON-plain by _plain at the end).  Recording only, no draws.
+    rec = {
+        "angle": {"angle_deg": angle_deg},
+        "geometry": {"arc_gap_start_deg": gap_start_deg, "arc_gap_span_deg": gap_span_deg,
+                     "scale": scale, "dial_radius": dial_radius,
+                     "displacement_mag": disp_mag, "displacement_angle_rad": disp_ang,
+                     "displacement_x": disp_x, "displacement_y": disp_y,
+                     "hub_radius": hub_radius, "chord_half": chord_half,
+                     "chord_dist": chord_dist, "tip_dist": tip_dist,
+                     "ptr_displacement_mag": ptr_disp_mag,
+                     "ptr_displacement_angle_rad": ptr_disp_ang,
+                     "hole_radius": hole_r, "hole_displacement_mag": hd_mag,
+                     "hole_displacement_angle_rad": hd_ang,
+                     "stretch_h": stretch_h, "stretch_v": stretch_v},
+        "outer": {"scale": outer_scale},
+    }
     # largest possible |displacement| component (int px) for this config
     dm = int(math.ceil(max(abs(v) for v in G["displacement_range"])))
     # canvas half side (int px): dial + margin, or the stretched boundary B,
@@ -810,6 +916,9 @@ def render_image(cfg, image_seed):
     circle_gray = prng.randint(*P["circle_gray_range"])
     outer_gray = prng.randint(*P["outer_gray_range"])
     rim_gray = prng.randint(*P["rim_gray_range"])
+    rec["palette"] = {"bg_gray": bg_gray, "circle_gray": circle_gray,
+                      "outer_gray": outer_gray, "rim_gray": rim_gray}
+    rec["geometry"].update(canvas_size=canvas_size)
 
     # --- 1 non-uniform background (background stream, numpy) ---
     B, bnp = cfg["background"], rngs["background"][1]
@@ -821,6 +930,9 @@ def render_image(cfg, image_seed):
     ni = B["noise_intensity"]
     bg_arr += bnp.integers(-ni, ni + 1, (canvas_size, canvas_size), dtype=np.int16)
     img = Image.fromarray(np.clip(bg_arr, 0, 255).astype(np.uint8))  # canvas, "L" (C, C)
+    # background summary (the draws are arrays; their range / mean is what shows)
+    rec["background"] = {"lowfreq_min": int(lf.min()), "lowfreq_max": int(lf.max()),
+                         "lowfreq_mean": float(lf.mean())}
 
     # --- 2 faint dial circle with arc gap ---
     dial_box = [cx - dial_radius, cy - dial_radius, cx + dial_radius, cy + dial_radius]
@@ -832,9 +944,11 @@ def render_image(cfg, image_seed):
     font_size = drng.randint(*D["font_size_range"])  # int px
     td_value, td_alpha = _new_layer(canvas_size)  # overlay value/alpha, "L" (C, C)
     tick_inner_r = None
+    rec["digits"] = {"show": show_digits, "font_size": font_size}
+    rec["ticks"] = {"drawn": show_digits}
     if show_digits:
         tick_inner_r = draw_ticks(td_value, td_alpha, cx, cy, dial_radius,
-                                  cfg["ticks"], rngs["ticks"][0])
+                                  cfg["ticks"], rngs["ticks"][0], rec["ticks"])
 
     # --- 4/5 shadows (shadows stream; all fixed-count draws up front) ---
     S, srng = cfg["shadows"], rngs["shadows"][0]
@@ -845,6 +959,9 @@ def render_image(cfg, image_seed):
     rim_cutout = srng.uniform(*S["rim_cutout_frac"])  # float, cutout radius / dial radius
     rim_blur = srng.uniform(*S["rim_blur_range"])  # float px, rim mask blur
     shd_dist = srng.uniform(*S["offset_range"])  # float px, pointer shadow offset
+    rec["shadows"] = {"active": has_shadow, "light_angle": light_angle, "s_p": s_p, "s_r": s_r,
+                      "rim_offset_frac": rim_offset, "rim_cutout_frac": rim_cutout,
+                      "rim_blur": rim_blur, "offset": shd_dist}
     # shadow darkening fraction on the canvas, (C, C) float32 in 0-1, or None
     # when the image has no shadow; nothing is composited onto img here, it
     # is applied once at step 13 as img * (1 - d)
@@ -872,7 +989,7 @@ def render_image(cfg, image_seed):
     # --- 6 digits on the overlay ---
     if show_digits:
         draw_scale_digits(td_value, td_alpha, cx, cy, dial_radius, tick_inner_r,
-                          D, drng, font_size)
+                          D, drng, font_size, rec["digits"])
 
     # --- 7 mounting hole + pointer (pointer stream) ---
     PT = cfg["pointer"]
@@ -883,6 +1000,8 @@ def render_image(cfg, image_seed):
     edge_gray = int(ptr_gray * ptr_rng.uniform(*PT["darker_frac_range"]))  # int
     grad_strength = ptr_rng.uniform(*PT["gradient_range"])  # float
     edge_thickness = ptr_rng.randint(*PT["edge_thickness_range"])  # int px
+    rec["pointer"] = {"gray": ptr_gray, "hole_gray": hole_gray, "edge_gray": edge_gray,
+                      "gradient": grad_strength, "edge_thickness": edge_thickness}
 
     # hole drawn BEFORE the pre-pointer snapshot so it survives the cut-tip restore
     ImageDraw.Draw(img).ellipse([hole_cx - hole_r, hole_cy - hole_r,
@@ -890,6 +1009,7 @@ def render_image(cfg, image_seed):
 
     C = cfg["cut_tip"]
     cut_r = rngs["cut_tip"][0].randint(*C["radius_range"])  # int px
+    rec["cut_tip"] = {"enabled": bool(C["enabled"]), "cut_r": cut_r}
     bg_pre_ptr = img.copy() if C["enabled"] else None  # pre-pointer canvas, "L"
     img, apex, _, _, ptr_mask = draw_pointer(
         img, ptr_cx, ptr_cy, angle_deg, hub_radius, tip_dist, chord_half,
@@ -923,9 +1043,14 @@ def render_image(cfg, image_seed):
 
     # --- 9 exposure jitter ---
     J, jrng = cfg["jitter"], rngs["jitter"][0]
-    img = ImageEnhance.Brightness(img).enhance(jrng.uniform(*J["brightness_range"]))
-    img = ImageEnhance.Contrast(img).enhance(jrng.uniform(*J["contrast_range"]))
-    img = ImageEnhance.Sharpness(img).enhance(jrng.uniform(*J["sharpness_range"]))
+    # enhance factors (float), drawn in this order: brightness, contrast, sharpness
+    j_bright = jrng.uniform(*J["brightness_range"])
+    img = ImageEnhance.Brightness(img).enhance(j_bright)
+    j_contrast = jrng.uniform(*J["contrast_range"])
+    img = ImageEnhance.Contrast(img).enhance(j_contrast)
+    j_sharp = jrng.uniform(*J["sharpness_range"])
+    img = ImageEnhance.Sharpness(img).enhance(j_sharp)
+    rec["jitter"] = {"brightness": j_bright, "contrast": j_contrast, "sharpness": j_sharp}
 
     # --- 10 outer annulus + rim band ---
     outer_rx, outer_ry = dial_rx * outer_scale, dial_ry * outer_scale  # float px
@@ -950,6 +1075,9 @@ def render_image(cfg, image_seed):
     block_up = np.array(Image.fromarray(block_u8).resize(size2, Image.BICUBIC),
                         dtype=np.int16) - 128  # (C, C) int16
     combined = block_up + hnp.integers(-pv, pv + 1, size2, dtype=np.int16)  # (C, C) int16 block + pixel noise
+    blk = block_u8.astype(np.int16) - 128  # (nb, nb) int16, the drawn block offsets
+    rec["hier_noise"] = {"block_min": int(blk.min()), "block_max": int(blk.max()),
+                         "block_std": float(blk.std())}
     ch = arr.astype(np.int16)  # (C, C) int16 working copy of the canvas
     ch[inside_outer] += combined[inside_outer]
     arr = np.clip(ch, 0, 255).astype(np.uint8)
@@ -965,8 +1093,11 @@ def render_image(cfg, image_seed):
     T = cfg["tri_artifacts"]
     trng, tnp = rngs["tri_artifacts"]
     n_tris = trng.randint(*T["count_range"])  # int, first draw of the stream
+    rec["tri_artifacts"] = {"enabled": bool(T["enabled"]), "count_drawn": n_tris}
     if not T["enabled"]:
         n_tris = 0
+    tri_items = []  # list[dict], one record per triangle (gray, centre, size, placed)
+    rec["tri_artifacts"].update(n=n_tris, items=tri_items)
     tv = T["pixel_var"]
     for _ in range(n_tris):
         tri_gray = trng.randint(*T["gray_range"])  # int mean gray
@@ -981,6 +1112,8 @@ def render_image(cfg, image_seed):
         tri_mask = Image.new("L", size2, 0)
         ImageDraw.Draw(tri_mask).polygon(verts, fill=255)
         valid = (np.array(tri_mask) > 127) & inside_outer & ~ptr_blocked  # (C, C) bool
+        tri_items.append({"gray": tri_gray, "center_x": tcx, "center_y": tcy, "size": sz,
+                          "placed": bool(valid.any())})
         if not valid.any():
             continue
         noise = tnp.integers(-tv, tv + 1, size2, dtype=np.int16)  # (C, C) int16 per-pixel fill noise
@@ -1006,9 +1139,11 @@ def render_image(cfg, image_seed):
 
     # --- 13c cover-glass reflections, then glares (glare wins), inside B ---
     img = _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy,
-                         min(outer_rx, outer_ry), apex, xs, ys)
+                         min(outer_rx, outer_ry), apex, xs, ys, rec)
 
     # --- 14 Gaussian blur inside the outer ring ---
+    rec["blur"] = {"enabled": bool(B["dial_circle_blur"]),
+                   "radius": B["dial_circle_blur_radius"]}
     if B["dial_circle_blur"]:
         blurred = img.filter(ImageFilter.GaussianBlur(radius=B["dial_circle_blur_radius"]))
         outer_mask_img = Image.new("L", size2, 0)
@@ -1033,9 +1168,18 @@ def render_image(cfg, image_seed):
     out[((ixs - (bcx + off_x)) / max(outer_rx, 1)) ** 2
         + ((iys - (bcy + off_y)) / max(outer_ry, 1)) ** 2 > 1] = 0
 
+    # canvas -> image coords for recorded placement centres (float px)
+    for name in ("reflections", "glares", "tri_artifacts"):
+        for it in rec[name]["items"]:
+            it["center_x"] += off_x
+            it["center_y"] += off_y
+    rec["derived"] = {"img_size": img_size, "canvas_offset_x": off_x, "canvas_offset_y": off_y,
+                      "dial_rx": dial_rx, "dial_ry": dial_ry,
+                      "outer_rx": outer_rx, "outer_ry": outer_ry,
+                      "tip_x": apex[0] + off_x, "tip_y": apex[1] + off_y}
     return RenderResult(image=out,
                         tip_x=apex[0] + off_x, tip_y=apex[1] + off_y,
-                        angle_deg=angle_deg)
+                        angle_deg=angle_deg, params=_plain(rec))
 
 
 # ── Multiprocessing worker plumbing + dataset driver ──────────────────────

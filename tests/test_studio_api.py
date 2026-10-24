@@ -257,6 +257,51 @@ def test_auto_workers_leave_one_core_free(tmp_path):
         assert seen["workers"] == max(1, (os.cpu_count() or 1) - 1)
 
 
+def _fx_cfg():
+    """Default cfg with reflections + glares always on (dict), so items get recorded."""
+    cfg = copy.deepcopy(v7_config.default_config())
+    cfg["reflections"]["prob"] = 1.0
+    cfg["glares"]["prob"] = 1.0
+    return cfg
+
+
+def test_preview_tiles_carry_params(client):
+    r = client.post("/api/preview", json={"config": _fx_cfg(), "seeds": [4]})
+    t = r.json()["tiles"][0]  # dict, one tile
+    assert t["params"]["angle"]["angle_deg"] == t["angle_deg"]
+    assert len(t["params"]["reflections"]["items"]) == t["params"]["reflections"]["n"]
+
+
+def test_bundle_zip_matches_preview(client):
+    import zipfile
+    cfg, seed = _fx_cfg(), 5
+    r = client.post("/api/bundle", json={"config": cfg, "seed": seed})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/zip"
+    assert r.headers["content-disposition"] == f'attachment; filename="v7_seed{seed}.zip"'
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    assert sorted(zf.namelist()) == sorted([f"v7_seed{seed}.png", "params.json", "config.yaml"])
+    tile = client.post("/api/preview", json={"config": cfg, "seeds": [seed]}).json()["tiles"][0]
+    assert zf.read(f"v7_seed{seed}.png") == base64.b64decode(tile["png_b64"])
+    p = json.loads(zf.read("params.json"))  # dict, the bundle's params.json
+    assert p["generator"] == "generate_synthetic_v7_mp" and p["seed"] == seed
+    assert p["tip_x"] == tile["tip_x"] and p["tip_y"] == tile["tip_y"]
+    assert p["angle_deg"] == tile["angle_deg"] and p["img_size"] == 256
+    assert p["sampled"] == tile["params"] and p["config"] == cfg
+    assert isinstance(p["created"], str) and "T" in p["created"]
+    text = zf.read("config.yaml").decode("utf-8")  # str, YAML dump of cfg
+    assert client.post("/api/config/parse", json={"text": text}).json()["config"] == cfg
+
+
+def test_bundle_invalid_config_422(client):
+    cfg = copy.deepcopy(v7_config.default_config())
+    cfg["ticks"]["len_range"] = [9, 6]
+    r = client.post("/api/bundle", json={"config": cfg, "seed": 1})
+    assert r.status_code == 422
+    assert any("ticks.len_range" in e for e in r.json()["errors"])
+    assert client.post("/api/bundle", json={"config": cfg}).status_code == 422
+
+
 @pytest.mark.skipif(os.name != "nt", reason="drive-relative paths are a Windows thing")
 def test_driveless_windows_path_400(client, monkeypatch):
     _no_job(monkeypatch, client)
