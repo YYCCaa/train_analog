@@ -607,3 +607,154 @@ def test_tip_label_on_pointer_pixels():
         assert px(b.tip_x - 2 * ux, b.tip_y - 2 * uy) < dark, (seed, "behind label")
         assert px(b.tip_x + 2 * ux, b.tip_y + 2 * uy) >= dark, (seed, "beyond label")
         assert px(a.tip_x, a.tip_y) >= dark, (seed, "old apex")
+
+
+# ── reflections + glares from Places365 patches ─────────────────────────
+
+def _write_places(folder, kind):
+    """Fill `folder` (pathlib.Path, created) with fixture photos -> folder.
+
+    kind "rect": a few small photos, each a white rectangle on black (a
+    known bright blob), as PNG and JPEG, in nested folders.  kind "white":
+    one 256x256 all-white PNG, so any threshold keeps the whole patch.
+    """
+    from PIL import Image
+    folder.mkdir(parents=True, exist_ok=True)
+    if kind == "white":
+        Image.new("L", (256, 256), 255).save(folder / "white.png")
+        return folder
+    for i, ext in enumerate(("png", "jpg", "png")):
+        a = np.zeros((96 + 16 * i, 96), dtype=np.uint8)  # (H, 96) uint8 photo
+        a[20 + i:70, 30:80 - i] = 255  # white rectangle = the bright blob
+        sub = folder / f"cat{i}"  # nested: the scan must be recursive
+        sub.mkdir(exist_ok=True)
+        Image.fromarray(a).save(sub / f"p{i}.{ext}")
+    return folder
+
+
+@pytest.fixture(autouse=True)
+def _places(tmp_path, monkeypatch):
+    """Point V7_PLACES_DIR at a fixture folder of rectangle photos for every
+    test in this module (hermetic: the real ~/places365 is never read)."""
+    folder = _write_places(tmp_path / "places_rect", "rect")  # pathlib.Path
+    monkeypatch.setenv("V7_PLACES_DIR", str(folder))
+    return folder
+
+
+# "section.key" -> value pins (dict) for the effect tests: no blur, so every
+# changed pixel shows the raw effect value
+_FX_QUIET = {"background.dial_circle_blur": False}
+_FX_SEEDS = range(5)  # seeds (range of int) every effect test uses
+
+
+def _refl(**extra):
+    """Quiet cfg with reflections always on (count 1, darken 30, hard edge)."""
+    return _cfg(**_FX_QUIET, **{"reflections.prob": 1.0, "reflections.count_range": [1, 1],
+                                "reflections.darken_range": [30, 30],
+                                "reflections.edge_soft": 0.0, **extra})
+
+
+def _glare(**extra):
+    """Quiet cfg with glares always on (value 240, hard edge)."""
+    return _cfg(**_FX_QUIET, **{"glares.prob": 1.0, "glares.value_range": [240, 240],
+                                "glares.edge_soft": 0.0, **extra})
+
+
+def test_effects_off_by_default_no_io(tmp_path, monkeypatch):
+    cfg = v7_config.default_config()
+    assert cfg["reflections"]["prob"] == 0.0 and cfg["glares"]["prob"] == 0.0
+    monkeypatch.setenv("V7_PLACES_DIR", str(tmp_path / "does_not_exist"))
+    test_default_render_unchanged_by_contrast_key()
+    g7.render_image(cfg, 5)  # must not raise without a dataset
+
+
+def test_reflection_darkens_by_value():
+    any_change = False
+    for seed in _FX_SEEDS:
+        base = g7.render_image(_cfg(**_FX_QUIET), seed).image.astype(np.int16)  # (256, 256)
+        got = g7.render_image(_refl(), seed).image.astype(np.int16)  # (256, 256)
+        changed = got != base  # (256, 256) bool
+        assert not (got > base).any(), seed
+        drop = (base - got)[changed]  # (N,) int16, darkening of changed pixels
+        clipped = (got[changed] == 0) & (base[changed] < 30)  # (N,) bool
+        assert ((drop == 30) | clipped).all(), (seed, np.unique(drop))
+        any_change |= changed.any()
+    assert any_change, "no reflection visible"
+
+
+def test_glare_overwrites_with_value():
+    any_change = False
+    for seed in _FX_SEEDS:
+        base = g7.render_image(_cfg(**_FX_QUIET), seed).image  # (256, 256) uint8
+        got = g7.render_image(_glare(), seed).image  # (256, 256) uint8
+        changed = got != base  # (256, 256) bool
+        assert (got[changed] == 240).all(), (seed, np.unique(got[changed]))
+        any_change |= changed.any()
+    assert any_change, "no glare visible"
+
+
+def test_glare_clears_pointer_tip(tmp_path, monkeypatch):
+    monkeypatch.setenv("V7_PLACES_DIR", str(_write_places(tmp_path / "white", "white")))
+    clear = 15.0  # float px, pinned clear distance
+    extra = {"glares.patch_size_range": [128, 128], "glares.count_range": [8, 8],
+             "glares.clear_distance": clear}
+    ys, xs = np.mgrid[:IMG, :IMG]  # (256, 256) int pixel grids
+    for seed in range(6):
+        base = g7.render_image(_cfg(**_FX_QUIET), seed)
+        got = g7.render_image(_glare(**extra), seed)
+        assert _same_labels(base, got)
+        changed = got.image != base.image  # (256, 256) bool
+        near = np.hypot(xs - got.tip_x, ys - got.tip_y) <= clear  # (256, 256) bool
+        assert not (changed & near).any(), seed
+        assert changed.sum() > 100, seed
+
+
+def test_glare_wins_over_reflection(tmp_path, monkeypatch):
+    monkeypatch.setenv("V7_PLACES_DIR", str(_write_places(tmp_path / "white", "white")))
+    big = {"reflections.patch_size_range": [128, 128], "reflections.count_range": [4, 4],
+           "glares.patch_size_range": [128, 128], "glares.count_range": [4, 4]}
+    glare_on = {"glares.prob": 1.0, "glares.value_range": [240, 240], "glares.edge_soft": 0.0}
+    both_seen = 0
+    for seed in _FX_SEEDS:
+        base = g7.render_image(_cfg(**_FX_QUIET, **big), seed).image  # (256, 256) uint8
+        r = g7.render_image(_refl(**big), seed).image  # reflections only
+        gl = g7.render_image(_glare(**big), seed).image  # glares only
+        both = g7.render_image(_refl(**big, **glare_on), seed).image  # both kinds
+        overlap = (r != base) & (gl != base)  # (256, 256) bool, covered by both
+        assert (both[overlap] == 240).all(), seed
+        both_seen += int(overlap.sum())
+    assert both_seen > 100, "no overlap forced"
+
+
+def test_effects_stay_inside_boundary(tmp_path, monkeypatch):
+    monkeypatch.setenv("V7_PLACES_DIR", str(_write_places(tmp_path / "white", "white")))
+    c = IMG / 2.0  # float px, boundary centre in the image
+    outside = _dist_grid(c, c) > _DISP_RB  # (256, 256) bool, outside B
+    fx = {"reflections.prob": 1.0, "reflections.patch_size_range": [128, 128],
+          "reflections.count_range": [8, 8], "glares.prob": 1.0,
+          "glares.patch_size_range": [128, 128], "glares.count_range": [8, 8],
+          "glares.value_range": [255, 255]}
+    for seed in range(4):
+        for d in (0.0, 10.0):
+            img = g7.render_image(_disp_cfg(d, _DISP_M, **fx), seed).image  # (256, 256) uint8
+            assert not img[outside].any(), (seed, d)
+            assert (img == 255).sum() > 100, (seed, d)
+
+
+def test_missing_places_dir_errors(tmp_path, monkeypatch):
+    empty = tmp_path / "empty_places"  # pathlib.Path, folder with no images
+    empty.mkdir()
+    monkeypatch.setenv("V7_PLACES_DIR", str(empty))
+    for cfg in (_refl(), _glare()):
+        with pytest.raises(RuntimeError) as ei:
+            g7.render_image(cfg, 0)
+        assert "download_places365.py" in str(ei.value)
+        assert "empty_places" in str(ei.value)
+
+
+def test_effects_deterministic():
+    cfg = _refl(**{"glares.prob": 1.0, "reflections.count_range": [2, 3]})
+    for seed in range(3):
+        a = g7.render_image(cfg, seed)
+        b = g7.render_image(cfg, seed)
+        assert np.array_equal(a.image, b.image) and _same_labels(a, b), seed

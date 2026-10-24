@@ -90,6 +90,23 @@ shadows:
   rim_cutout_frac: {type: float_range, min: 0.5, max: 1.0, step: 0.01, help: "Rim shadow cutout radius / dial radius."}
   rim_blur_range: {type: float_range, min: 0.5, max: 20.0, step: 0.1, help: "Rim shadow blur radius (px)."}
 
+reflections:
+  prob: {type: float, min: 0.0, max: 1.0, step: 0.05, help: "Probability an image gets reflections."}
+  count_range: {type: int_range, min: 0, max: 8, step: 1, help: "Reflections per image."}
+  patch_size_range: {type: int_range, min: 8, max: 128, step: 1, help: "Side of the Places365 patch that gives each reflection its shape (px)."}
+  threshold_pct_range: {type: float_range, min: 0, max: 100, step: 1, help: "Brightness percentile kept as the shape; higher = smaller, sparser blobs."}
+  darken_range: {type: int_range, min: 0, max: 255, step: 1, help: "Gray levels subtracted inside the shape (value, not multiplier)."}
+  edge_soft: {type: float, min: 0, max: 5, step: 0.1, help: "Gaussian softening of the shape edge (px)."}
+
+glares:
+  prob: {type: float, min: 0.0, max: 1.0, step: 0.05, help: "Probability an image gets glares."}
+  count_range: {type: int_range, min: 0, max: 8, step: 1, help: "Glares per image."}
+  patch_size_range: {type: int_range, min: 8, max: 128, step: 1, help: "Side of the Places365 patch that gives each glare its shape (px)."}
+  threshold_pct_range: {type: float_range, min: 0, max: 100, step: 1, help: "Brightness percentile kept as the shape; higher = smaller, sparser blobs."}
+  value_range: {type: int_range, min: 0, max: 255, step: 1, help: "Gray level the glare overwrites pixels with (value, not multiplier)."}
+  edge_soft: {type: float, min: 0, max: 5, step: 0.1, help: "Gaussian softening of the shape edge (px)."}
+  clear_distance: {type: float, min: 0, max: 80, step: 0.5, help: "No glare within this distance of the visible pointer tip (px)."}
+
 jitter:
   brightness_range: {type: float_range, min: 0.5, max: 2.0, step: 0.01, help: "ImageEnhance.Brightness factor (1 = unchanged)."}
   contrast_range: {type: float_range, min: 0.5, max: 1.5, step: 0.01, help: "ImageEnhance.Contrast factor (1 = unchanged)."}

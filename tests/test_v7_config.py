@@ -38,6 +38,11 @@ def test_named_keys_exist():
     assert cfg["tri_artifacts"]["enabled"] is True
     assert cfg["tri_artifacts"]["count_range"] == [0, 6]
     assert cfg["geometry"]["scale_range"] == [0.9, 1.1]
+    # reflections / glares ship off so default datasets need no Places365
+    assert cfg["reflections"]["prob"] == 0.0 and cfg["glares"]["prob"] == 0.0
+    assert cfg["reflections"]["darken_range"] == [10, 40]
+    assert cfg["glares"]["value_range"] == [220, 255]
+    assert cfg["glares"]["clear_distance"] == 12.0
 
 
 def test_every_range_default_inside_bounds():
@@ -146,11 +151,15 @@ FLOAT_RANGES = [  # keys the old code draws with random.uniform
     "pointer.gradient_range", "shadows.offset_range",
     "geometry.scale_range", "jitter.contrast_range",
     "shadows.strength_range",
+    "reflections.threshold_pct_range", "glares.threshold_pct_range",
 ]
 INT_RANGES = [  # keys the old code draws with random.randint
     "ticks.len_range", "ticks.per_digit_range", "cut_tip.radius_range",
     "tri_artifacts.count_range", "dataset.angle_deg_range",
     "digits.font_size_range",
+    "reflections.count_range", "reflections.patch_size_range",
+    "reflections.darken_range", "glares.count_range",
+    "glares.patch_size_range", "glares.value_range",
 ]
 
 
