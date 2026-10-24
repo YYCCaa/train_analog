@@ -8,6 +8,23 @@ const POLL_MS = 500;
 
 type Props = { config: Config | null }; // current UI config sent with Start
 
+/** Parse a typed whole number. text (str) as typed; label (str) names the field.
+ * -> {value: int} or {error: str}. Uses Number() + Number.isInteger, so "abc",
+ * "" and "2.5" are refused instead of becoming 0 or being truncated, and "1e3"
+ * reads as 1000 (not parseInt's 1). */
+function parseWhole(text: string, label: string): { value: number } | { error: string } {
+  const t = text.trim(); // typed text without surrounding blanks (str)
+  const n = Number(t); // numeric value (float | NaN); Number("") is 0, so "" is checked first
+  if (t === "" || !Number.isInteger(n)) {
+    return { error: `${label}: must be a whole number, got "${text}"` };
+  }
+  return { value: n };
+}
+
+/** Generate-to-disk panel component. Props: config (Config | null), the current
+ * UI config sent with Start. Holds the typed run settings (all strings until
+ * Start parses them), starts / cancels the single backend job, and polls its
+ * status every POLL_MS while it runs. Returns the panel as a JSX element. */
 export default function GeneratePanel({ config }: Props) {
   const [outputDir, setOutputDir] = useState(""); // absolute folder (str)
   const [numImages, setNumImages] = useState("1000"); // image count, as typed (str)
@@ -37,19 +54,27 @@ export default function GeneratePanel({ config }: Props) {
   const start = async () => {
     if (!config) return;
     setMessage([]);
-    const n = parseInt(numImages, 10); // requested image count (int | NaN)
-    // worker count (int | NaN), or null when blank = generator default
-    const w = workers.trim() === "" ? null : parseInt(workers, 10);
+    const n = parseWhole(numImages, "Images"); // requested image count, or its error
+    const s = parseWhole(seed, "Seed"); // base seed, or its error
+    // worker count, or null when blank (backend picks all cores but one)
+    const w = workers.trim() === "" ? null : parseWhole(workers, "Workers");
+    // input errors (list[str]); any one refuses Start before a request is sent
+    const bad = [n, s, w].flatMap((p) => (p !== null && "error" in p ? [p.error] : []));
+    if (bad.length || !("value" in n) || !("value" in s)) {
+      setMessage(bad);
+      return;
+    }
     try {
       await startGenerate({
         config,
         output_dir: outputDir.trim(),
-        num_images: Number.isNaN(n) ? 0 : n,
-        seed: parseInt(seed, 10) || 0,
-        workers: w === null || Number.isNaN(w) ? null : w,
+        num_images: n.value,
+        seed: s.value,
+        workers: w !== null && "value" in w ? w.value : null,
         overwrite,
       });
-      setJob({ state: "running", done: 0, total: n, output_dir: outputDir.trim(), error: null });
+      setJob({ state: "running", done: 0, total: n.value, output_dir: outputDir.trim(),
+        error: null });
     } catch (e) {
       setMessage(e instanceof ApiError ? e.errors : [String(e)]);
     }
@@ -75,17 +100,18 @@ export default function GeneratePanel({ config }: Props) {
         </label>
         <label>
           Images
-          <input data-testid="gen-num-images" type="number" min={1} value={numImages}
+          {/* text, not number: the browser would hide bad input as "" */}
+          <input data-testid="gen-num-images" type="text" inputMode="numeric" value={numImages}
             onChange={(e) => setNumImages(e.target.value)} />
         </label>
         <label>
           Seed
-          <input data-testid="gen-seed" type="number" value={seed}
+          <input data-testid="gen-seed" type="text" inputMode="numeric" value={seed}
             onChange={(e) => setSeed(e.target.value)} />
         </label>
         <label>
           Workers
-          <input data-testid="gen-workers" type="number" min={1} value={workers}
+          <input data-testid="gen-workers" type="text" inputMode="numeric" value={workers}
             placeholder="auto" onChange={(e) => setWorkers(e.target.value)} />
         </label>
         <label className="bool">

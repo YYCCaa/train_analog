@@ -18,6 +18,10 @@ function errorsOf(e: unknown): string[] {
   return e instanceof api.ApiError ? e.errors : [String(e)];
 }
 
+/** Studio root component (no props). Loads the schema + default config once,
+ * renders one ParamControl per schema leaf, re-renders the 9 preview tiles
+ * (debounced, newest response wins), handles YAML load/save and hosts the
+ * GeneratePanel. Returns the whole page as a JSX element. */
 export default function App() {
   const [schema, setSchema] = useState<Schema | null>(null); // section -> key -> Leaf
   const [config, setConfig] = useState<Config | null>(null); // current UI config

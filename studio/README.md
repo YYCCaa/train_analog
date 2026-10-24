@@ -18,8 +18,9 @@ python studio/run_studio.py --port 9000 --no-browser
 ```
 
 On the first run, or after any frontend source changed, the launcher builds the
-frontend first: `npm ci` (only if `studio/frontend/node_modules/` is missing),
-then `npm run build`. This needs Node 18+ and npm on `PATH`. After that it
+frontend first: `npm ci` when `studio/frontend/node_modules/` is missing or
+`package-lock.json` is newer than npm's install stamp
+(`node_modules/.package-lock.json`), then `npm run build`. This needs Node 18+ and npm on `PATH`. After that it
 serves the API and the built page (`studio/frontend/dist/`) from one uvicorn
 process.
 
@@ -28,12 +29,22 @@ process.
 Use two terminals and hot reload:
 
 ```
-python studio/run_studio.py --no-browser  # terminal 1: API on 127.0.0.1:8765
-cd studio/frontend && npm run dev         # terminal 2: Vite on http://localhost:5173/
+python studio/run_studio.py --no-browser --no-build  # terminal 1: API on 127.0.0.1:8765
+cd studio/frontend && npm run dev                    # terminal 2: Vite on http://localhost:5173/
 ```
+
+`--no-build` skips the launcher's `npm ci` / `npm run build` check, so source
+edits do not trigger a production build on every API restart. It still serves
+`dist/` at `/` when that folder exists, and only the API otherwise.
 
 Vite proxies `/api` to `http://127.0.0.1:8765` (`vite.config.ts`). Open the
 Vite URL. Edits to `src/` reload instantly.
+
+The API only answers loopback requests. A `Host` header other than
+`127.0.0.1` / `localhost` gets 400. A non-loopback `Origin` gets 403. A POST
+without `Content-Type: application/json` gets 415. These checks stop other
+websites open in the same browser from starting jobs. The Vite dev proxy
+passes all three checks as it is.
 
 ## How the pieces talk
 
@@ -76,8 +87,10 @@ is `S` under the same config, because both paths call `render_image`.
   Invalid values are listed in red with the `section.key` they belong to. The
   current settings stay unchanged.
 - **Generate dataset.** Fill in an absolute output folder, the image count,
-  the base seed, and the workers (blank = generator default). Then press
-  Start. A missing folder is created. A folder that already holds
+  the base seed, and the workers (blank = all cores but one, so the preview
+  stays responsive). Then press Start. Images, seed and workers must be whole
+  numbers. Anything else (`abc`, `2.5`, an empty Images or Seed box) is
+  listed in red and no job starts. A missing folder is created. A folder that already holds
   `dial_*.png` / `labels.csv` / `config.yaml` is refused unless *overwrite* is
   ticked. With overwrite, only those files are removed. Cancel stops the run
   and leaves a consistent folder: the `labels.csv` rows match the PNGs, and

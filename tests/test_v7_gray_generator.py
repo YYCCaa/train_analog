@@ -146,3 +146,26 @@ def test_worker_error_leaves_consistent_folder(tmp_path):
     assert pngs == {r["filename"] for r in read_labels(out)}
     run = read_run(out)["run"]
     assert run["completed"] is False and run["finished_at"] is not None
+
+
+def test_glob_metachars_in_output_dir(tmp_path):
+    """A '[1]' in --output-dir is a literal folder name, not a glob pattern:
+    'run[1]' must never match (and delete / count) files in the sibling 'run1'."""
+    decoy = tmp_path / "run1"  # sibling folder a pattern 'run[1]' would match (Path)
+    decoy.mkdir()
+    (decoy / "dial_0000.png").write_bytes(b"decoy")
+    (decoy / "labels.csv").write_text("decoy")
+    target = tmp_path / "run[1]"  # literal folder name with glob metachars (Path)
+
+    # fresh run[1] beside a populated run1: must not be refused as not-empty
+    r = run_cli("--output-dir", target, "--num-images", 3, "--workers", 1)
+    assert r.returncode == 0, r.stderr
+    # overwrite run: only run[1]'s own files may be removed
+    r = run_cli("--output-dir", target, "--num-images", 3, "--workers", 1, "--overwrite")
+    assert r.returncode == 0, r.stderr
+
+    assert (decoy / "dial_0000.png").read_bytes() == b"decoy"
+    assert (decoy / "labels.csv").read_text() == "decoy"
+    assert len(read_labels(target)) == 3
+    assert sorted(p.name for p in target.iterdir() if p.name.startswith("dial_")) == \
+        [f"dial_{i:04d}.png" for i in range(3)]

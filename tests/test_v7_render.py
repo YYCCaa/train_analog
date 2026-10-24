@@ -209,7 +209,8 @@ _GATES_ON = [("digits", "show_prob", 1.0), ("shadows", "prob", 1.0),
 
 
 def _extreme_cfg(which):
-    """Every leaf at its schema min ("min"), max ("max"), or min with all gates on ("min_gates_on")."""
+    """Every leaf at its schema min ("min"), max ("max"), min with all gates on
+    ("min_gates_on"), or max with the smallest canvas_margin ("max_tight_canvas")."""
     schema = v7_config.load_schema()
     cfg = v7_config.default_config()
     at_max = which == "max"
@@ -226,14 +227,22 @@ def _extreme_cfg(which):
     if which == "min_gates_on":
         for sec, key, value in _GATES_ON:
             cfg[sec][key] = value
+    if which == "max_tight_canvas":
+        # smallest canvas -> widest padding, so the max displacement moves the
+        # dial furthest toward the image edge: the worst case for the tip label
+        cfg = _extreme_cfg("max")
+        cfg["geometry"]["canvas_margin"] = schema["geometry"]["canvas_margin"]["min"]
     v7_config.validate_config(cfg, schema)
     return cfg
 
 
-@pytest.mark.parametrize("which", ["min", "max", "min_gates_on"])
+@pytest.mark.parametrize("which", ["min", "max", "min_gates_on", "max_tight_canvas"])
 def test_render_extremes_do_not_crash(which):
     cfg = _extreme_cfg(which)
     for seed in range(5):
         res = g7.render_image(cfg, seed)
         assert res.image.shape == (IMG, IMG)
         assert res.image.dtype == np.uint8
+        # the tip label must stay on the image even at the schema extremes
+        assert 0 <= res.tip_x <= IMG - 1, (seed, res.tip_x)
+        assert 0 <= res.tip_y <= IMG - 1, (seed, res.tip_y)

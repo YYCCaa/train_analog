@@ -61,7 +61,6 @@ import multiprocessing as mp
 import os
 import random
 import sys
-import threading
 import zlib
 from dataclasses import dataclass
 
@@ -200,7 +199,8 @@ def draw_scale_digits(td_value, td_alpha, cx, cy, dial_radius, tick_inner_radius
     try:
         font = ImageFont.truetype("arial.ttf", font_size)  # FreeTypeFont, digit glyphs
     except OSError:
-        font = ImageFont.load_default()
+        # no Arial: Pillow's bundled font, still at font_size px (Pillow >= 10.1)
+        font = ImageFont.load_default(size=font_size)
 
     ang_jitter = rng.uniform(*dcfg["angle_jitter_range"]) * rng.choice([-1, 1])  # float, deg
     grey = rng.randint(*dcfg["gray_range"])  # int gray level of all digits
@@ -489,19 +489,20 @@ def render_image(cfg, image_seed):
                                      rim_offset, rim_cutout, rim_opacity, rim_blur)
         img = _composite_gray(img, rim_shadow_gray, rim_alpha)
 
-        a = math.radians(angle_deg - 90)
+        a = math.radians(angle_deg - 90)  # pointer direction (float, rad; 0 = +x, CW in image)
         s_apex = (ptr_cx + tip_dist * math.cos(a), ptr_cy + tip_dist * math.sin(a))
         bmx, bmy = ptr_cx - chord_dist * math.cos(a), ptr_cy - chord_dist * math.sin(a)
+        # unit vector across the pointer (tuple of 2 float), along its base chord
         perp = (math.cos(a + math.pi / 2), math.sin(a + math.pi / 2))
         s_bl = (bmx + chord_half * perp[0], bmy + chord_half * perp[1])
         s_br = (bmx - chord_half * perp[0], bmy - chord_half * perp[1])
-        light_rad = math.radians(light_angle - 90)
+        light_rad = math.radians(light_angle - 90)  # shadow-cast direction (float, rad)
         s_value, s_alpha = _new_layer(canvas_size)  # shadow layer, "L" (C, C)
         draw_shadow(s_value, s_alpha, s_apex, s_bl, s_br, ptr_cx, ptr_cy,
                     hub_radius, dial_radius, shd_dist * math.cos(light_rad),
                     shd_dist * math.sin(light_rad), shd_opacity,
                     gap_start_deg, gap_span_deg, ptr_shadow_gray)
-        blur = ImageFilter.GaussianBlur(radius=S["blur_radius"])
+        blur = ImageFilter.GaussianBlur(radius=S["blur_radius"])  # shadow blur filter (PIL)
         img = _composite_gray(img, s_value.filter(blur), s_alpha.filter(blur))
 
     # --- 6 digits on the overlay ---
@@ -556,7 +557,9 @@ def render_image(cfg, image_seed):
     outer_scale = rngs["outer"][0].uniform(*O["scale_range"])  # float
     outer_rx, outer_ry = dial_rx * outer_scale, dial_ry * outer_scale  # float px
     arr = np.array(img)  # (C, C) uint8
+    # open pixel grids: ys (C, 1) int, xs (1, C) int; they broadcast to (C, C)
     ys, xs = np.ogrid[:canvas_size, :canvas_size]
+    # squared normalised radius vs the dial / outer ellipse, (C, C) float64; <= 1 inside
     inner_r2 = ((xs - cx) / max(dial_rx, 1)) ** 2 + ((ys - cy) / max(dial_ry, 1)) ** 2
     outer_r2 = ((xs - cx) / max(outer_rx, 1)) ** 2 + ((ys - cy) / max(outer_ry, 1)) ** 2
     inside_outer = outer_r2 <= 1  # (C, C) bool
@@ -654,12 +657,16 @@ def _seed_for_index(seed_base, idx):
 
 
 def _worker_init(output_dir, seed_base, cfg):
+    """Pool initializer: store output_dir (str), seed_base (int) and the
+    validated cfg (dict section -> key -> value) in this process's _WORKER."""
     _WORKER["output_dir"] = output_dir
     _WORKER["seed_base"] = seed_base
     _WORKER["cfg"] = cfg
 
 
 def _worker_task(idx):
+    """Render image idx (int), save it as dial_<idx:04d>.png in the output dir;
+    -> label row dict {filename: str, angle_deg: int, tip_x: float, tip_y: float}."""
     res = render_image(_WORKER["cfg"], _seed_for_index(_WORKER["seed_base"], idx))
     fname = f"dial_{idx:04d}.png"
     Image.fromarray(res.image).save(os.path.join(_WORKER["output_dir"], fname))
@@ -679,7 +686,8 @@ class OutputDirNotEmpty(RuntimeError):
 def _dataset_files(output_dir):
     """Files generate_dataset owns in output_dir -> list[str] of absolute paths
     (dial_*.png, labels.csv, config.yaml); other files are never touched."""
-    found = glob.glob(os.path.join(output_dir, "dial_*.png"))
+    # escape: a '[...]' in output_dir is a folder name, not a pattern
+    found = glob.glob(os.path.join(glob.escape(output_dir), "dial_*.png"))
     for name in ("labels.csv", "config.yaml"):
         path = os.path.join(output_dir, name)
         if os.path.exists(path):
@@ -770,7 +778,7 @@ def generate_dataset(cfg, output_dir, num_images, seed=0, workers=None, chunksiz
         if cancelled:
             # in-flight workers may have written later PNGs; keep only labelled ones
             keep = {r["filename"] for r in written}
-            for path in glob.glob(os.path.join(output_dir, "dial_*.png")):
+            for path in glob.glob(os.path.join(glob.escape(output_dir), "dial_*.png")):
                 if os.path.basename(path) not in keep:
                     os.remove(path)
         run["completed"] = not cancelled
@@ -780,6 +788,8 @@ def generate_dataset(cfg, output_dir, num_images, seed=0, workers=None, chunksiz
 
 
 def main():
+    """CLI entry: parse flags, load + validate the YAML config, run
+    generate_dataset. Exit codes: 0 ok, 1 output dir not empty, 2 bad config."""
     parser = argparse.ArgumentParser(
         description="Generate native-grayscale synthetic dial images "
                     "(YAML-configured, bit-exact across worker counts)")

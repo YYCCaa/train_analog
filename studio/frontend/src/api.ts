@@ -64,8 +64,9 @@ async function call<T>(method: "GET" | "POST", path: string, body?: unknown,
       r = await fetch(path, {
         method,
         signal: ctl.signal,
-        headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-        body: body === undefined ? undefined : JSON.stringify(body),
+        // every POST is JSON: the backend refuses other POSTs with 415 (cross-site guard)
+        headers: method === "POST" ? { "Content-Type": "application/json" } : undefined,
+        body: method === "POST" ? JSON.stringify(body ?? {}) : undefined,
       });
     } catch (e) {
       if (ctl.signal.aborted) {
@@ -109,13 +110,13 @@ export const dumpConfig = async (config: Config) =>
 export const preview = async (config: Config, seeds: number[]) =>
   (await call<{ tiles: Tile[] }>("POST", "/api/preview", { config, seeds })).tiles;
 
-/** Body of POST /api/generate; workers null = generator default. */
+/** Body of POST /api/generate; workers null = backend default (all cores but one). */
 export type GenerateRequest = {
   config: Config; // render config to generate with
   output_dir: string; // absolute path
-  num_images: number; // int >= 1
+  num_images: number; // int, 1..1_000_000
   seed: number; // int base seed
-  workers: number | null; // int or null
+  workers: number | null; // int 1..cpu count, or null = auto
   overwrite: boolean; // true -> replace existing dial_*.png / labels.csv / config.yaml
 };
 

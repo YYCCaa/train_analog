@@ -24,3 +24,4 @@ def test_look_matches_old_v7(tmp_path):
     assert abs(res["image_std"]["diff"]) <= 6
     assert abs(res["dial_face_mean"]["diff"]) <= 8
     assert abs(res["bezel_mean"]["diff"]) <= 8
+    assert abs(res["low_contrast_frac"]["diff"]) <= 0.05
