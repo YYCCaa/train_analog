@@ -167,6 +167,8 @@ FLOAT_RANGES = [  # keys the old code draws with random.uniform
     "shadows.strength_range",
     "reflections.rotation_range", "reflections.aspect_range", "reflections.shear_range",
     "glares.rotation_range", "glares.aspect_range", "glares.shear_range",
+    "reflections.perspective_range", "reflections.warp_strength_range",
+    "glares.perspective_range", "glares.warp_strength_range",
 ]
 INT_RANGES = [  # keys the old code draws with random.randint
     "ticks.len_range", "ticks.per_digit_range", "cut_tip.radius_range",
@@ -175,6 +177,7 @@ INT_RANGES = [  # keys the old code draws with random.randint
     "reflections.count_range", "reflections.size_range",
     "reflections.darken_range", "glares.count_range",
     "glares.size_range", "glares.value_range",
+    "reflections.warp_grid_range", "glares.warp_grid_range",
 ]
 
 
@@ -182,8 +185,8 @@ def test_glyph_shape_keys_and_defaults():
     # pinned defaults + schema bounds of the glyph-transform keys (brief table)
     cfg = vc.default_config()
     shared = {"rotation_range": [0.0, 360.0], "aspect_range": [0.25, 4.0],
-              "shear_range": [-1.0, 1.0], "perspective": 0.4, "warp_strength": 0.15,
-              "warp_grid": 4}  # key -> default value, same in both sections
+              "shear_range": [-1.0, 1.0], "perspective_range": [0.0, 0.4],
+              "warp_strength_range": [0.05, 0.2], "warp_grid_range": [3, 6]}  # key -> default value, same in both sections
     want = {  # section -> key -> default value
         "reflections": {"size_range": [24, 96], **shared},
         "glares": {"size_range": [16, 72], **shared},
@@ -191,12 +194,14 @@ def test_glyph_shape_keys_and_defaults():
     bounds = {  # key -> (type, min, max, step) in the schema
         "size_range": ("int_range", 8, 256, 1), "rotation_range": ("float_range", 0, 360, 1),
         "aspect_range": ("float_range", 0.1, 10, 0.05), "shear_range": ("float_range", -3, 3, 0.05),
-        "perspective": ("float", 0, 0.9, 0.01), "warp_strength": ("float", 0, 1.0, 0.01),
-        "warp_grid": ("int", 2, 12, 1),
+        "perspective_range": ("float_range", 0, 0.9, 0.01),
+        "warp_strength_range": ("float_range", 0, 1.0, 0.01),
+        "warp_grid_range": ("int_range", 2, 12, 1),
     }
     schema = vc.load_schema()
     for sec, keys in want.items():
-        for gone in ("threshold_pct_range", "patch_size_range", "warp_amplitude"):
+        for gone in ("threshold_pct_range", "patch_size_range", "warp_amplitude",
+                     "perspective", "warp_strength", "warp_grid"):
             assert gone not in cfg[sec] and gone not in schema[sec], (sec, gone)
         for key, val in keys.items():
             assert cfg[sec][key] == val, (sec, key)

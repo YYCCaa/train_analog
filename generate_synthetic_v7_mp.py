@@ -78,8 +78,11 @@ disc of B:
         │ resize: longest side = s ~ U(size_range)
         │ affine about the centre: rotate(θ) · shear(k) · aspect(√a, 1/√a)
         │ perspective: q = H q_a, H = I + [[0,0,0],[0,0,0],[px,py,0]] / s,
-        │              (px, py) ~ U(-P, P), clamped so the denominator stays > 0.05
-        │ elastic warp: g x g (dx, dy) grid ~ U(-A, A), A = warp_strength · s,
+        │              P ~ U(perspective_range), (px, py) ~ U(-P, P) (per item),
+        │              clamped so the denominator stays > 0.05
+        │ elastic warp: g x g (dx, dy) grid ~ U(-A, A), A = strength · s,
+        │              strength ~ U(warp_strength_range), g ~ randint(warp_grid_range)
+        │              (per item),
         │              bicubic-upsampled, cv2.remap bilinear
         │ threshold 0.5, Gaussian blur edge_soft, crop to m > 0.01 (side <= 4·s)
         v
@@ -654,11 +657,14 @@ def _glyph_shape(rng, nrng, sec):
     """Shape mask of one effect: a random glyph in a random font, randomly transformed.
 
     rng / nrng: the section's random.Random / np.random.Generator; sec:
-    reflections / glares config section (dict).  Fixed-count draws, in
-    order, from rng: 1 glyph index, 2 font index, 3 size s, 4 rotation,
-    5 aspect (log-uniform), 6 shear, 7 px, 8 py (each ~ U(-P, P)); then
-    from nrng: g*g dx, then g*g dy ~ U(-A, A), A = warp_strength * s (drawn
-    even when A = 0).  Returns (h', w') float32 in 0-1.
+    reflections / glares config section (dict).  Draws, in order, from rng:
+    1 glyph index, 2 font index, 3 size s, 4 rotation, 5 aspect (log-uniform),
+    6 shear, 7 P ~ U(perspective_range), 8 px ~ U(-P, P), 9 py ~ U(-P, P),
+    10 strength ~ U(warp_strength_range), 11 g ~ randint(warp_grid_range);
+    then from nrng always exactly 2*G*G values ~ U(-1, 1), G = warp_grid_range[1],
+    scaled by A = strength * s (drawn even when A = 0), so the draw count per
+    item is fixed for a given config.  The g x g grid takes the first 2*g*g
+    values (dx then dy).  Returns (h', w') float32 in 0-1.
     """
     fonts = glyph_fonts()  # tuple[str, ...]
     ch = GLYPHS[rng.randrange(len(GLYPHS))]  # str, the glyph
@@ -668,13 +674,14 @@ def _glyph_shape(rng, nrng, sec):
     lo, hi = sec["aspect_range"]
     aspect = math.exp(rng.uniform(math.log(lo), math.log(hi)))  # float, log-uniform stretch
     shear = rng.uniform(*sec["shear_range"])  # float shear factor
-    P = float(sec["perspective"])  # float, max keystone strength
+    P = rng.uniform(*sec["perspective_range"])  # float, this item's max keystone strength
     persp = (rng.uniform(-P, P), rng.uniform(-P, P))  # (px, py) float
-    g = int(sec["warp_grid"])  # int, warp control grid side
-    amp = float(sec["warp_strength"]) * size  # float px, warp amplitude A
-    dx = nrng.uniform(-amp, amp, g * g)  # (g*g,) float px
-    dy = nrng.uniform(-amp, amp, g * g)  # (g*g,) float px
-    warp = np.stack([dx.reshape(g, g), dy.reshape(g, g)]) if amp > 0 else None  # (2, g, g)
+    strength = rng.uniform(*sec["warp_strength_range"])  # float, warp amplitude / size
+    g = rng.randint(*sec["warp_grid_range"])  # int, this item's warp control grid side
+    gmax = int(sec["warp_grid_range"][1])  # int, G: the upper end, fixes the nrng draw count
+    amp = strength * size  # float px, warp amplitude A
+    noise = nrng.uniform(-1.0, 1.0, 2 * gmax * gmax)  # (2*G*G,) float64, always fully drawn
+    warp = (amp * noise[:2 * g * g].reshape(2, g, g)) if amp > 0 else None  # (2, g, g) float px
     return transform_shape(glyph_silhouette(ch, fi), size, rot, aspect, shear, warp,
                            float(sec["edge_soft"]), persp)
 
