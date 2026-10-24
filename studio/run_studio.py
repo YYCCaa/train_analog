@@ -1,7 +1,7 @@
 """Launch the v7 studio: build the React frontend if needed, then serve the
 FastAPI backend + built frontend on 127.0.0.1 with uvicorn.
 
-    python studio/run_studio.py [--port 8765] [--no-browser]
+    python studio/run_studio.py [--port 8765] [--no-browser] [--no-build]
 
 Works from any working directory: the repo root is made the cwd and
 sys.path[0], so `studio.backend.app` and the spawned preview workers import.
@@ -93,18 +93,25 @@ def main():
     ap = argparse.ArgumentParser(description="v7 dial studio (localhost only)")
     ap.add_argument("--port", type=int, default=8765, help="port on 127.0.0.1 (default 8765)")
     ap.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
-    args = ap.parse_args()  # parsed flags: port (int), no_browser (bool)
+    ap.add_argument("--no-build", action="store_true",
+                    help="skip the npm install/build check (API-only dev mode with "
+                         "`npm run dev`, or no Node available); serves dist/ if it exists")
+    args = ap.parse_args()  # parsed flags: port (int), no_browser (bool), no_build (bool)
 
     os.chdir(REPO_ROOT)
     if sys.path[0] != REPO_ROOT:
         sys.path.insert(0, REPO_ROOT)
-    if needs_build():
+    if not args.no_build and needs_build():
         build_frontend()
 
     import uvicorn
     from studio.backend.app import create_app
 
-    app = create_app(frontend_dist=DIST_DIR)  # FastAPI app serving /api + dist/ at /
+    # built page folder to mount at / (str|None); None -> API only (no dist/ yet)
+    dist = DIST_DIR if os.path.isdir(DIST_DIR) else None
+    if dist is None:
+        print(f"[run_studio] {DIST_DIR} missing: serving the API only", flush=True)
+    app = create_app(frontend_dist=dist)  # FastAPI app serving /api (+ dist/ at /)
     url = f"http://127.0.0.1:{args.port}/"  # studio page URL (str)
     print(f"[run_studio] serving {url}", flush=True)
     if not args.no_browser:

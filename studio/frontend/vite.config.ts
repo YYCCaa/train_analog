@@ -7,6 +7,9 @@ export default defineConfig({
   base: "/", // the backend mounts dist/ at /
   server: {
     port: 5173,
-    proxy: { "/api": "http://127.0.0.1:8765" }, // run_studio.py default port
+    // run_studio.py default port. The proxy keeps Host "localhost:5173" and the
+    // browser sends Origin http://localhost:5173: both pass the backend's
+    // loopback-only Host / Origin checks, so no changeOrigin is needed.
+    proxy: { "/api": "http://127.0.0.1:8765" },
   },
 });

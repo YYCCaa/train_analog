@@ -442,3 +442,27 @@ def test_generate_and_cancel(page, tmp_path):
     assert rows == len(list(out2.glob("dial_*.png")))
 
 
+def test_generate_refuses_non_integer_inputs(page, tmp_path):
+    """Typing garbage into Images / Seed shows an error and starts no job;
+    '2.5' is not truncated to 2, '' / 'abc' are not read as 0."""
+    out = tmp_path / "bad"  # output folder that must never be created (Path)
+    status = page.get_by_test_id("gen-status")  # status line (Locator)
+    page.get_by_test_id("gen-output-dir").fill(str(out))
+    # (input test id, typed text) pairs (tuple[str, str]) that must be refused
+    for field, text in (("gen-num-images", "abc"), ("gen-num-images", "2.5"),
+                        ("gen-num-images", ""), ("gen-seed", "abc"),
+                        ("gen-seed", "1.5")):
+        page.get_by_test_id("gen-num-images").fill("5")
+        page.get_by_test_id("gen-seed").fill("0")
+        page.get_by_test_id(field).fill(text)
+        page.get_by_test_id("gen-start").click()
+        label = "Images" if field == "gen-num-images" else "Seed"
+        status.get_by_text(f"{label}: must be a whole number").wait_for()
+        # no request reached the backend: no folder, job still in its old state
+        assert not out.exists(), (field, text)
+        with urllib.request.urlopen(BASE + "/api/jobs/current", timeout=10) as r:
+            state = json.loads(r.read())["state"]  # backend job state (str)
+        assert state != "running", (field, text)
+        assert status.locator(".state").inner_text() != "running"
+
+

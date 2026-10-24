@@ -3,6 +3,7 @@ import base64
 import copy
 import csv
 import io
+import json
 import os
 import time
 
@@ -15,10 +16,13 @@ import v7_config
 import generate_synthetic_v7_mp as gen
 from studio.backend.app import create_app
 
+# TestClient base URL (str): a loopback Host the app's TrustedHostMiddleware accepts
+BASE_URL = "http://127.0.0.1"
+
 
 @pytest.fixture(scope="module")
 def client():
-    with TestClient(create_app()) as c:
+    with TestClient(create_app(), base_url=BASE_URL) as c:
         yield c
 
 
@@ -95,7 +99,7 @@ def test_generate_conflict_and_cancel(client, tmp_path):
             "num_images": 300, "seed": 0, "workers": 2, "overwrite": False}
     assert client.post("/api/generate", json=body).status_code == 202
     assert client.post("/api/generate", json=body).status_code == 409
-    client.post("/api/jobs/current/cancel")
+    client.post("/api/jobs/current/cancel", json={})
     st = _wait_state(client, {"done", "error", "cancelled"})
     assert st["state"] == "cancelled"
     pngs = {f for f in os.listdir(out) if f.startswith("dial_")}
@@ -166,11 +170,95 @@ def test_preview_works_during_generation(client, tmp_path):
     assert client.post("/api/generate", json=_gen_body(out, 300)).status_code == 202
     r = client.post("/api/preview", json={"config": v7_config.default_config(), "seeds": [1]})
     assert r.status_code == 200
-    client.post("/api/jobs/current/cancel")
+    client.post("/api/jobs/current/cancel", json={})
     _wait_state(client, {"done", "error", "cancelled"})
 
 
 def test_cancel_when_idle():
-    with TestClient(create_app()) as c:
-        r = c.post("/api/jobs/current/cancel")
+    with TestClient(create_app(), base_url=BASE_URL) as c:
+        r = c.post("/api/jobs/current/cancel", json={})
         assert r.status_code == 200 and r.json()["state"] == "idle"
+
+
+# ── request guards (cross-site / DNS-rebinding) and body bounds ──────────
+
+def test_post_without_json_content_type_415(client, monkeypatch):
+    _no_job(monkeypatch, client)
+    # a no-cors "simple" POST from another site carries text/plain or no type;
+    # FastAPI would still parse this full, valid body without the guard
+    body = json.dumps(_gen_body("Z:/never/used", 2)).encode()  # bytes
+    r = client.post("/api/generate", content=body)
+    assert r.status_code == 415 and r.json()["errors"]
+    r = client.post("/api/jobs/current/cancel",
+                    content=b"{}", headers={"content-type": "text/plain"})
+    assert r.status_code == 415 and r.json()["errors"]
+
+
+def _no_job(monkeypatch, client):
+    """Make JobRunner.start fail the test, so a guard regression never writes files."""
+    def start(*a, **k):
+        """Stand-in for JobRunner.start that must never be reached."""
+        raise AssertionError("request reached JobRunner.start")
+    monkeypatch.setattr(client.app.state.jobs, "start", start)
+
+
+def test_foreign_origin_403(client, tmp_path, monkeypatch):
+    _no_job(monkeypatch, client)
+    r = client.post("/api/generate", json=_gen_body(str(tmp_path / "o"), 2),
+                    headers={"Origin": "http://evil.example"})
+    assert r.status_code == 403 and r.json()["errors"]
+    r = client.get("/api/schema", headers={"Origin": "http://evil.example"})
+    assert r.status_code == 403
+    # loopback origins (the page itself, the Vite dev server) are fine
+    for origin in ("http://127.0.0.1:8765", "http://localhost:5173"):
+        assert client.get("/api/schema", headers={"Origin": origin}).status_code == 200
+
+
+def test_foreign_host_400(client):
+    # DNS rebinding: evil.example resolving to 127.0.0.1 still sends Host: evil.example
+    r = client.get("/api/schema", headers={"Host": "evil.example"})
+    assert r.status_code == 400
+    assert client.get("/api/schema", headers={"Host": "localhost:8765"}).status_code == 200
+
+
+def test_generate_workers_and_num_images_bounds(client, tmp_path, monkeypatch):
+    _no_job(monkeypatch, client)
+    out = str(tmp_path / "bounds")
+    for w in (0, (os.cpu_count() or 1) + 1, 10 ** 9):
+        r = client.post("/api/generate", json=_gen_body(out, 2, workers=w))
+        assert r.status_code == 422, w
+        assert r.json()["errors"][0].startswith("workers:")
+    r = client.post("/api/generate", json=_gen_body(out, 1_000_001))
+    assert r.status_code == 422 and r.json()["errors"][0].startswith("num_images:")
+    assert not os.path.exists(out)
+
+
+def test_not_empty_message_points_at_checkbox(client, tmp_path):
+    out = tmp_path / "ne"
+    out.mkdir()
+    (out / "labels.csv").write_text("old")
+    r = client.post("/api/generate", json=_gen_body(str(out), 2))
+    assert r.status_code == 409
+    msg = r.json()["errors"][0]
+    assert "overwrite box" in msg and "--overwrite" not in msg
+
+
+def test_auto_workers_leave_one_core_free(tmp_path):
+    with TestClient(create_app(), base_url=BASE_URL) as c:
+        seen = {}  # args JobRunner.start received (dict[str, object])
+
+        def fake_start(cfg, output_dir, num_images, seed, workers, overwrite):
+            """Stand-in for JobRunner.start: record workers, start nothing."""
+            seen["workers"] = workers
+
+        c.app.state.jobs.start = fake_start
+        r = c.post("/api/generate", json=_gen_body(str(tmp_path / "w"), 2, workers=None))
+        assert r.status_code == 202
+        assert seen["workers"] == max(1, (os.cpu_count() or 1) - 1)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="drive-relative paths are a Windows thing")
+def test_driveless_windows_path_400(client, monkeypatch):
+    _no_job(monkeypatch, client)
+    r = client.post("/api/generate", json=_gen_body("\\foo\\bar", 2))
+    assert r.status_code == 400 and r.json()["errors"][0].startswith("output_dir:")
