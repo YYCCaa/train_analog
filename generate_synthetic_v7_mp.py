@@ -43,8 +43,8 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
   │ 13 black outside outer ring; erase overlay over pointer;         │
   │    composite overlay                                             │
   │ 14 Gaussian blur inside outer ring; black outside again          │
-  │ 15 edge-mean pad to img_size x img_size, always centred          │
-  │    (displacement moves steps 2-7 content inside the canvas)      │
+  │ 15 place canvas on a black img_size^2 at centred offset + d;     │
+  │    boundary B stays centred (everything inside B shifts by d)    │
   └──────────────────────────────────────────────────────────────────┘
            v
     RenderResult(image (256, 256) uint8, tip_x, tip_y, angle_deg)
@@ -409,32 +409,6 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
     return img, apex, base_left, base_right, mask
 
 
-# ── edge-mean padding ─────────────────────────────────────────────────
-
-def pad_to_target(img, target_size, pad_left, pad_top):
-    """Pad a gray "L" image to target_size^2 with edge-mean fill.
-
-    Same logic as ``infer_tflite.preprocess``: the fill is the mean of the
-    two edge columns (then rows), so the transition is smooth.
-    """
-    arr = np.array(img)  # (h, w) uint8
-    h, w = arr.shape
-    pad_right = target_size - w - pad_left
-    pad_bottom = target_size - h - pad_top
-    if pad_left > 0 or pad_right > 0:
-        fill = np.uint8(arr[:, [0, -1]].mean())
-        new = np.full((h, target_size), fill, dtype=np.uint8)
-        new[:, pad_left:pad_left + w] = arr
-        arr = new
-    cur_h, cur_w = arr.shape
-    if pad_top > 0 or pad_bottom > 0:
-        fill = np.uint8(arr[[0, -1], :].mean())
-        new = np.full((target_size, cur_w), fill, dtype=np.uint8)
-        new[pad_top:pad_top + cur_h, :] = arr
-        arr = new
-    return Image.fromarray(arr)
-
-
 # ── main render ────────────────────────────────────────────────────────
 
 def render_image(cfg, image_seed):
@@ -456,14 +430,12 @@ def render_image(cfg, image_seed):
     gap_span_deg = grng.uniform(*G["arc_gap_range"])  # float, deg
     scale = grng.uniform(*G["scale_range"])  # float
     dial_radius = int(img_size // 3 * scale)  # int, px
-    canvas_size = 2 * (dial_radius + G["canvas_margin"])  # int, even, px
-    cx = cy = canvas_size // 2  # canvas centre (int, px)
-    # content displacement: scale/ticks/digits/pointer move by (disp_x, disp_y)
-    # inside the circle canvas, which itself stays centred in the image
-    disp_mag = grng.uniform(*G["displacement_range"])  # float px, content shift length
-    disp_ang = grng.uniform(0, 2 * math.pi)  # float rad, content shift direction
-    disp_x = disp_mag * math.cos(disp_ang)  # float px, post-stretch content offset x
-    disp_y = disp_mag * math.sin(disp_ang)  # float px, post-stretch content offset y
+    # displacement: everything inside the circular boundary B shifts by
+    # (disp_x, disp_y) in the image; B itself stays centred, outside it is 0
+    disp_mag = grng.uniform(*G["displacement_range"])  # float px, shift length
+    disp_ang = grng.uniform(0, 2 * math.pi)  # float rad, shift direction
+    disp_x = int(round(disp_mag * math.cos(disp_ang)))  # int px, image shift x (lossless)
+    disp_y = int(round(disp_mag * math.sin(disp_ang)))  # int px, image shift y
     hub_radius = dial_radius * grng.uniform(*G["hub_ratio_range"])  # float, px
     chord_half = grng.uniform(*G["chord_ratio_range"]) * hub_radius  # float, px
     max_d = math.sqrt(max(hub_radius ** 2 - chord_half ** 2, 0))
@@ -476,12 +448,22 @@ def render_image(cfg, image_seed):
     hd_ang = grng.uniform(0, 2 * math.pi)
     stretch_h = grng.uniform(*G["stretch_h_range"])  # float
     stretch_v = grng.uniform(*G["stretch_v_range"])  # float
-    # content centre before stretch (float px); stretch about (cx, cy) maps it
-    # exactly onto (cx + disp_x, cy + disp_y)
-    ccx = cx + disp_x / stretch_h
-    ccy = cy + disp_y / stretch_v
-    ptr_cx = ccx + ptr_disp_mag * math.cos(ptr_disp_ang)  # float, pointer centre
-    ptr_cy = ccy + ptr_disp_mag * math.sin(ptr_disp_ang)
+    # outer boundary radius / dial radius (float): the first and only draw of
+    # the outer stream, drawn here so the canvas can be sized to cover B
+    outer_scale = rngs["outer"][0].uniform(*O["scale_range"])  # float
+    # largest possible |displacement| component (int px) for this config
+    dm = int(math.ceil(max(abs(v) for v in G["displacement_range"])))
+    # canvas half side (int px): dial + margin, or the stretched boundary B,
+    # plus dm so B is fully covered wherever it lands in the canvas
+    half = max(dial_radius + G["canvas_margin"],
+               int(math.ceil(dial_radius * outer_scale * max(stretch_h, stretch_v))) + 1) + dm
+    canvas_size = 2 * half  # int, even, px
+    cx = cy = canvas_size // 2  # canvas centre (int, px); all content drawn about it
+    # boundary B centre in canvas coords (int px): placing the canvas at the
+    # centred offset + d lands it on the image centre
+    bcx, bcy = cx - disp_x, cy - disp_y
+    ptr_cx = cx + ptr_disp_mag * math.cos(ptr_disp_ang)  # float, pointer centre
+    ptr_cy = cy + ptr_disp_mag * math.sin(ptr_disp_ang)
     hole_cx = ptr_cx + hd_mag * math.cos(hd_ang)  # float, hole centre
     hole_cy = ptr_cy + hd_mag * math.sin(hd_ang)
 
@@ -504,7 +486,7 @@ def render_image(cfg, image_seed):
     img = Image.fromarray(np.clip(bg_arr, 0, 255).astype(np.uint8))  # canvas, "L" (C, C)
 
     # --- 2 faint dial circle with arc gap ---
-    dial_box = [ccx - dial_radius, ccy - dial_radius, ccx + dial_radius, ccy + dial_radius]
+    dial_box = [cx - dial_radius, cy - dial_radius, cx + dial_radius, cy + dial_radius]
     _arc_or_circle(ImageDraw.Draw(img), dial_box, gap_start_deg, gap_span_deg, circle_gray, 1)
 
     # --- 3 ticks on a separate overlay (digits stream decides visibility) ---
@@ -514,7 +496,7 @@ def render_image(cfg, image_seed):
     td_value, td_alpha = _new_layer(canvas_size)  # overlay value/alpha, "L" (C, C)
     tick_inner_r = None
     if show_digits:
-        tick_inner_r = draw_ticks(td_value, td_alpha, ccx, ccy, dial_radius,
+        tick_inner_r = draw_ticks(td_value, td_alpha, cx, cy, dial_radius,
                                   cfg["ticks"], rngs["ticks"][0])
 
     # --- 4/5 shadows (shadows stream; all fixed-count draws up front) ---
@@ -552,7 +534,7 @@ def render_image(cfg, image_seed):
 
     # --- 6 digits on the overlay ---
     if show_digits:
-        draw_scale_digits(td_value, td_alpha, ccx, ccy, dial_radius, tick_inner_r,
+        draw_scale_digits(td_value, td_alpha, cx, cy, dial_radius, tick_inner_r,
                           D, drng, font_size)
 
     # --- 7 mounting hole + pointer (pointer stream) ---
@@ -600,15 +582,15 @@ def render_image(cfg, image_seed):
     img = ImageEnhance.Sharpness(img).enhance(jrng.uniform(*J["sharpness_range"]))
 
     # --- 10 outer annulus + rim band ---
-    outer_scale = rngs["outer"][0].uniform(*O["scale_range"])  # float
     outer_rx, outer_ry = dial_rx * outer_scale, dial_ry * outer_scale  # float px
     arr = np.array(img)  # (C, C) uint8
     # open pixel grids: ys (C, 1) int, xs (1, C) int; they broadcast to (C, C)
     ys, xs = np.ogrid[:canvas_size, :canvas_size]
-    # squared normalised radius vs the dial / outer ellipse, (C, C) float64; <= 1 inside
+    # squared normalised radius vs the dial ellipse (about (cx, cy)) / the
+    # boundary B (about (bcx, bcy)), (C, C) float64; <= 1 inside
     inner_r2 = ((xs - cx) / max(dial_rx, 1)) ** 2 + ((ys - cy) / max(dial_ry, 1)) ** 2
-    outer_r2 = ((xs - cx) / max(outer_rx, 1)) ** 2 + ((ys - cy) / max(outer_ry, 1)) ** 2
-    inside_outer = outer_r2 <= 1  # (C, C) bool
+    outer_r2 = ((xs - bcx) / max(outer_rx, 1)) ** 2 + ((ys - bcy) / max(outer_ry, 1)) ** 2
+    inside_outer = outer_r2 <= 1  # (C, C) bool, inside B
     arr[(inner_r2 > 1) & inside_outer] = outer_gray
     r_norm = np.sqrt(inner_r2)  # (C, C) float64, radius / dial ellipse radius
     rim_half = O["rim_width"] / min(max(dial_rx, 1), max(dial_ry, 1))
@@ -671,19 +653,28 @@ def render_image(cfg, image_seed):
         blurred = img.filter(ImageFilter.GaussianBlur(radius=B["dial_circle_blur_radius"]))
         outer_mask_img = Image.new("L", size2, 0)
         ImageDraw.Draw(outer_mask_img).ellipse(
-            [cx - outer_rx, cy - outer_ry, cx + outer_rx, cy + outer_ry], fill=255)
+            [bcx - outer_rx, bcy - outer_ry, bcx + outer_rx, bcy + outer_ry], fill=255)
         img = Image.composite(blurred, img, outer_mask_img)
     arr = np.array(img)
     arr[~inside_outer] = 0
     img = Image.fromarray(arr)
 
-    # --- 15 pad to img_size (edge-mean, always centred; content already displaced) ---
-    pad_left = max(0, min((img_size - canvas_size) // 2, img_size - canvas_size))
-    pad_top = max(0, min((img_size - canvas_size) // 2, img_size - canvas_size))
-    img = pad_to_target(img, img_size, pad_left, pad_top)
+    # --- 15 place the canvas at the centred offset + d onto a black image ---
+    off_x = (img_size - canvas_size) // 2 + disp_x  # int px, canvas x0 in the image (may be < 0)
+    off_y = (img_size - canvas_size) // 2 + disp_y  # int px, canvas y0 in the image
+    out = np.zeros((img_size, img_size), dtype=np.uint8)  # (S, S) uint8 output image
+    x0, y0 = max(off_x, 0), max(off_y, 0)  # int px, pasted region start (image)
+    x1 = min(off_x + canvas_size, img_size)  # int px, pasted region end x (excl.)
+    y1 = min(off_y + canvas_size, img_size)  # int px, pasted region end y (excl.)
+    out[y0:y1, x0:x1] = arr[y0 - off_y:y1 - off_y, x0 - off_x:x1 - off_x]
+    # safety net: zero everything outside B in image coords (B centre (int px)
+    # = (bcx + off_x, bcy + off_y), same pixel convention as the canvas)
+    iys, ixs = np.ogrid[:img_size, :img_size]  # (S, 1), (1, S) int grids
+    out[((ixs - (bcx + off_x)) / max(outer_rx, 1)) ** 2
+        + ((iys - (bcy + off_y)) / max(outer_ry, 1)) ** 2 > 1] = 0
 
-    return RenderResult(image=np.array(img, dtype=np.uint8),
-                        tip_x=apex[0] + pad_left, tip_y=apex[1] + pad_top,
+    return RenderResult(image=out,
+                        tip_x=apex[0] + off_x, tip_y=apex[1] + off_y,
                         angle_deg=angle_deg)
 
 

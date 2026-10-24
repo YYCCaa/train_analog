@@ -1,13 +1,12 @@
 # UI / validation metadata for every key in v7_default.yaml.
 # Leaf = {type, min, max, step, help, readonly?}. For *_range types, min/max
 # bound BOTH ends of the range. Bounds are physical limits that contain the
-# default and keep render_image crash-free at any slider extreme
-# (e.g. 2*(int(img_size//3 * scale_max) + canvas_margin_max) <= img_size:
-#  2*(int(85*1.15) + 30) = 254).
+# default and keep render_image crash-free at any slider extreme (the
+# canvas may exceed img_size; it is cropped to the image when placed).
 # They also keep the tip label on the image for ANY combination of extremes:
 # apex reach from the dial centre, after stretch, must fit the half image
-# minus the largest content displacement (content offset inside the
-# always-centred circle canvas), i.e.
+# minus the largest displacement (shift of everything inside the
+# always-centred circular boundary), i.e.
 #   ((int(85*scale_max) - 2) * (1 + tip_variation_max) + |ptr_displacement|max)
 #     * stretch_max <= 127 - |displacement|max
 #   ((97 - 2) * 1.05 + 6) * 1.1 = 116.3 <= 127 - 10 = 117
@@ -26,11 +25,11 @@ geometry:
   hole_ratio_range: {type: float_range, min: 0.5, max: 1.5, step: 0.01, help: "Mounting hole radius / hub radius."}
   hole_disp_range: {type: float_range, min: -20.0, max: 20.0, step: 0.5, help: "Mounting hole offset from pointer centre (px)."}
   tip_variation: {type: float, min: 0.0, max: 0.05, step: 0.005, help: "Fractional jitter of pointer tip distance."}
-  displacement_range: {type: float_range, min: -10.0, max: 10.0, step: 0.5, help: "Dial content (scale, ticks, digits, pointer) offset from the circle-canvas centre (px); the circle canvas itself stays centred in the image."}
+  displacement_range: {type: float_range, min: -10.0, max: 10.0, step: 0.5, help: "Shift of everything inside the circular boundary (px); the boundary itself stays centred and its outside is black."}
   ptr_displacement_range: {type: float_range, min: -6.0, max: 6.0, step: 0.5, help: "Pointer + hole offset from dial centre (px)."}
   stretch_h_range: {type: float_range, min: 0.8, max: 1.1, step: 0.01, help: "Horizontal stretch factor inside the dial."}
   stretch_v_range: {type: float_range, min: 0.8, max: 1.1, step: 0.01, help: "Vertical stretch factor inside the dial."}
-  canvas_margin: {type: int, min: 10, max: 30, step: 1, help: "Px beyond the dial radius in the tight canvas."}
+  canvas_margin: {type: int, min: 10, max: 30, step: 1, help: "Minimum px beyond the dial radius in the canvas."}
   arc_gap_range: {type: float_range, min: 0.0, max: 350.0, step: 1, help: "Arc gap width on the dial circle and its shadow (degrees)."}
 
 outer:
