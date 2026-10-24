@@ -282,11 +282,13 @@ def test_pick_pointer_gray():
 # sha256 hex (str) of default-config renders with digits hidden (so the
 # digit-jitter change cannot touch them), seeds 0-2, recorded BEFORE any code
 # change for min_bg_contrast; re-pinned when displacement moved from the
-# canvas pad to the content inside the centred circle canvas (expected change)
+# canvas pad to the content inside the centred circle canvas, and again when
+# displacement became a shift of everything inside a fixed circular boundary
+# (canvas grows by 2 * max|displacement|; expected change)
 _PRE_CONTRAST_HASHES = {
-    0: "6111b5736b6b650b43030ec99891fa7fa28f2b0e0014871acba6dc140f4ab9a6",
-    1: "051f2f4a7cd261b7b213fe7f2c027a0946841ee6b25e51237e4fcd89d91f2e4e",
-    2: "cd90825be489a07332ec987358d5a09caa3d3b933095e39250ba8cd5ed5c931d",
+    0: "e0c38ede1599cf8d16dcaef4347406454bd2163df2c4866ffa86c1d96a1f6ad6",
+    1: "a8223fad801dc72b92bf99fdd84a912dc18a72b33f9658b325ac4b5c4a17048b",
+    2: "6da293f03654acd47597967cfd86bd8683143d6add586da6678e09cf2e401717",
 }
 
 
@@ -367,55 +369,74 @@ def test_digit_jitter_direction():
                                   g7.render_image(b, seed).image), (other, seed)
 
 
-# ── displacement moves the content inside a centred circle canvas ───────
+
+# ── displacement translates everything inside a fixed circular boundary ─
 
 # "section.key" -> value pins (dict): fixed dial size (radius 85, outer
-# 110.5), no stretch, and every frame-overlapping extra (shadows, triangles,
-# digits, blur) off, so the outer annulus is a pure frame feature; exposure
-# jitter off so the pointer footprint stays local
-_DISP_PINS = {"geometry.scale_range": [1.0, 1.0], "outer.scale_range": [1.3, 1.3],
+# boundary radius 85 * 1.2 = 102), no stretch, shadows always on (they must
+# translate too).  outer 1.2 keeps ceil(102) + 1 = 103 below radius + margin,
+# so the canvas half is radius + margin + max|displacement|.
+_DISP_PINS = {"geometry.scale_range": [1.0, 1.0], "outer.scale_range": [1.2, 1.2],
               "geometry.stretch_h_range": [1.0, 1.0], "geometry.stretch_v_range": [1.0, 1.0],
-              "shadows.prob": 0.0, "tri_artifacts.enabled": False,
-              "digits.show_prob": 0.0, "background.dial_circle_blur": False,
-              "jitter.contrast_range": [1.0, 1.0], "jitter.brightness_range": [1.0, 1.0],
-              "jitter.sharpness_range": [1.0, 1.0]}
+              "shadows.prob": 1.0}
+_DISP_RB = 85 * 1.2  # float px, outer boundary radius under _DISP_PINS
+_DISP_M = 20  # int px, canvas_margin of the displaced config
 
 
-def _disp_cfg(d):
-    """_DISP_PINS cfg with displacement_range pinned to [d, d] (d: float px)."""
-    return _cfg(**_DISP_PINS, **{"geometry.displacement_range": [d, d]})
+def _disp_cfg(d, margin, **extra):
+    """_DISP_PINS cfg with displacement_range [d, d] (float px) and
+    canvas_margin (int px); extra "section.key" overrides on top."""
+    return _cfg(**_DISP_PINS, **{"geometry.displacement_range": [d, d],
+                                 "geometry.canvas_margin": margin}, **extra)
 
 
-def _centroid(mask):
-    """(x, y) float centroid of a (H, W) bool mask."""
-    ys, xs = np.nonzero(mask)
-    return float(xs.mean()), float(ys.mean())
+def _dist_grid(cx, cy):
+    """Distance of every pixel from (cx, cy) (float px), (256, 256) float64."""
+    ys, xs = np.mgrid[:IMG, :IMG]
+    return np.hypot(xs - cx, ys - cy)
 
 
-def test_circle_canvas_centred_regardless_of_displacement():
+def _check_translation(extra, erode):
+    """A (d = 0, margin M+10) and B (|d| = 10, margin M) share one canvas
+    size, so B must equal A shifted by the integer tip difference at every
+    pixel deeper than `erode` px (float) inside BOTH boundaries (A coords).
+    extra: dict of "section.key" overrides for both configs."""
+    for seed in range(5):
+        a = g7.render_image(_disp_cfg(0.0, _DISP_M + 10, **extra), seed)
+        b = g7.render_image(_disp_cfg(10.0, _DISP_M, **extra), seed)
+        fdx, fdy = b.tip_x - a.tip_x, b.tip_y - a.tip_y  # float px, tip shift
+        dx, dy = int(round(fdx)), int(round(fdy))  # int px, displacement
+        assert abs(fdx - dx) < 1e-6 and abs(fdy - dy) < 1e-6, (seed, fdx, fdy)
+        assert abs(math.hypot(dx, dy) - 10.0) <= 1.0, (seed, dx, dy)
+        c = IMG / 2.0  # float px, boundary centre in the image
+        # (256, 256) bool: A pixels deep inside A's boundary that also lie
+        # inside B's boundary once shifted (B's boundary sits at c - d in A)
+        region = ((_dist_grid(c, c) <= _DISP_RB - erode)
+                  & (_dist_grid(c - dx, c - dy) <= _DISP_RB - erode))
+        ys, xs = np.nonzero(region)  # (N,) int each, A pixel coords
+        assert len(ys) > 0.5 * math.pi * _DISP_RB ** 2, seed
+        assert np.array_equal(b.image[ys + dy, xs + dx], a.image[ys, xs]), \
+            f"seed {seed}: content inside the boundary is not a pure translation"
+
+
+def test_inside_boundary_is_pure_translation():
+    _check_translation({"background.dial_circle_blur": False}, 2.0)
+
+
+def test_inside_boundary_translation_with_blur():
+    # blur radius 3 mixes the black outside the boundary into its edge
+    _check_translation({"background.dial_circle_blur": True}, 14.0)
+
+
+def test_boundary_fixed_and_black_outside():
+    c = IMG / 2.0  # float px, boundary centre in the image
+    outside = _dist_grid(c, c) > _DISP_RB  # (256, 256) bool, outside B
     for seed in range(4):
-        a = g7.render_image(_disp_cfg(0.0), seed)
-        b = g7.render_image(_disp_cfg(10.0), seed)
-        # circle canvas = every non-black pixel (outside the outer ring is 0
-        # and the edge-mean pad of a black edge is 0 too), (256, 256) bool
-        ca, cb = _centroid(a.image > 0), _centroid(b.image > 0)  # (x, y) float
-        assert abs(ca[0] - cb[0]) < 0.5 and abs(ca[1] - cb[1]) < 0.5, (seed, ca, cb)
-        assert abs(cb[0] - IMG / 2) < 1.5 and abs(cb[1] - IMG / 2) < 1.5, (seed, cb)
-        # the tip moved by the full (stretch-free) displacement length
-        d = math.hypot(b.tip_x - a.tip_x, b.tip_y - a.tip_y)  # float px
-        assert abs(d - 10.0) < 0.5, (seed, d)
-
-
-def test_displacement_moves_content_not_frame():
-    r = _radius_grid()  # (256, 256) float64
-    frame = (r > 95) & (r < 106)  # (256, 256) bool, outer-annulus band (frame only)
-    for seed in range(4):
-        cfg_a, cfg_b = _disp_cfg(0.0), _disp_cfg(10.0)
-        a, b = g7.render_image(cfg_a, seed), g7.render_image(cfg_b, seed)
-        assert np.array_equal(a.image[frame], b.image[frame]), f"seed {seed}: frame moved"
-        pa = _centroid(_pointer_footprint(cfg_a, seed))  # (x, y) float, pointer centroid
-        pb = _centroid(_pointer_footprint(cfg_b, seed))
-        dx, dy = b.tip_x - a.tip_x, b.tip_y - a.tip_y  # float px, displacement vector
-        assert math.hypot(dx, dy) > 9.5, (seed, dx, dy)
-        assert abs((pb[0] - pa[0]) - dx) < 0.75 and abs((pb[1] - pa[1]) - dy) < 0.75, \
-            (seed, pa, pb, dx, dy)
+        for d in (0.0, 10.0):
+            img = g7.render_image(_disp_cfg(d, _DISP_M), seed).image  # (256, 256) uint8
+            assert not img[outside].any(), (seed, d)
+            ys, xs = np.nonzero(img)  # (N,) int each, nonzero pixel coords
+            bx = (xs.min() + xs.max()) / 2.0  # float px, bbox centre x
+            by = (ys.min() + ys.max()) / 2.0  # float px, bbox centre y
+            assert abs(bx - c) <= 1.0 and abs(by - c) <= 1.0, (seed, d, bx, by)
+            assert abs(xs.mean() - c) <= 1.0 and abs(ys.mean() - c) <= 1.0, (seed, d)

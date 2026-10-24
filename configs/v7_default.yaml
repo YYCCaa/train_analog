@@ -29,11 +29,11 @@ geometry:
   hole_ratio_range: [1.05, 1.08]  # [lo, hi] float; mounting hole radius / hub radius
   hole_disp_range: [-8.0, 8.0]  # [lo, hi] float; mounting hole offset from pointer centre (px)
   tip_variation: 0.02  # float scalar; fractional jitter of tip distance
-  displacement_range: [-3.0, 3.0]  # [lo, hi] float; dial content (scale, ticks, digits, pointer) offset from the circle-canvas centre (px); the circle canvas itself stays centred in the image
+  displacement_range: [-3.0, 3.0]  # [lo, hi] float; shift of everything inside the circular boundary (px); the boundary itself stays centred and its outside is black
   ptr_displacement_range: [-5.0, 5.0]  # [lo, hi] float; pointer+hole offset from dial centre (px)
   stretch_h_range: [0.98, 1.02]  # [lo, hi] float; horizontal stretch inside dial
   stretch_v_range: [0.98, 1.02]  # [lo, hi] float; vertical stretch inside dial
-  canvas_margin: 30  # int scalar; px beyond dial radius in the tight canvas
+  canvas_margin: 30  # int scalar; min px beyond dial radius in the canvas
   arc_gap_range: [50.0, 120.0]  # [lo, hi] float; arc gap width on dial circle / shadow (deg)
 
 outer:
