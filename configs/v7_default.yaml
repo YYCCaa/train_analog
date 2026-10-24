@@ -80,7 +80,7 @@ background:
   dial_circle_blur_radius: 3  # int scalar; that blur radius (px)
 
 cut_tip:
-  enabled: true  # bool; erase pointer pixels near the apex; tip label moves to the visible (cut) tip
+  enabled: true  # bool; erase pointer pixels near the apex; tip label = visible end of the pointer on its axis, after the edge ring and the cut
   radius_range: [7, 10]  # [lo, hi] int; erased radius (px)
 
 shadows:

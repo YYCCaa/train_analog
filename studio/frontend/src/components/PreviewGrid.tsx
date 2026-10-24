@@ -66,7 +66,10 @@ export default function PreviewGrid({ tiles, imgSize, overlay, sentSeq, appliedS
           <div className="frame">
             <img src={`data:image/png;base64,${t.png_b64}`} alt={`seed ${t.seed}`} draggable={false} />
             {overlay && (
-              // position in displayed px: tip / imgSize as a % of the shown image width
+              // position in displayed px: (tip + 0.5) / imgSize as a % of the shown
+              // image width.  Labels use the pixel-centre convention (pixel i's
+              // centre is at i) while on screen pixel i spans [i, i + 1), so the
+              // centre of pixel i sits at (i + 0.5) / imgSize of the width.
               <svg
                 data-testid="tip-marker"
                 className="marker"
@@ -74,8 +77,8 @@ export default function PreviewGrid({ tiles, imgSize, overlay, sentSeq, appliedS
                 height={MARKER}
                 viewBox="0 0 18 18"
                 style={{
-                  left: `calc(${(t.tip_x / imgSize) * 100}% - ${MARKER / 2}px)`,
-                  top: `calc(${(t.tip_y / imgSize) * 100}% - ${MARKER / 2}px)`,
+                  left: `calc(${((t.tip_x + 0.5) / imgSize) * 100}% - ${MARKER / 2}px)`,
+                  top: `calc(${((t.tip_y + 0.5) / imgSize) * 100}% - ${MARKER / 2}px)`,
                 }}
               >
                 <circle cx="9" cy="9" r="6" fill="none" stroke="#ff3b6b" strokeWidth="2" />
