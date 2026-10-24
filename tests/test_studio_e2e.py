@@ -708,6 +708,31 @@ def test_shadow_strength_darkens_preview(page):
         assert f < n - 2.0, (n, f)
 
 
+# real Places365 folder (Path) the studio server reads glare/reflection shapes from
+_PLACES = Path(os.path.expanduser(os.environ.get("V7_PLACES_DIR", "~/places365")))
+
+
+def test_glares_and_reflections_change_preview(page):
+    # the shapes come from real photos; without the dataset there is nothing to show
+    if not _PLACES.is_dir() or next(_PLACES.rglob("*.jpg"), None) is None:
+        pytest.skip(f"no Places365 photos in {_PLACES}; run `python download_places365.py`")
+    # a person makes the glares pure white first (value [255, 255]), then turns them on
+    # (typing a value the box already shows sends no new preview, so only
+    # the ends that differ are typed; hi first, so lo <= hi at every step)
+    for handle in ("hi", "lo"):
+        box = _num(page, "glares.value_range", handle)  # number input (Locator)
+        if box.input_value() != "255":
+            _commit_and_wait(page, box, "255")
+    assert _num(page, "glares.value_range", "lo").input_value() == "255"
+    plain = _tile_srcs(page)  # tile srcs with both effects off, list[str] (9)
+    _commit_and_wait(page, _num(page, "glares.prob"), "1")
+    glared = _tile_srcs(page)  # tile srcs with glares on, list[str] (9)
+    assert all(a != b for a, b in zip(plain, glared)), "a tile shows no glare"
+    _commit_and_wait(page, _num(page, "reflections.prob"), "1")
+    both = _tile_srcs(page)  # tile srcs with glares + reflections, list[str] (9)
+    assert all(a != b for a, b in zip(glared, both)), "a tile shows no reflection"
+
+
 def test_preview_count_keeps_seeds_after_reshuffle_and_typing(page):
     old = _applied_seq(page)
     page.get_by_test_id("reshuffle").click()

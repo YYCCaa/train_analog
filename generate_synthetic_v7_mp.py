@@ -44,6 +44,9 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
   │ 13 black outside outer ring; erase overlay over pointer;         │
   │    composite overlay; apply shadow out = round(in * (1 - d))     │
   │    (d zeroed outside the dial face, on the rim, pointer, hole)   │
+  │ 13c cover glass, inside B: reflections out = in - sum(dk * m_k), │
+  │    then glares out = lerp(out, V, m) one by one (glare wins);    │
+  │    glare m zeroed within clear_distance of the visible tip       │
   │ 14 Gaussian blur inside outer ring; black outside again          │
   │ 15 place canvas on a black img_size^2 at centred offset + d;     │
   │    boundary B stays centred (everything inside B shifts by d)    │
@@ -62,6 +65,20 @@ out = in * (1 - d).  One shared strength s per image, jittered separately
 for the pointer (s_p) and rim (s_r) shadows; overlapping shadows of the
 one light do not compound (max, not product).  Ticks, digits, noise and
 triangles under a shadow are darkened by the same factor.
+
+Reflections and glares sit on the cover glass.  Each item cuts a random
+square patch (side ~ patch_size_range) from a random Places365 photo
+(PLACES_DIR / $V7_PLACES_DIR, sorted list cached per folder), randomly
+flipped / rotated, keeps the pixels at or above a random brightness
+percentile as its shape m (0-1, edge softened by edge_soft), and lands at a
+centre uniform in the disc of B:
+
+    photo ──crop s x s──> patch ──lum >= p-th pct──> m ──blur──> placed m
+    reflection: out = in - darken * m     (values, overlaps add)
+    glare:      out = in*(1-m) + V*m      (after all reflections; not near tip)
+
+The folder is only read when an image gets at least one item, so prob 0
+(the default) needs no dataset.
 """
 
 import argparse
@@ -93,7 +110,16 @@ SHADOW_ARC_LEVEL = 128  # mask level (int, of 255) of the dial-circle shadow arc
 # values, plus "angle" for the pointer angle (canvas/dataset draw nothing).
 SECTIONS = ("angle", "geometry", "outer", "ticks", "digits", "palette",
             "pointer", "background", "cut_tip", "shadows", "jitter",
-            "hier_noise", "tri_artifacts")
+            "hier_noise", "tri_artifacts", "reflections", "glares")
+
+# Places365 photo folder (str, may hold "~") that reflection / glare shapes are
+# cut from; scanned recursively.  V7_PLACES_DIR overrides it, read again at
+# every lookup (see places_dir) so tests and spawned workers can repoint it.
+PLACES_DIR = os.environ.get("V7_PLACES_DIR", "~/places365")
+_PLACES_EXTS = (".jpg", ".jpeg", ".png")  # photo file suffixes (tuple[str], lower case)
+# sorted photo paths per resolved folder: dict[str, list[str]]; only
+# non-empty scans are cached, so a dataset downloaded later is picked up
+_PLACES_CACHE = {}
 
 
 def section_rngs(image_seed):
@@ -448,6 +474,129 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
 
 # ── main render ────────────────────────────────────────────────────────
 
+# ── reflections + glares (cover glass, shapes from Places365 patches) ────
+
+def places_dir():
+    """Resolved Places365 folder (str): V7_PLACES_DIR if set, else PLACES_DIR."""
+    return os.path.abspath(os.path.expanduser(os.environ.get("V7_PLACES_DIR", PLACES_DIR)))
+
+
+def places_files(folder=None):
+    """Sorted list[str] of every *.jpg / *.jpeg / *.png under folder (recursive).
+
+    folder: str or None (-> places_dir()).  Cached per resolved folder.
+    Raises RuntimeError naming the folder when it holds no photos.
+    """
+    folder = places_dir() if folder is None else os.path.abspath(os.path.expanduser(folder))
+    files = _PLACES_CACHE.get(folder)  # list[str] or None
+    if files is None:
+        files = sorted(os.path.join(root, f) for root, _, names in os.walk(folder)
+                       for f in names if f.lower().endswith(_PLACES_EXTS))
+        if files:
+            _PLACES_CACHE[folder] = files
+    if not files:
+        raise RuntimeError(
+            f"reflections/glares need Places365 photos, but none (*.jpg, *.jpeg, "
+            f"*.png) were found in {folder}. Run `python download_places365.py` "
+            f"(or point V7_PLACES_DIR at a folder of photos).")
+    return files
+
+
+def _patch_shape(rng, sec, files):
+    """Shape mask of one effect from a random Places365 patch.
+
+    rng: the section's random.Random; sec: reflections / glares config
+    section (dict); files: sorted photo paths (list[str]).  Draws, in order:
+    file index, patch side, x0, y0, flip, rot90 count, percentile.  Keeps the
+    patch pixels at or above the p-th brightness percentile, then softens the
+    edge with a Gaussian blur of radius edge_soft (the patch is zero-padded by
+    3 * edge_soft first so the softened edge is not cut off).
+    Returns (S', S') float32 in 0-1, S' = s + 2 * pad.
+    """
+    path = files[rng.randrange(len(files))]  # str, chosen photo
+    with Image.open(path) as photo:
+        gray = photo.convert("L")  # "L" photo, (h, w)
+    s = rng.randint(*sec["patch_size_range"])  # int px, patch side
+    s = max(1, min(s, gray.width, gray.height))
+    x0 = rng.randint(0, gray.width - s)  # int px, patch left
+    y0 = rng.randint(0, gray.height - s)  # int px, patch top
+    patch = np.asarray(gray.crop((x0, y0, x0 + s, y0 + s)), dtype=np.float32)  # (s, s)
+    if rng.random() < 0.5:
+        patch = patch[:, ::-1]
+    patch = np.rot90(patch, rng.randint(0, 3))
+    thr = np.percentile(patch, rng.uniform(*sec["threshold_pct_range"]))  # float gray
+    m = (patch >= thr).astype(np.float32)  # (s, s) float32, 1 = shape
+    soft = float(sec["edge_soft"])  # float px, blur radius
+    if soft > 0:
+        pad = int(math.ceil(3 * soft))  # int px of zero border around the patch
+        m_img = Image.fromarray(np.pad(m * 255, pad).astype(np.uint8))  # "L" (s+2p, s+2p)
+        m = np.asarray(m_img.filter(ImageFilter.GaussianBlur(radius=soft)),
+                       dtype=np.float32) / 255.0
+    return np.clip(m, 0, 1)
+
+
+def _place_shape(rng, m, canvas_size, bcx, bcy, b_radius, inside_outer):
+    """Paste shape m at a random centre uniform in the disc of boundary B.
+
+    m: (h, w) float32 mask; bcx, bcy: B centre (int px, canvas);
+    b_radius: float px; inside_outer: (C, C) bool, inside B.  Draws radius
+    then angle (polar, sqrt for uniform area).  Returns a (C, C) float32
+    canvas mask, cropped at the canvas edges and zero outside B.
+    """
+    rr = b_radius * math.sqrt(rng.random())  # float px, centre distance from B centre
+    th = rng.uniform(0, 2 * math.pi)  # float rad, centre direction
+    h, w = m.shape
+    x0 = int(round(bcx + rr * math.cos(th) - w / 2.0))  # int px, paste left (canvas)
+    y0 = int(round(bcy + rr * math.sin(th) - h / 2.0))  # int px, paste top
+    out = np.zeros((canvas_size, canvas_size), dtype=np.float32)  # (C, C) float32
+    cx0, cy0 = max(x0, 0), max(y0, 0)  # int px, clipped paste start
+    cx1, cy1 = min(x0 + w, canvas_size), min(y0 + h, canvas_size)  # int px, clipped end (excl.)
+    if cx1 > cx0 and cy1 > cy0:
+        out[cy0:cy1, cx0:cx1] = m[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0]
+    out[~inside_outer] = 0
+    return out
+
+
+def _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy, b_radius, tip, xs, ys):
+    """Step 13c: reflections (out = in - sum darken*m), then glares
+    (out = lerp(out, V, m), glare zeroed within clear_distance of the tip).
+
+    img: canvas "L" (C, C); rngs: section_rngs dict; tip: visible tip (x, y)
+    float px in canvas coords; xs (1, C) / ys (C, 1) int pixel grids.
+    The photo folder is only read when an image actually gets an effect.
+    Returns the canvas as an "L" image (C, C).
+    """
+    canvas_size = img.size[0]  # int px, C
+    plan = []  # list of (name, section dict, random.Random, item count int)
+    for name in ("reflections", "glares"):
+        sec, rng = cfg[name], rngs[name][0]
+        active = rng.random() < sec["prob"]  # bool, fixed-count draw 1
+        n = rng.randint(*sec["count_range"])  # int, fixed-count draw 2
+        plan.append((name, sec, rng, n if active else 0))
+    if not any(n for *_, n in plan):
+        return img
+    files = places_files()  # list[str], sorted photo paths
+    work = np.asarray(img, dtype=np.float32)  # (C, C) float32 working canvas
+    (_, R, rrng, n_r), (_, Gl, grng, n_g) = plan
+    dark = np.zeros_like(work)  # (C, C) float32, summed reflection darkening
+    for _ in range(n_r):
+        m = _patch_shape(rrng, R, files)
+        delta = rrng.randint(*R["darken_range"])  # int gray levels subtracted
+        dark += delta * _place_shape(rrng, m, canvas_size, bcx, bcy, b_radius, inside_outer)
+    work = np.clip(work - dark, 0, 255)
+    if n_g:
+        clear = float(Gl["clear_distance"])  # float px
+        # (C, C) bool, pixels a glare may never cover (around the visible tip)
+        near_tip = (xs - tip[0]) ** 2 + (ys - tip[1]) ** 2 <= clear ** 2
+        for _ in range(n_g):
+            m = _patch_shape(grng, Gl, files)
+            v = grng.randint(*Gl["value_range"])  # int gray level of the glare
+            mc = _place_shape(grng, m, canvas_size, bcx, bcy, b_radius, inside_outer)
+            mc[near_tip] = 0
+            work = work * (1 - mc) + v * mc
+    return Image.fromarray(np.clip(np.rint(work), 0, 255).astype(np.uint8))
+
+
 def render_image(cfg, image_seed):
     """Render one dial from cfg and an image seed. Pure: no I/O, no global RNG.
 
@@ -703,6 +852,10 @@ def render_image(cfg, image_seed):
         d = np.where(face, shade, np.float32(0))  # (C, C) float32 darkening
         lit = np.asarray(img, dtype=np.float32)  # (C, C) float32 unshadowed canvas
         img = Image.fromarray(np.clip(np.rint(lit * (1 - d)), 0, 255).astype(np.uint8))
+
+    # --- 13c cover-glass reflections, then glares (glare wins), inside B ---
+    img = _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy,
+                         min(outer_rx, outer_ry), apex, xs, ys)
 
     # --- 14 Gaussian blur inside the outer ring ---
     if B["dial_circle_blur"]:
