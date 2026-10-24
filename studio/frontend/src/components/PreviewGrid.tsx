@@ -1,5 +1,8 @@
-// Preview grid (ceil(sqrt(count)) columns); optional client-side tip marker overlay on each tile.
-import type { Tile } from "../api";
+// Preview grid (ceil(sqrt(count)) columns); optional client-side tip marker overlay on each
+// tile; a per-tile Save button downloads v7_seed<seed>.zip (PNG + params.json + config.yaml).
+import { useState } from "react";
+import * as api from "../api";
+import type { Config, Tile } from "../api";
 
 type Props = {
   tiles: Tile[]; // latest applied preview tiles (9)
@@ -9,12 +12,45 @@ type Props = {
   appliedSeq: number; // request number whose response is shown (int)
   busy: boolean; // debounce pending or latest request in flight
   count: number; // preview tile count, int in [1,16]; sets the column count
+  // config the shown tiles were rendered from (section -> key -> Value), null before the
+  // first preview; Save bundles with this snapshot, not the current slider state
+  appliedConfig: Config | null;
+  onSaveErrors: (errs: string[]) => void; // report Save errors (list[str]; [] = success)
 };
 
 /** Marker side in CSS px (int); the marker is centred on the tip. */
 const MARKER = 18;
 
-export default function PreviewGrid({ tiles, imgSize, overlay, sentSeq, appliedSeq, busy, count }: Props) {
+/** Preview grid component: the tiles, optional tip markers, and a Save button per tile.
+ * Returns the grid as a JSX element. */
+export default function PreviewGrid({ tiles, imgSize, overlay, sentSeq, appliedSeq, busy, count,
+  appliedConfig, onSaveErrors }: Props) {
+  // seeds (list[int]) whose bundle request is in flight; their Save buttons are disabled
+  const [saving, setSaving] = useState<number[]>([]);
+
+  // fetch the bundle of seed (int) for appliedConfig and download it via a temporary <a>;
+  // (seed: number) => Promise<void>
+  const save = async (seed: number) => {
+    if (!appliedConfig) return;
+    setSaving((s) => [...s, seed]);
+    try {
+      const blob = await api.bundle(appliedConfig, seed); // zip (Blob)
+      const url = URL.createObjectURL(blob); // object URL (str) of the zip
+      const a = document.createElement("a"); // temporary download link (HTMLAnchorElement)
+      a.href = url;
+      a.download = `v7_seed${seed}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      onSaveErrors([]);
+    } catch (e) {
+      onSaveErrors(e instanceof api.ApiError ? e.errors : [String(e)]);
+    } finally {
+      setSaving((s) => s.filter((x) => x !== seed));
+    }
+  };
+
   return (
     <div
       className={"grid" + (busy ? " busy" : "")}
@@ -48,7 +84,14 @@ export default function PreviewGrid({ tiles, imgSize, overlay, sentSeq, appliedS
             )}
           </div>
           <figcaption>
-            seed {t.seed} · {t.angle_deg.toFixed(0)}°
+            <span>seed {t.seed} · {t.angle_deg.toFixed(0)}°</span>
+            <button type="button" className="tile-save" data-testid="tile-save"
+              aria-label={`Save image and parameters for seed ${t.seed}`}
+              title="Download PNG + params.json + config.yaml"
+              disabled={!appliedConfig || saving.includes(t.seed)}
+              onClick={() => save(t.seed)}>
+              ⤓ Save
+            </button>
           </figcaption>
         </figure>
       ))}

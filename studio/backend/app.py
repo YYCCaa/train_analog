@@ -1,13 +1,19 @@
-"""FastAPI backend for the v7 studio: schema/config endpoints, preview pool, job."""
+"""FastAPI backend for the v7 studio: schema/config endpoints, preview pool,
+per-tile bundle download, job."""
+import base64
+import datetime
+import io
+import json
 import os
 import re
+import zipfile
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -41,6 +47,12 @@ class PreviewBody(BaseModel):
     """cfg plus 1..16 preview image seeds (list[int])."""
     config: dict
     seeds: list[int]
+
+
+class BundleBody(BaseModel):
+    """cfg plus the one image seed (int) to bundle as PNG + params + config."""
+    config: dict
+    seed: int
 
 
 class GenerateBody(BaseModel):
@@ -143,21 +155,14 @@ def create_app(frontend_dist=None, allowed_hosts=None):
         except v7_config.ConfigError as e:
             return _errors(e.errors)
 
-    @app.post("/api/preview")
-    def preview(body: PreviewBody):
-        """cfg + seeds -> {"tiles": [{seed, png_b64, tip_x, tip_y, angle_deg}, ...]}
-        in seed order; a dead pool is replaced and the render retried once."""
-        if not 1 <= len(body.seeds) <= 16:
-            return _errors(["seeds: need 1..16 seeds"])
-        try:
-            v7_config.validate_config(body.config)
-        except v7_config.ConfigError as e:
-            return _errors(e.errors)
+    def _render_tiles(cfg, seeds):
+        """Render seeds (list[int]) of a validated cfg on the preview pool ->
+        list[dict] tiles (render_tile shape) in seed order, or a 500 JSONResponse;
+        a dead pool is replaced and the render retried once."""
         for attempt in (0, 1):
             try:
-                futs = [app.state.pool.submit(render_tile, body.config, s)
-                        for s in body.seeds]
-                return {"tiles": [f.result() for f in futs]}
+                futs = [app.state.pool.submit(render_tile, cfg, s) for s in seeds]
+                return [f.result() for f in futs]
             except BrokenProcessPool:
                 # a worker died: replace the pool and retry once
                 try:
@@ -169,6 +174,53 @@ def create_app(frontend_dist=None, allowed_hosts=None):
                     return _errors(["preview render failed: BrokenProcessPool"], 500)
             except Exception as e:
                 return _errors([f"preview render failed: {type(e).__name__}: {e}"], 500)
+
+    @app.post("/api/preview")
+    def preview(body: PreviewBody):
+        """cfg + seeds -> {"tiles": [{seed, png_b64, tip_x, tip_y, angle_deg, params}, ...]}
+        in seed order; a dead pool is replaced and the render retried once."""
+        if not 1 <= len(body.seeds) <= 16:
+            return _errors(["seeds: need 1..16 seeds"])
+        try:
+            v7_config.validate_config(body.config)
+        except v7_config.ConfigError as e:
+            return _errors(e.errors)
+        tiles = _render_tiles(body.config, body.seeds)  # list[dict] | JSONResponse
+        return tiles if isinstance(tiles, JSONResponse) else {"tiles": tiles}
+
+    @app.post("/api/bundle")
+    def bundle(body: BundleBody):
+        """cfg + seed -> application/zip download v7_seed<seed>.zip holding
+        v7_seed<seed>.png (the preview tile's exact PNG bytes), params.json
+        (seed, label, sampled params, full config) and config.yaml (loadable
+        by the studio). Invalid cfg -> 422, render failure -> 500."""
+        try:
+            v7_config.validate_config(body.config)
+        except v7_config.ConfigError as e:
+            return _errors(e.errors)
+        tiles = _render_tiles(body.config, [body.seed])  # list[dict] | JSONResponse
+        if isinstance(tiles, JSONResponse):
+            return tiles
+        tile = tiles[0]  # dict, the one rendered tile
+        name = f"v7_seed{body.seed}"  # str, file stem of the zip and the PNG
+        params = {  # params.json content (dict), JSON-plain
+            "generator": "generate_synthetic_v7_mp",
+            "seed": body.seed,
+            "angle_deg": tile["angle_deg"],
+            "tip_x": tile["tip_x"],
+            "tip_y": tile["tip_y"],
+            "img_size": int(body.config["canvas"]["img_size"]),
+            "created": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "sampled": tile["params"],
+            "config": body.config,
+        }
+        buf = io.BytesIO()  # in-memory zip archive
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(f"{name}.png", base64.b64decode(tile["png_b64"]))
+            zf.writestr("params.json", json.dumps(params, indent=2))
+            zf.writestr("config.yaml", v7_config.dump_config(body.config))
+        return Response(buf.getvalue(), media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{name}.zip"'})
 
     @app.post("/api/generate", status_code=202)
     def generate(body: GenerateBody):

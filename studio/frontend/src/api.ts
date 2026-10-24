@@ -26,6 +26,8 @@ export type Tile = {
   tip_x: number; // tip x in image px (float)
   tip_y: number; // tip y in image px (float)
   angle_deg: number; // pointer angle in degrees (float)
+  // the sampled per-image values, grouped by section: section name (str) -> key -> JSON value
+  params: Record<string, unknown>;
 };
 
 /** State of the single generation job. */
@@ -109,6 +111,54 @@ export const dumpConfig = async (config: Config) =>
 /** Render config for seeds (1..16 ints) -> Promise<Tile[]> (same order as seeds). */
 export const preview = async (config: Config, seeds: number[]) =>
   (await call<{ tiles: Tile[] }>("POST", "/api/preview", { config, seeds })).tiles;
+
+/** Bundle one image: POST /api/bundle {config, seed int} -> Promise<Blob> of the zip
+ * (v7_seed<seed>.png + params.json + config.yaml). Same timeout / error style as `call`:
+ * non-2xx -> ApiError with the server's {"errors": [str]}, network failure or timeout ->
+ * ApiError status 0. */
+export async function bundle(config: Config, seed: number,
+  timeoutMs: number = TIMEOUT_MS): Promise<Blob> {
+  const path = "/api/bundle"; // endpoint (str)
+  const ctl = new AbortController(); // aborts the fetch on timeout
+  const timer = setTimeout(() => ctl.abort(), timeoutMs); // timeout handle (number)
+  try {
+    let r: Response; // HTTP response
+    try {
+      r = await fetch(path, {
+        method: "POST",
+        signal: ctl.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config, seed }),
+      });
+    } catch (e) {
+      if (ctl.signal.aborted) {
+        throw new ApiError(0, [`${path}: request timed out after ${timeoutMs / 1000} s`]);
+      }
+      throw new ApiError(0, [`${path}: network error: ${String(e)}`]);
+    }
+    if (!r.ok) {
+      let data: any = null; // parsed JSON error body, or null when it is not JSON
+      try {
+        data = await r.json();
+      } catch {
+        data = null;
+      }
+      // error messages (list[str]) from the body, or a generic HTTP status line
+      const errs = Array.isArray(data?.errors) ? data.errors.map(String) : [`HTTP ${r.status}`];
+      throw new ApiError(r.status, errs);
+    }
+    try {
+      return await r.blob();
+    } catch (e) {
+      if (ctl.signal.aborted) {
+        throw new ApiError(0, [`${path}: request timed out after ${timeoutMs / 1000} s`]);
+      }
+      throw new ApiError(0, [`${path}: network error: ${String(e)}`]);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** Body of POST /api/generate; workers null = backend default (all cores but one). */
 export type GenerateRequest = {
