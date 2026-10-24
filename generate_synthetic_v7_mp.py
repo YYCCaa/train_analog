@@ -44,7 +44,7 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
   │ 13 black outside outer ring; erase overlay over pointer;         │
   │    composite overlay; apply shadow out = round(in * (1 - d))     │
   │    (d zeroed outside the dial face, on the rim, pointer, hole)   │
-  │ 13c cover glass, inside B: m_k = transformed bank silhouettes;   │
+  │ 13c cover glass, inside B: m_k = transformed font glyphs;        │
   │    reflections out = in - sum(dk * m_k),                         │
   │    then glares out = lerp(out, V, m) one by one (glare wins);    │
   │    glare m zeroed within clear_distance of the visible tip       │
@@ -68,24 +68,24 @@ one light do not compound (max, not product).  Ticks, digits, noise and
 triangles under a shadow are darkened by the same factor.
 
 Reflections and glares sit on the cover glass.  Each item takes a random
-SAM object silhouette from the shape bank (SHAPE_BANK / $V7_SHAPE_BANK, an
-.npz baked offline by tools/build_shape_bank.py; packed arrays cached per
-file), gives it a continuous random transform, softens its edge by
+ASCII glyph (GLYPHS = A-Z a-z 0-9) in a random available font (GLYPH_FONTS,
+rendered in memory and cached per (font, char); no data files), gives it a
+continuous random transform with extreme ranges, softens its edge by
 edge_soft into the shape m (0-1), and lands it at a centre uniform in the
 disc of B:
 
-    bank row k ──unpack──> sil (h, w) bool, longest side 128
-        │ resize (INTER_AREA): longest side = s ~ U(size_range)
+    char c, font f ──render 320 px, crop, area-downscale──> sil (h, w) bool, longest 128
+        │ resize: longest side = s ~ U(size_range)
         │ affine about the centre: rotate(θ) · shear(k) · aspect(√a, 1/√a)
-        │ elastic warp: 4x4 (dx, dy) grid ~ U(-A, A), bicubic-upsampled
-        │ threshold 0.5, Gaussian blur edge_soft, crop to m > 0.01
+        │ perspective: q = H q_a, H = I + [[0,0,0],[0,0,0],[px,py,0]] / s,
+        │              (px, py) ~ U(-P, P), clamped so the denominator stays > 0.05
+        │ elastic warp: g x g (dx, dy) grid ~ U(-A, A), A = warp_strength · s,
+        │              bicubic-upsampled, cv2.remap bilinear
+        │ threshold 0.5, Gaussian blur edge_soft, crop to m > 0.01 (side <= 4·s)
         v
     m (h', w') float32 0-1 ──> placed m (C, C), zero outside B
     reflection: out = in - darken * m     (values, overlaps add)
     glare:      out = in*(1-m) + V*m      (after all reflections; not near tip)
-
-The bank is only opened when an image gets at least one item, so prob 0
-(the default) needs no bank.
 """
 
 import argparse
@@ -96,6 +96,7 @@ import math
 import multiprocessing as mp
 import os
 import random
+import string
 import sys
 import zlib
 from dataclasses import dataclass
@@ -118,20 +119,6 @@ SHADOW_ARC_LEVEL = 128  # mask level (int, of 255) of the dial-circle shadow arc
 SECTIONS = ("angle", "geometry", "outer", "ticks", "digits", "palette",
             "pointer", "background", "cut_tip", "shadows", "jitter",
             "hier_noise", "tri_artifacts", "reflections", "glares")
-
-# Shape-bank file (str, may hold "~"): .npz of SAM object silhouettes that
-# reflection / glare shapes come from (format: masks (N, 2048) uint8 packed
-# 128x128 frames, hw (N, 2) uint16, src (N,) int32, meta 0-d json str).
-# V7_SHAPE_BANK overrides it, read again at every lookup (see
-# shape_bank_path) so tests and spawned workers can repoint it.
-SHAPE_BANK = os.environ.get("V7_SHAPE_BANK", "~/places365_shapes.npz")
-_BANK_FRAME = 128  # int px, side of one packed bank frame
-# loaded banks per resolved path: dict[str, tuple[stamp, dict]], stamp =
-# (mtime_ns, size) so a re-baked file is picked up; only valid banks are cached
-_BANK_CACHE = {}
-# shape-bank keys -> (dtype, ndim) the generator requires (dict[str, tuple])
-_BANK_KEYS = {"masks": (np.uint8, 2), "hw": (np.uint16, 2), "src": (np.int32, 1)}
-
 
 def section_rngs(image_seed):
     """Per-section RNG streams for one image.
@@ -485,103 +472,113 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
 
 # ── main render ────────────────────────────────────────────────────────
 
-# ── reflections + glares (cover glass, shapes from the SAM silhouette bank) ─
+# ── reflections + glares (cover glass, shapes from ASCII font glyphs) ─────
 
-_BANK_HINT = ("Run `python tools/build_shape_bank.py` to bake it "
-              "(or point V7_SHAPE_BANK at a bank file).")  # str, appended to bank errors
-_SIL_SMOOTH = 1.0  # float px (at the 128-px bank scale), pre-blur that rounds the NEAREST stair steps
+GLYPHS = string.ascii_letters + string.digits  # str (62 chars), the glyphs shapes are drawn from
+# TrueType font names (tuple[str, ...]) tried with ImageFont.truetype, in this
+# order; the ones that fail to load are skipped (see glyph_fonts)
+GLYPH_FONTS = ("arial.ttf", "arialbd.ttf", "times.ttf", "timesbd.ttf", "cour.ttf",
+               "courbd.ttf", "georgia.ttf", "verdana.ttf", "impact.ttf", "comic.ttf",
+               "segoeui.ttf", "consola.ttf")
+_GLYPH_DEFAULT = "<default>"  # str, font name standing for ImageFont.load_default (no TrueType found)
+_GLYPH_RENDER_PX = 320  # int px font size glyphs are drawn at (then area-downscaled)
+_GLYPH_SIDE = 128  # int px, longest side of every cached glyph silhouette
+_SIL_SMOOTH = 1.0  # float px (at the 128-px glyph scale), pre-blur that rounds the stair steps
+_GLYPH_FONT_NAMES = None  # tuple[str, ...] loadable font names, resolved once (None = not yet)
+_GLYPH_FONT_OBJ = {}  # dict[str, ImageFont], loaded fonts by name
+_GLYPH_CACHE = {}  # dict[tuple[int, str], (h, w) bool], silhouettes by (font index, char)
+_PERSP_MIN_DEN = 0.05  # float, smallest projective denominator allowed over the source box
+_PERSP_CLAMP_DEN = 0.1  # float, denominator a too-strong keystone is clamped to
+_MAX_SIDE_FACTOR = 4  # int, output mask side is at most this times the glyph size s
 
 
-def shape_bank_path():
-    """Resolved shape-bank file (str): V7_SHAPE_BANK if set, else SHAPE_BANK."""
-    return os.path.abspath(os.path.expanduser(os.environ.get("V7_SHAPE_BANK", SHAPE_BANK)))
+def _load_glyph_font(name):
+    """ImageFont for font name (str) at _GLYPH_RENDER_PX (raises OSError if missing)."""
+    if name == _GLYPH_DEFAULT:
+        return ImageFont.load_default(size=_GLYPH_RENDER_PX)
+    return ImageFont.truetype(name, _GLYPH_RENDER_PX)
 
 
-def _load_bank(path):
-    """Read + validate the bank at path -> dict(masks (N, 2048) uint8, hw (N, 2) uint16).
+def glyph_fonts():
+    """Loadable glyph font names (tuple[str, ...]), in GLYPH_FONTS order.
 
-    Raises RuntimeError naming path (and the bake script) on any problem.
+    Resolved once per process and cached; ("<default>",) when no TrueType
+    font of GLYPH_FONTS loads (then PIL's built-in default font is used).
     """
-    def bad(why):
-        return RuntimeError(f"reflections/glares need the shape bank {path}, but {why}. "
-                            + _BANK_HINT)
-    try:
-        with np.load(path, allow_pickle=False) as z:
-            missing = [k for k in (*_BANK_KEYS, "meta") if k not in z.files]  # list[str]
-            if missing:
-                raise bad(f"it lacks the key(s) {missing}")
-            arrs = {k: z[k] for k in (*_BANK_KEYS, "meta")}  # dict[str, np.ndarray]
-    except RuntimeError:
-        raise
-    except Exception as e:  # unreadable / not an npz
-        raise bad(f"it could not be read ({type(e).__name__}: {e})") from e
-    for key, (dtype, ndim) in _BANK_KEYS.items():
-        a = arrs[key]
-        if a.dtype != dtype or a.ndim != ndim:
-            raise bad(f"'{key}' is {a.dtype} with {a.ndim} dims, expected {np.dtype(dtype)} "
-                      f"with {ndim}")
-    masks, hw, src = arrs["masks"], arrs["hw"], arrs["src"]
-    n = len(masks)  # int, number of silhouettes
-    if n == 0 or masks.shape[1] != _BANK_FRAME * _BANK_FRAME // 8:
-        raise bad(f"'masks' has shape {masks.shape}, expected (N >= 1, "
-                  f"{_BANK_FRAME * _BANK_FRAME // 8})")
-    if hw.shape != (n, 2) or src.shape != (n,):
-        raise bad(f"'hw' {hw.shape} / 'src' {src.shape} do not match {n} masks")
-    if hw.min() < 1 or hw.max() > _BANK_FRAME or (hw.max(axis=1) != _BANK_FRAME).any():
-        raise bad(f"'hw' values must be 1..{_BANK_FRAME} with max(h, w) == {_BANK_FRAME}")
-    meta = arrs["meta"]
-    if meta.ndim != 0 or meta.dtype.kind not in "US":
-        raise bad("'meta' is not a 0-d json string")
-    return {"masks": masks, "hw": hw}
+    global _GLYPH_FONT_NAMES
+    if _GLYPH_FONT_NAMES is None:
+        names = []  # list[str], fonts that loaded
+        for name in GLYPH_FONTS:
+            try:
+                _GLYPH_FONT_OBJ[name] = _load_glyph_font(name)
+            except OSError:
+                continue
+            names.append(name)
+        if not names:
+            _GLYPH_FONT_OBJ[_GLYPH_DEFAULT] = _load_glyph_font(_GLYPH_DEFAULT)
+            names = [_GLYPH_DEFAULT]
+        _GLYPH_FONT_NAMES = tuple(names)
+    return _GLYPH_FONT_NAMES
 
 
-def shape_bank():
-    """The loaded shape bank (dict: masks (N, 2048) uint8, hw (N, 2) uint16).
+def glyph_silhouette(char, font_index=0):
+    """Silhouette of one glyph -> (h, w) bool, tight bbox, longest side 128.
 
-    Cached per resolved path and file stamp (mtime_ns, size), so a re-baked
-    bank is picked up.  Raises RuntimeError (naming the path and
-    tools/build_shape_bank.py) when the file is missing or invalid.
+    char: str, one char of GLYPHS; font_index: int into glyph_fonts().
+    Drawn white on black at _GLYPH_RENDER_PX with a margin (ascenders and
+    descenders are never clipped), cropped to its tight bbox, area-
+    downscaled to longest side 128 and re-thresholded at 0.5.  Cached per
+    (font_index, char).
     """
-    path = shape_bank_path()
-    try:
-        st = os.stat(path)
-    except OSError:
-        raise RuntimeError(f"reflections/glares need the shape bank {path}, but it does "
-                           f"not exist. " + _BANK_HINT) from None
-    stamp = (st.st_mtime_ns, st.st_size)  # tuple[int, int]
-    hit = _BANK_CACHE.get(path)  # (stamp, bank dict) or None
-    if hit is not None and hit[0] == stamp:
-        return hit[1]
-    bank = _load_bank(path)
-    _BANK_CACHE[path] = (stamp, bank)
-    return bank
+    import cv2
+    key = (font_index, char)  # tuple[int, str] cache key
+    hit = _GLYPH_CACHE.get(key)
+    if hit is not None:
+        return hit
+    font = _GLYPH_FONT_OBJ[glyph_fonts()[font_index]]  # ImageFont
+    x0, y0, x1, y1 = font.getbbox(char)  # int px ink box relative to the draw origin
+    pad = _GLYPH_RENDER_PX // 4  # int px margin on every side
+    im = Image.new("L", (x1 - x0 + 2 * pad, y1 - y0 + 2 * pad), 0)  # "L" render canvas
+    ImageDraw.Draw(im).text((pad - x0, pad - y0), char, fill=255, font=font)
+    a = np.asarray(im) >= 128  # (H, W) bool, ink
+    ys, xs = np.nonzero(a)
+    a = a[ys.min():ys.max() + 1, xs.min():xs.max() + 1]  # (h0, w0) bool, tight bbox
+    f = _GLYPH_SIDE / float(max(a.shape))  # float, scale to longest side 128
+    w, h = max(1, int(round(a.shape[1] * f))), max(1, int(round(a.shape[0] * f)))  # int px
+    interp = cv2.INTER_AREA if f < 1 else cv2.INTER_LINEAR  # int cv2 flag
+    sil = cv2.resize(a.astype(np.float32), (w, h), interpolation=interp)  # (h, w) float32
+    sil = sil.reshape(h, w) >= 0.5  # (h, w) bool
+    ys, xs = np.nonzero(sil)
+    sil = sil[ys.min():ys.max() + 1, xs.min():xs.max() + 1]  # (h, w) bool, tight again
+    _GLYPH_CACHE[key] = sil
+    return sil
 
 
-def bank_silhouette(bank, k):
-    """Unpack row k of the bank -> (h, w) bool silhouette (tight bbox, longest side 128)."""
-    side = _BANK_FRAME
-    frame = np.unpackbits(bank["masks"][k])[:side * side].reshape(side, side)  # (128, 128) uint8
-    h, w = int(bank["hw"][k, 0]), int(bank["hw"][k, 1])
-    return frame[:h, :w].astype(bool)
-
-
-def transform_shape(sil, size, rotation_deg, aspect, shear, warp, edge_soft):
+def transform_shape(sil, size, rotation_deg, aspect, shear, warp, edge_soft,
+                    perspective=(0.0, 0.0)):
     """Continuous random transform of one silhouette -> shape mask m.
 
-    sil: (h, w) bool silhouette; size: int px, longest side after scaling;
+    sil: (h, w) bool silhouette; size: int px s, longest side after scaling;
     rotation_deg: float, > 0 turns the shape counter-clockwise as displayed
     (image y down; +90 equals np.rot90(., 1)); aspect: float a, x *= sqrt(a),
-    y /= sqrt(a); shear: float k, x += k * y; warp: (2, 4, 4) float px grid
-    of (dx, dy) displacements, or None for rigid; edge_soft: float px blur.
+    y /= sqrt(a); shear: float k, x += k * y; warp: (2, g, g) float px grid
+    of (dx, dy) displacements, or None for rigid; edge_soft: float px blur;
+    perspective: (px, py) float keystone, H = I + [[0,0,0],[0,0,0],[px,py,0]] / s.
 
-        sil ─pre-blur 1 px─> float ─INTER_AREA─> (s-scaled) ─remap(bilinear):
-        q -> L^-1 (q + d(q) - c_out) + c_src─> >= 0.5 ─blur─> crop m > 0.01
+        sil ─pre-blur─> float ─resize─> (s-scaled) ─remap(bilinear):
+        q -> L^-1 H^-1 (q + d(q)) + c_src─> >= 0.5 ─blur─> crop m > 0.01
 
-    The pre-blur (_SIL_SMOOTH at the 128 scale) turns the bank's NEAREST
-    stair-stepped edges into smooth curves before the re-binarisation.
-    L = rotate · shear · aspect, applied about the shape centre.
-    Returns (h', w') float32 in 0-1 cropped to its tight bbox
-    ((1, 1) zeros if nothing is left).
+        source box ──L (affine)──> parallelogram ──H (keystone)──> quad
+                                   q_a           q = q_a / (1 + (px, py)·q_a / s)
+
+    The pre-blur (_SIL_SMOOTH at the 128 scale) turns stair-stepped edges
+    into smooth curves before the re-binarisation.  L = rotate · shear ·
+    aspect about the shape centre; H maps centred coords.  When the
+    projective denominator would fall <= 0.05 anywhere over the box, (px, py)
+    are scaled down so its minimum is 0.1.  The output canvas holds the
+    projected corners + warp amplitude + blur, at most 4·s per side (pixels
+    beyond it are lost).  Returns (h', w') float32 in 0-1 cropped to its
+    tight bbox ((1, 1) zeros if nothing is left).
     """
     import cv2
     h, w = sil.shape
@@ -597,27 +594,49 @@ def transform_shape(sil, size, rotation_deg, aspect, shear, warp, edge_soft):
     th = math.radians(rotation_deg)  # float rad
     c, s_ = math.cos(th), math.sin(th)
     ra = math.sqrt(aspect)  # float, x stretch (y gets 1 / ra)
-    # (2, 2) float64 linear map, centred source coords -> centred output coords
+    # (2, 2) float64 linear map, centred source coords -> centred affine coords
     lin = (np.array([[c, s_], [-s_, c]]) @ np.array([[1.0, shear], [0.0, 1.0]])
            @ np.diag([ra, 1.0 / ra]))
-    # half extents of the transformed source box (pixel edges at -0.5 .. n - 0.5)
+    # corners of the source box (pixel edges at -0.5 .. n - 0.5), centred: (4, 2) float64
     corners = np.array([[-sw, -sh], [sw, -sh], [-sw, sh], [sw, sh]], dtype=np.float64) / 2.0
-    ext = np.abs(corners @ lin.T).max(axis=0)  # (2,) float px, half width / height
+    ac = corners @ lin.T  # (4, 2) float64, affine-mapped corners
+    # (2,) float64 bottom row of H (without the 1): [px, py] / s
+    hb = np.array([float(perspective[0]), float(perspective[1])]) / float(size)
+    den_min = 1.0 + float((ac @ hb).min())  # float, smallest denominator (linear -> at a corner)
+    if den_min <= _PERSP_MIN_DEN:
+        hb *= (1.0 - _PERSP_CLAMP_DEN) / (1.0 - den_min)  # clamp: new minimum = 0.1
+    pc = ac / (1.0 + ac @ hb)[:, None]  # (4, 2) float64, projected corners
+    lo, hi = pc.min(axis=0), pc.max(axis=0)  # (2,) float px bbox of the quad
+    ctr, ext = (lo + hi) / 2.0, (hi - lo) / 2.0  # (2,) float px, bbox centre / half extents
     amp = 0.0 if warp is None else float(np.abs(warp).max())  # float px, max displacement
     margin = int(math.ceil(amp)) + int(math.ceil(3 * edge_soft)) + 1  # int px border
-    ow = int(math.ceil(2 * ext[0] - 1e-6)) + 2 * margin  # int px, output width
-    oh = int(math.ceil(2 * ext[1] - 1e-6)) + 2 * margin  # int px, output height
+    cap = _MAX_SIDE_FACTOR * int(size)  # int px, max output side
+    ow = min(cap, int(math.ceil(2 * ext[0] - 1e-6)) + 2 * margin)  # int px, output width
+    oh = min(cap, int(math.ceil(2 * ext[1] - 1e-6)) + 2 * margin)  # int px, output height
     gy, gx = np.mgrid[:oh, :ow].astype(np.float32)  # (oh, ow) float32 output pixel grids
     if warp is not None and amp > 0:
         dx = np.clip(cv2.resize(np.asarray(warp[0], np.float32), (ow, oh),
                                 interpolation=cv2.INTER_CUBIC), -amp, amp)  # (oh, ow) float32
         dy = np.clip(cv2.resize(np.asarray(warp[1], np.float32), (ow, oh),
                                 interpolation=cv2.INTER_CUBIC), -amp, amp)  # (oh, ow) float32
-        gx, gy = gx + dx, gy + dy
-    inv = np.linalg.inv(lin)  # (2, 2) float64, output -> source
-    qx, qy = gx - (ow - 1) / 2.0, gy - (oh - 1) / 2.0  # (oh, ow) float, centred output coords
-    map_x = (inv[0, 0] * qx + inv[0, 1] * qy + (sw - 1) / 2.0).astype(np.float32)  # (oh, ow)
-    map_y = (inv[1, 0] * qx + inv[1, 1] * qy + (sh - 1) / 2.0).astype(np.float32)  # (oh, ow)
+        gx, gy = gx + dx.reshape(oh, ow), gy + dy.reshape(oh, ow)
+    # (oh, ow) float32, centred projected coords of every (warped) output pixel
+    qx = gx - np.float32((ow - 1) / 2.0 - ctr[0])
+    qy = gy - np.float32((oh - 1) / 2.0 - ctr[1])
+    persp_on = bool(hb.any())  # bool, a keystone is applied
+    if persp_on:
+        den = 1.0 - np.float32(hb[0]) * qx - np.float32(hb[1]) * qy  # (oh, ow) float32, H^-1 den.
+        ok = den > 1e-6  # (oh, ow) bool, on the source side of the horizon
+        den = np.where(ok, den, np.float32(1.0))
+        qx, qy = qx / den, qy / den  # (oh, ow) float32, centred affine coords
+    inv = np.linalg.inv(lin)  # (2, 2) float64, affine -> source
+    lim = float(4 * (sw + sh) + 16)  # float px, far outside the source (keeps maps finite)
+    map_x = np.clip(inv[0, 0] * qx + inv[0, 1] * qy + (sw - 1) / 2.0,
+                    -lim, lim).astype(np.float32)  # (oh, ow) float32 source x
+    map_y = np.clip(inv[1, 0] * qx + inv[1, 1] * qy + (sh - 1) / 2.0,
+                    -lim, lim).astype(np.float32)  # (oh, ow) float32 source y
+    if persp_on:
+        map_x[~ok] = -lim  # beyond the horizon -> outside the source
     out = cv2.remap(src, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
                     borderValue=0)  # (oh, ow) float32
     m = (out >= 0.5).astype(np.float32)  # (oh, ow) float32, binary shape
@@ -631,27 +650,33 @@ def transform_shape(sil, size, rotation_deg, aspect, shear, warp, edge_soft):
     return np.clip(m[ys.min():ys.max() + 1, xs.min():xs.max() + 1], 0, 1)
 
 
-def _bank_shape(rng, nrng, sec, bank):
-    """Shape mask of one effect: a random bank silhouette, randomly transformed.
+def _glyph_shape(rng, nrng, sec):
+    """Shape mask of one effect: a random glyph in a random font, randomly transformed.
 
     rng / nrng: the section's random.Random / np.random.Generator; sec:
-    reflections / glares config section (dict); bank: shape_bank() dict.
-    Fixed-count draws, in order: bank index, size, rotation, aspect
-    (log-uniform), shear (all rng), then 16 dx + 16 dy (nrng, U(-A, A),
-    drawn even when A = 0).  Returns (h', w') float32 in 0-1.
+    reflections / glares config section (dict).  Fixed-count draws, in
+    order, from rng: 1 glyph index, 2 font index, 3 size s, 4 rotation,
+    5 aspect (log-uniform), 6 shear, 7 px, 8 py (each ~ U(-P, P)); then
+    from nrng: g*g dx, then g*g dy ~ U(-A, A), A = warp_strength * s (drawn
+    even when A = 0).  Returns (h', w') float32 in 0-1.
     """
-    k = rng.randrange(len(bank["hw"]))  # int, bank row
-    size = rng.randint(*sec["size_range"])  # int px, longest side
+    fonts = glyph_fonts()  # tuple[str, ...]
+    ch = GLYPHS[rng.randrange(len(GLYPHS))]  # str, the glyph
+    fi = rng.randrange(len(fonts))  # int, font index
+    size = rng.randint(*sec["size_range"])  # int px, longest side s
     rot = rng.uniform(*sec["rotation_range"])  # float deg
     lo, hi = sec["aspect_range"]
     aspect = math.exp(rng.uniform(math.log(lo), math.log(hi)))  # float, log-uniform stretch
     shear = rng.uniform(*sec["shear_range"])  # float shear factor
-    amp = float(sec["warp_amplitude"])  # float px
-    dx = nrng.uniform(-amp, amp, 16)  # (16,) float px
-    dy = nrng.uniform(-amp, amp, 16)  # (16,) float px
-    warp = np.stack([dx.reshape(4, 4), dy.reshape(4, 4)]) if amp > 0 else None  # (2, 4, 4)
-    return transform_shape(bank_silhouette(bank, k), size, rot, aspect, shear, warp,
-                           float(sec["edge_soft"]))
+    P = float(sec["perspective"])  # float, max keystone strength
+    persp = (rng.uniform(-P, P), rng.uniform(-P, P))  # (px, py) float
+    g = int(sec["warp_grid"])  # int, warp control grid side
+    amp = float(sec["warp_strength"]) * size  # float px, warp amplitude A
+    dx = nrng.uniform(-amp, amp, g * g)  # (g*g,) float px
+    dy = nrng.uniform(-amp, amp, g * g)  # (g*g,) float px
+    warp = np.stack([dx.reshape(g, g), dy.reshape(g, g)]) if amp > 0 else None  # (2, g, g)
+    return transform_shape(glyph_silhouette(ch, fi), size, rot, aspect, shear, warp,
+                           float(sec["edge_soft"]), persp)
 
 
 def _place_shape(rng, m, canvas_size, bcx, bcy, b_radius, inside_outer):
@@ -682,8 +707,7 @@ def _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy, b_radius, tip, xs, ys
 
     img: canvas "L" (C, C); rngs: section_rngs dict; tip: visible tip (x, y)
     float px in canvas coords; xs (1, C) / ys (C, 1) int pixel grids.
-    Shapes are shape-bank silhouettes (_bank_shape); the bank is only opened
-    when an image actually gets an effect.
+    Shapes are transformed font glyphs (_glyph_shape).
     Returns the canvas as an "L" image (C, C).
     """
     canvas_size = img.size[0]  # int px, C
@@ -695,13 +719,12 @@ def _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy, b_radius, tip, xs, ys
         plan.append((name, sec, rng, n if active else 0))
     if not any(n for *_, n in plan):
         return img
-    bank = shape_bank()  # dict: masks (N, 2048) uint8, hw (N, 2) uint16
     work = np.asarray(img, dtype=np.float32)  # (C, C) float32 working canvas
     (_, R, rrng, n_r), (_, Gl, grng, n_g) = plan
     rnrng, gnrng = rngs["reflections"][1], rngs["glares"][1]  # np.random.Generator per section
     dark = np.zeros_like(work)  # (C, C) float32, summed reflection darkening
     for _ in range(n_r):
-        m = _bank_shape(rrng, rnrng, R, bank)
+        m = _glyph_shape(rrng, rnrng, R)
         delta = rrng.randint(*R["darken_range"])  # int gray levels subtracted
         dark += delta * _place_shape(rrng, m, canvas_size, bcx, bcy, b_radius, inside_outer)
     work = np.clip(work - dark, 0, 255)
@@ -710,7 +733,7 @@ def _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy, b_radius, tip, xs, ys
         # (C, C) bool, pixels a glare may never cover (around the visible tip)
         near_tip = (xs - tip[0]) ** 2 + (ys - tip[1]) ** 2 <= clear ** 2
         for _ in range(n_g):
-            m = _bank_shape(grng, gnrng, Gl, bank)
+            m = _glyph_shape(grng, gnrng, Gl)
             v = grng.randint(*Gl["value_range"])  # int gray level of the glare
             mc = _place_shape(grng, m, canvas_size, bcx, bcy, b_radius, inside_outer)
             mc[near_tip] = 0

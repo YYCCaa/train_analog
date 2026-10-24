@@ -98,14 +98,20 @@ def test_merge_does_not_mutate_inputs():
     ("shadows:\n  rim_opacity_range: [200, 220]\n", "shadows.rim_opacity_range"),
     ("shadows:\n  strength_range: [0.2, 1.5]\n", "shadows.strength_range"),
     ("shadows:\n  strength_jitter: 0.6\n", "shadows.strength_jitter"),
-    # removed by the shape-bank silhouettes: old Places365-patch YAMLs are rejected
+    # removed by earlier shape sources: old Places365-patch / bank YAMLs are rejected
     ("reflections:\n  threshold_pct_range: [55.0, 80.0]\n", "reflections.threshold_pct_range"),
     ("reflections:\n  patch_size_range: [24, 64]\n", "reflections.patch_size_range"),
     ("glares:\n  threshold_pct_range: [70.0, 92.0]\n", "glares.threshold_pct_range"),
     ("glares:\n  patch_size_range: [16, 48]\n", "glares.patch_size_range"),
-    # shape-transform keys are bounded
-    ("glares:\n  aspect_range: [0.1, 1.0]\n", "glares.aspect_range"),
-    ("reflections:\n  warp_amplitude: 31.0\n", "reflections.warp_amplitude"),
+    # removed with the glyph shapes (warp is now relative): old YAMLs are rejected
+    ("reflections:\n  warp_amplitude: 4.0\n", "reflections.warp_amplitude"),
+    ("glares:\n  warp_amplitude: 3.0\n", "glares.warp_amplitude"),
+    # glyph-transform keys are bounded
+    ("glares:\n  aspect_range: [0.05, 1.0]\n", "glares.aspect_range"),
+    ("reflections:\n  perspective: 0.95\n", "reflections.perspective"),
+    ("glares:\n  warp_strength: 1.5\n", "glares.warp_strength"),
+    ("reflections:\n  warp_grid: 13\n", "reflections.warp_grid"),
+    ("glares:\n  size_range: [8, 300]\n", "glares.size_range"),
 ])
 def test_invalid_configs_report_key(text, key):
     with pytest.raises(vc.ConfigError) as ei:
@@ -172,24 +178,32 @@ INT_RANGES = [  # keys the old code draws with random.randint
 ]
 
 
-def test_shape_bank_keys_and_defaults():
-    # pinned defaults of the silhouette-transform keys (brief table)
+def test_glyph_shape_keys_and_defaults():
+    # pinned defaults + schema bounds of the glyph-transform keys (brief table)
     cfg = vc.default_config()
+    shared = {"rotation_range": [0.0, 360.0], "aspect_range": [0.25, 4.0],
+              "shear_range": [-1.0, 1.0], "perspective": 0.4, "warp_strength": 0.15,
+              "warp_grid": 4}  # key -> default value, same in both sections
     want = {  # section -> key -> default value
-        "reflections": {"size_range": [24, 72], "rotation_range": [0.0, 360.0],
-                        "aspect_range": [0.7, 1.4], "shear_range": [-0.25, 0.25],
-                        "warp_amplitude": 4.0},
-        "glares": {"size_range": [16, 56], "rotation_range": [0.0, 360.0],
-                   "aspect_range": [0.7, 1.4], "shear_range": [-0.25, 0.25],
-                   "warp_amplitude": 3.0},
+        "reflections": {"size_range": [24, 96], **shared},
+        "glares": {"size_range": [16, 72], **shared},
+    }
+    bounds = {  # key -> (type, min, max, step) in the schema
+        "size_range": ("int_range", 8, 256, 1), "rotation_range": ("float_range", 0, 360, 1),
+        "aspect_range": ("float_range", 0.1, 10, 0.05), "shear_range": ("float_range", -3, 3, 0.05),
+        "perspective": ("float", 0, 0.9, 0.01), "warp_strength": ("float", 0, 1.0, 0.01),
+        "warp_grid": ("int", 2, 12, 1),
     }
     schema = vc.load_schema()
     for sec, keys in want.items():
-        assert "threshold_pct_range" not in cfg[sec] and "patch_size_range" not in cfg[sec]
+        for gone in ("threshold_pct_range", "patch_size_range", "warp_amplitude"):
+            assert gone not in cfg[sec] and gone not in schema[sec], (sec, gone)
         for key, val in keys.items():
             assert cfg[sec][key] == val, (sec, key)
-        assert schema[sec]["warp_amplitude"]["type"] == "float"
-        assert (schema[sec]["size_range"]["min"], schema[sec]["size_range"]["max"]) == (8, 160)
+        for key, (typ, lo, hi, step) in bounds.items():
+            leaf = schema[sec][key]  # dict, schema leaf
+            assert (leaf["type"], leaf["min"], leaf["max"], leaf["step"]) == (typ, lo, hi, step),                 (sec, key)
+            assert leaf.get("help"), (sec, key)
 
 
 def test_range_types_match_draw_kind():

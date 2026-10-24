@@ -93,22 +93,26 @@ shadows:
 reflections:
   prob: {type: float, min: 0.0, max: 1.0, step: 0.05, help: "Probability an image gets reflections."}
   count_range: {type: int_range, min: 0, max: 8, step: 1, help: "Reflections per image."}
-  size_range: {type: int_range, min: 8, max: 160, step: 1, help: "Longest side of the silhouette after scaling (px)."}
-  rotation_range: {type: float_range, min: 0.0, max: 360.0, step: 1, help: "Random rotation of the silhouette (degrees)."}
-  aspect_range: {type: float_range, min: 0.3, max: 3.0, step: 0.05, help: "Width/height stretch, drawn log-uniform (1 = unchanged)."}
-  shear_range: {type: float_range, min: -1.0, max: 1.0, step: 0.05, help: "Horizontal shear factor of the silhouette."}
-  warp_amplitude: {type: float, min: 0.0, max: 30.0, step: 0.5, help: "Max displacement of the smooth elastic warp (px); 0 = rigid."}
+  size_range: {type: int_range, min: 8, max: 256, step: 1, help: "Longest side of the glyph after scaling (px)."}
+  rotation_range: {type: float_range, min: 0.0, max: 360.0, step: 1, help: "Random rotation of the glyph (degrees)."}
+  aspect_range: {type: float_range, min: 0.1, max: 10.0, step: 0.05, help: "Width/height stretch, drawn log-uniform (1 = unchanged)."}
+  shear_range: {type: float_range, min: -3.0, max: 3.0, step: 0.05, help: "Horizontal shear factor of the glyph."}
+  perspective: {type: float, min: 0.0, max: 0.9, step: 0.01, help: "Max projective keystone strength (0 = affine only)."}
+  warp_strength: {type: float, min: 0.0, max: 1.0, step: 0.01, help: "Elastic warp amplitude as a fraction of the glyph size (0 = rigid)."}
+  warp_grid: {type: int, min: 2, max: 12, step: 1, help: "Warp control grid (g × g); larger = finer, wigglier distortion."}
   darken_range: {type: int_range, min: 0, max: 255, step: 1, help: "Gray levels subtracted inside the shape (value, not multiplier)."}
   edge_soft: {type: float, min: 0, max: 5, step: 0.1, help: "Gaussian softening of the shape edge (px)."}
 
 glares:
   prob: {type: float, min: 0.0, max: 1.0, step: 0.05, help: "Probability an image gets glares."}
   count_range: {type: int_range, min: 0, max: 8, step: 1, help: "Glares per image."}
-  size_range: {type: int_range, min: 8, max: 160, step: 1, help: "Longest side of the silhouette after scaling (px)."}
-  rotation_range: {type: float_range, min: 0.0, max: 360.0, step: 1, help: "Random rotation of the silhouette (degrees)."}
-  aspect_range: {type: float_range, min: 0.3, max: 3.0, step: 0.05, help: "Width/height stretch, drawn log-uniform (1 = unchanged)."}
-  shear_range: {type: float_range, min: -1.0, max: 1.0, step: 0.05, help: "Horizontal shear factor of the silhouette."}
-  warp_amplitude: {type: float, min: 0.0, max: 30.0, step: 0.5, help: "Max displacement of the smooth elastic warp (px); 0 = rigid."}
+  size_range: {type: int_range, min: 8, max: 256, step: 1, help: "Longest side of the glyph after scaling (px)."}
+  rotation_range: {type: float_range, min: 0.0, max: 360.0, step: 1, help: "Random rotation of the glyph (degrees)."}
+  aspect_range: {type: float_range, min: 0.1, max: 10.0, step: 0.05, help: "Width/height stretch, drawn log-uniform (1 = unchanged)."}
+  shear_range: {type: float_range, min: -3.0, max: 3.0, step: 0.05, help: "Horizontal shear factor of the glyph."}
+  perspective: {type: float, min: 0.0, max: 0.9, step: 0.01, help: "Max projective keystone strength (0 = affine only)."}
+  warp_strength: {type: float, min: 0.0, max: 1.0, step: 0.01, help: "Elastic warp amplitude as a fraction of the glyph size (0 = rigid)."}
+  warp_grid: {type: int, min: 2, max: 12, step: 1, help: "Warp control grid (g × g); larger = finer, wigglier distortion."}
   value_range: {type: int_range, min: 0, max: 255, step: 1, help: "Gray level the glare overwrites pixels with (value, not multiplier)."}
   edge_soft: {type: float, min: 0, max: 5, step: 0.1, help: "Gaussian softening of the shape edge (px)."}
   clear_distance: {type: float, min: 0, max: 80, step: 0.5, help: "No glare within this distance of the visible pointer tip (px)."}
