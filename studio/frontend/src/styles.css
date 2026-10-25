@@ -172,6 +172,18 @@ main { overflow-y: auto; padding: 14px 18px 30px; }
   font-size: 12px;
 }
 
+.notice {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: rgba(79, 163, 255, 0.1);
+  font-family: Consolas, monospace;
+  font-size: 12px;
+}
+.notice ul { margin: 4px 0 0; padding-left: 18px; }
+.notice .dismiss { float: right; margin-left: 8px; padding: 2px 8px; font-size: 11px; }
+
 .grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

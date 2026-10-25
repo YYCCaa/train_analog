@@ -84,8 +84,20 @@ is `S` under the same config, because both paths call `render_image`.
 - **Load YAML / Save YAML.** Save downloads the current settings as
   `v7_config.yaml`. Load accepts that file, a partial YAML (missing keys take
   defaults), or a generated `config.yaml` (its `run:` block is ignored).
-  Invalid values are listed in red with the `section.key` they belong to. The
-  current settings stay unchanged.
+  Only a YAML syntax error (or a document that is not a mapping) is listed in
+  red, and the current settings stay unchanged.
+- **Old YAMLs.** Load is lenient (`v7_config.migrate_config`; the generator's
+  `--config` uses it too and prints the same notes to stderr as
+  `[v7_config] warning: ...`). Missing sections and keys take defaults. Renamed
+  keys are carried over (`perspective: p` becomes `perspective_range: [0, p]`,
+  `warp_strength: s` and `warp_grid: g` become `[s, s]` and `[g, g]`,
+  `noise_range` becomes `noise_amplitude`, `edge_noise_range` becomes
+  `edge_noise_amplitude`, `dist_jitter_range` feeds both `outside_jitter_range`
+  and `inside_jitter_range`). Removed or unknown keys and sections are dropped.
+  Bad values are repaired (wrong type gets the default, a scalar becomes
+  `[v, v]`, a reversed range is swapped, out-of-bounds is clamped). Every
+  change appears in a dismissible "Loaded with N adjustments" box above the
+  preview. Sliders and the preview API stay strict.
 - **Generate dataset.** Fill in an absolute output folder, the image count,
   the base seed, and the workers (blank = all cores but one, so the preview
   stays responsive). Then press Start. Images, seed and workers must be whole

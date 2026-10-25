@@ -8,7 +8,9 @@ int | float | bool | int_range | float_range.
 """
 
 import copy
+import math
 import os
+import sys
 
 import yaml
 
@@ -132,12 +134,185 @@ def strip_run(cfg_with_run):
     return {k: v for k, v in cfg_with_run.items() if k != RUN_KEY}
 
 
-def parse_config_text(text):
-    """YAML text -> defaults merged with text -> validated cfg.
+def _same(v):
+    """Migration transform: copy the old value unchanged."""
+    return v
+
+
+def _to_range(lo_fn):
+    """Migration transform factory: scalar p -> [lo_fn(p), p]; non-numbers pass through
+    unchanged so the value repair step reports them."""
+    def fn(v):
+        return [lo_fn(v), v] if _is_num(v) else v
+    return fn
+
+
+# Old key -> successors, shape dict[(section str, old key str)] -> list[(new key str,
+# transform callable value -> value)]. The old value is renamed / reshaped into every
+# successor that the YAML does not already set itself. Found with
+# `git log -p --follow configs/v7_schema.yaml`:
+#   reflections/glares  perspective p     -> perspective_range   [0, p]   (per-item draw)
+#   reflections/glares  warp_strength s   -> warp_strength_range [s, s]
+#   reflections/glares  warp_grid g       -> warp_grid_range     [g, g]
+#   pointer  noise_range n                -> noise_amplitude     n   (renamed)
+#   pointer  edge_noise_range n           -> edge_noise_amplitude n  (renamed)
+#   digits   dist_jitter_range [a, b]     -> outside_jitter_range + inside_jitter_range
+#                                            (the bidirectional jitter became two one-way ones)
+_MIGRATIONS = {
+    ("pointer", "noise_range"): [("noise_amplitude", _same)],
+    ("pointer", "edge_noise_range"): [("edge_noise_amplitude", _same)],
+    ("digits", "dist_jitter_range"): [("outside_jitter_range", _same),
+                                      ("inside_jitter_range", _same)],
+}
+for _sec in ("reflections", "glares"):
+    _MIGRATIONS[(_sec, "perspective")] = [("perspective_range", _to_range(lambda p: 0))]
+    _MIGRATIONS[(_sec, "warp_strength")] = [("warp_strength_range", _to_range(lambda s: s))]
+    _MIGRATIONS[(_sec, "warp_grid")] = [("warp_grid_range", _to_range(lambda g: g))]
+
+# Old keys with no successor, shape set[(section str, key str)]; dropped with a
+# "removed in a newer version" warning instead of the generic "unknown key".
+_REMOVED = {
+    ("reflections", "warp_amplitude"), ("glares", "warp_amplitude"),
+    ("reflections", "threshold_pct_range"), ("glares", "threshold_pct_range"),
+    ("reflections", "patch_size_range"), ("glares", "patch_size_range"),
+    ("shadows", "gray_range"), ("shadows", "opacity_range"), ("shadows", "rim_opacity_range"),
+}
+
+
+def _fmt(v):
+    """Short repr of a value for warning text."""
+    return repr(v)
+
+
+def _repair_number(name, v, leaf, default, warns, what):
+    """Repair one scalar v against a numeric leaf; returns int | float.
+
+    what is "int" or "float". Wrong type -> default, integral float -> int,
+    fractional float for an int -> rounded, out of [min, max] -> clamped.
+    """
+    lo, hi = leaf["min"], leaf["max"]
+    if not _is_num(v) or not math.isfinite(v):
+        warns.append(f"{name}: expected {what}, got {_fmt(v)}; using default {_fmt(default)}")
+        return default
+    if what == "int" and not _is_int(v):
+        r = int(round(v))  # nearest int (int)
+        if r != v:
+            warns.append(f"{name}: expected int, got {v}; rounded to {r}")
+        v = r
+    if v < lo or v > hi:
+        c = min(max(v, lo), hi)  # clamped value
+        warns.append(f"{name}: {v} outside [{lo}, {hi}]; clamped to {c}")
+        v = c
+    return v
+
+
+def _repair_leaf(name, value, leaf, default, warns):
+    """Return value repaired to satisfy schema leaf (dict); problems appended to
+    warns (list[str]). default is the fallback when value is unusable."""
+    t = leaf["type"]
+    if t == "bool":
+        if isinstance(value, bool):
+            return value
+        warns.append(f"{name}: expected true/false, got {_fmt(value)}; using default {_fmt(default)}")
+        return default
+    if t in ("int", "float"):
+        if isinstance(value, list) and len(value) == 2 and all(_is_num(x) for x in value):
+            mid = (value[0] + value[1]) / 2  # midpoint of the range (float)
+            mid = int(round(mid)) if t == "int" else mid
+            warns.append(f"{name}: expected a single value, got range {value}; used midpoint {mid}")
+            value = mid
+        return _repair_number(name, value, leaf, default, warns, t)
+    if t in ("int_range", "float_range"):
+        what = "int" if t == "int_range" else "float"  # element type
+        if _is_num(value):
+            warns.append(f"{name}: expected a [lo, hi] list, got {value}; used [{value}, {value}]")
+            value = [value, value]
+        if not (isinstance(value, list) and len(value) == 2):
+            warns.append(f"{name}: expected a [lo, hi] list, got {_fmt(value)}; "
+                         f"using default {_fmt(default)}")
+            return list(default)
+        if not all(_is_num(x) and math.isfinite(x) for x in value):
+            warns.append(f"{name}: both ends must be numbers, got {_fmt(value)}; "
+                         f"using default {_fmt(default)}")
+            return list(default)
+        a, b = value
+        if a > b:
+            warns.append(f"{name}: lo > hi ({a} > {b}); swapped")
+            a, b = b, a
+        return [_repair_number(name, a, leaf, default[0], warns, what),
+                _repair_number(name, b, leaf, default[1], warns, what)]
+    raise ConfigError([f"{name}: unknown schema type {t!r}"])
+
+
+def migrate_config(data, schema=None, defaults=None):
+    """Lenient load of a possibly old / hand-edited cfg dict -> (cfg, warnings).
+
+    data: dict[section str, dict[key str, value]] (not modified); schema / defaults
+    default to the current files. Steps: known renames / reshapes (_MIGRATIONS), drop
+    removed or unknown sections and keys, fill anything missing from defaults, repair
+    each value against its schema leaf (type, int/float, scalar vs range, order,
+    bounds). Returns cfg (dict, section order of the schema; always passes
+    validate_config) and warnings (list[str], each "section.key: message").
+    A top-level run: block is ignored silently.
+    """
+    schema = load_schema() if schema is None else schema
+    defaults = default_config() if defaults is None else defaults
+    warns = []  # list[str]
+    # section -> key -> raw value after renames; unknown keys already dropped
+    pending = {sec: {} for sec in schema}
+    for sec, body in data.items():
+        if sec == RUN_KEY:
+            continue
+        if sec not in schema:
+            warns.append(f"{sec}: unknown section, ignored")
+            continue
+        if not isinstance(body, dict):
+            warns.append(f"{sec}: section must be a mapping, got {_fmt(body)}; using defaults")
+            continue
+        for key, value in body.items():
+            if key in schema[sec]:
+                pending[sec][key] = value
+    for sec, body in data.items():
+        if sec not in schema or not isinstance(body, dict):
+            continue
+        for key, value in body.items():
+            if key in schema[sec]:
+                continue
+            name = f"{sec}.{key}"
+            moves = _MIGRATIONS.get((sec, key))  # successors or None
+            if moves:
+                done = []  # successor keys actually filled (list[str])
+                for new_key, fn in moves:
+                    if new_key in schema[sec] and new_key not in body:
+                        pending[sec][new_key] = fn(copy.deepcopy(value))
+                        done.append(new_key)
+                if done:
+                    warns.append(f"{name}: renamed to {', '.join(done)}")
+                else:
+                    warns.append(f"{name}: replaced by {moves[0][0]} which is also set; ignored")
+            elif (sec, key) in _REMOVED:
+                warns.append(f"{name}: removed in a newer version, ignored")
+            else:
+                warns.append(f"{name}: unknown key, ignored")
+    cfg = {}
+    for sec, keys in schema.items():
+        cfg[sec] = {}
+        for key, leaf in keys.items():
+            default = defaults[sec][key]
+            if key in pending[sec]:
+                cfg[sec][key] = _repair_leaf(f"{sec}.{key}", pending[sec][key], leaf,
+                                             default, warns)
+            else:
+                cfg[sec][key] = copy.deepcopy(default)
+    return cfg, warns
+
+
+def parse_config_text_with_warnings(text):
+    """YAML text -> (cfg, warnings) via the lenient migrate_config.
 
     A top-level run: block (as written by dump_config) is ignored so a
-    generated config.yaml can be loaded back. YAML syntax errors and
-    non-mapping documents become ConfigError.
+    generated config.yaml can be loaded back. Only YAML syntax errors and
+    non-mapping documents raise ConfigError. warnings is list[str].
     """
     try:
         data = yaml.safe_load(text)
@@ -147,17 +322,26 @@ def parse_config_text(text):
         data = {}
     if not isinstance(data, dict):
         raise ConfigError(["yaml: top level must be a mapping of sections"])
-    cfg = merge_config(default_config(), strip_run(data))
+    cfg, warns = migrate_config(strip_run(data))
     validate_config(cfg)
-    return cfg
+    return cfg, warns
+
+
+def parse_config_text(text):
+    """Like parse_config_text_with_warnings but returns only the cfg dict."""
+    return parse_config_text_with_warnings(text)[0]
 
 
 def load_config(path):
-    """Load cfg from a YAML file path; None -> defaults."""
+    """Load cfg from a YAML file path; None -> defaults. Old-YAML adjustments are
+    printed to stderr as "[v7_config] warning: <message>"."""
     if path is None:
         return default_config()
     with open(path, "r", encoding="utf-8") as f:
-        return parse_config_text(f.read())
+        cfg, warns = parse_config_text_with_warnings(f.read())
+    for w in warns:
+        print(f"[v7_config] warning: {w}", file=sys.stderr)
+    return cfg
 
 
 class _FlowListDumper(yaml.SafeDumper):

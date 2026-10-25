@@ -100,9 +100,19 @@ export const getSchema = () => call<Schema>("GET", "/api/schema");
 export const getDefaultConfig = async () =>
   (await call<{ config: Config }>("GET", "/api/config/default")).config;
 
-/** YAML text (str) -> Promise<Config> (defaults merged, validated); 422 -> ApiError. */
-export const parseConfig = async (text: string) =>
-  (await call<{ config: Config }>("POST", "/api/config/parse", { text })).config;
+/** Result of parsing a YAML text: the migrated config plus what had to be adjusted. */
+export interface ParsedConfig {
+  config: Config; // migrated + validated config, section -> key -> Value
+  warnings: string[]; // one "section.key: message" per adjustment to an old YAML; [] if none
+}
+
+/** YAML text (str) -> Promise<ParsedConfig> (old keys migrated, defaults filled, values
+ * repaired); only YAML syntax errors / non-mapping documents -> ApiError (422). */
+export const parseConfig = async (text: string): Promise<ParsedConfig> => {
+  const r = await call<{ config: Config; warnings?: string[] }>(
+    "POST", "/api/config/parse", { text });
+  return { config: r.config, warnings: Array.isArray(r.warnings) ? r.warnings.map(String) : [] };
+};
 
 /** Config -> Promise<str> YAML text; invalid config -> ApiError. */
 export const dumpConfig = async (config: Config) =>
