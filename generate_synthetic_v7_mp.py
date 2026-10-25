@@ -56,15 +56,19 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
     RenderResult(image (256, 256) uint8, tip_x, tip_y, angle_deg)
 
 The pointer: a hub circle + an isosceles triangle whose base is a chord
-of the hub, apex pointing outward.  Label = the visible end of the pointer on
-its axis, in pixel coordinates (pixel i's centre at i), after the edge ring
-and the cut: the ideal apex walked back along the axis to the level of the
-farthest pointer pixel that still shows (edge-band weight > 1/2 through the
-same bicubic stretch as the image, not under the rim band / outer fill),
-searched within TIP_STRIP px of the axis.  With a big cut this is ~ the centre
-of the cut arc on the axis; with a small or no cut it accounts for the 1-px
-background ring at the acute apex.  params["derived"] also records the ideal
-apex (ideal_apex_x/y) and tip_recession (px from it to the label, pre-stretch).
+of the hub, apex pointing outward.  Label = the farthest point on the pointer
+axis where the pointer is still wide enough to see after blur, in pixel
+coordinates (pixel i's centre at i).  The visible weight (edge ring, cut and
+rim / outer fill aware, through the same bicubic stretch as the image) is
+integrated across the axis into a width w(t) at t px behind the ideal apex;
+the label is the first t with w(t) >= w* = 2 sqrt(2) erfinv(c) sigma_eff,
+sigma_eff = sqrt(dial blur^2 + tip_label.base_blur^2), c =
+tip_label.contrast_frac (a blurred bar of width w* keeps contrast c), and
+never ahead of the visible end (farthest pixel with weight > 1/2 within
+TIP_STRIP px of the axis; that is also the label when w* = 0 or no t
+qualifies).  See _width_tip.  params["derived"] also records the ideal apex
+(ideal_apex_x/y), tip_recession (px from it to the label, pre-stretch),
+sigma_eff, w_star and tip_width (w at the label).
 
 Shadows are physical: a shadow blocks the direct light and keeps only the
 ambient light, so it scales the surface by an albedo-independent factor,
@@ -117,7 +121,8 @@ bool, str, list); positions are image px unless named otherwise.
     shadows        active, light_angle, s_p, s_r, rim_offset_frac,
                    rim_cutout_frac, rim_blur, offset
     pointer        gray, hole_gray, edge_gray, gradient, edge_thickness
-    cut_tip        enabled, cut_r, ideal_apex_x / _y, tip_recession
+    cut_tip        enabled, cut_r, ideal_apex_x / _y, tip_recession,
+                   sigma_eff, w_star, tip_width
     jitter         brightness, contrast, sharpness
     hier_noise     block_min, block_max, block_std (of the block offsets)
     tri_artifacts  enabled, count_drawn, n, items[n] {gray, center_x,
@@ -129,7 +134,7 @@ bool, str, list); positions are image px unless named otherwise.
     blur           enabled, radius
     derived        img_size, canvas_offset_x / _y, dial_rx, dial_ry,
                    outer_rx, outer_ry, tip_x, tip_y, ideal_apex_x / _y,
-                   tip_recession
+                   tip_recession, sigma_eff, w_star, tip_width
 """
 
 import argparse
@@ -628,6 +633,122 @@ def _visible_tip(vis, apex, u, max_back, fallback=None, cover=None):
         return fallback
     t = math.ceil(round(float(back[sel].min()) / 0.05, 6)) * 0.05  # float px on the grid
     return apex[0] - t * u[0], apex[1] - t * u[1]
+
+
+# ── width-based tip label (blur aware; model in _width_tip) ───────────────
+TIP_T_STEP = 0.05  # float px, along-axis grid of the width scan
+TIP_S_STEP = 0.25  # float px, max lateral sample spacing of the width integral
+TIP_COARSE = 5  # int, fine steps per coarse step of the width scan (0.25 px)
+TIP_NEAR = 0.5  # float px, coarse points with w >= w* - this start the fine scan
+TIP_CHUNK = 100  # int, fine points scanned per vectorised chunk (5 px)
+
+
+def _erfinv(c):
+    """Inverse error function of c (float in (-1, 1)) -> float, Newton on math.erf."""
+    x = math.sqrt(-math.log((1 - c) * (1 + c))) * math.copysign(0.8, c)  # float, start
+    for _ in range(60):
+        step = (math.erf(x) - c) / (2 / math.sqrt(math.pi) * math.exp(-x * x))
+        x -= step
+        if abs(step) < 1e-15:
+            break
+    return x
+
+
+def tip_width_threshold(contrast_frac, sigma_eff):
+    """w* (float px) = 2 sqrt(2) erfinv(c) sigma_eff: the narrowest bar that keeps
+    contrast fraction c (float) after a Gaussian blur of std sigma_eff (float px)."""
+    if sigma_eff <= 0:
+        return 0.0
+    return 2 * math.sqrt(2) * _erfinv(contrast_frac) * sigma_eff
+
+
+def _width_profile(m, apex, u, ts, half_lat):
+    """Visible pointer width w(t) across the axis, (T,) float64 px.
+
+    m        : (C, C) float, visible weight in [0, 1] (cover already zeroed);
+               pixel centres at integer coords
+    apex     : (x, y) float px; u : (ux, uy) float unit axis direction
+    ts       : (T,) float64, distances behind the apex
+    half_lat : float px, lateral half-range of the integral
+    Each w(t) = sum of bilinear m samples along the perpendicular through
+    apex - t u, |s| <= half_lat, times the sample step (<= TIP_S_STEP).
+    """
+    n_s = int(math.ceil(2 * half_lat / TIP_S_STEP)) + 1  # int, lateral samples
+    ss = np.linspace(-half_lat, half_lat, n_s)  # (S,) float64 lateral offsets
+    ds = ss[1] - ss[0] if n_s > 1 else 1.0  # float px, sample step
+    # sample points, (T, S) float64; perpendicular n = (-uy, ux)
+    px = apex[0] - ts[:, None] * u[0] - ss[None, :] * u[1]
+    py = apex[1] - ts[:, None] * u[1] + ss[None, :] * u[0]
+    pad = 2  # int px, zero border so out-of-canvas samples read 0
+    mp_ = np.pad(np.asarray(m, dtype=np.float32), pad)  # (C+4, C+4) float32
+    hp, wp = mp_.shape
+    x = np.clip(px + pad, 0, wp - 1.001)  # (T, S) float64, padded coords
+    y = np.clip(py + pad, 0, hp - 1.001)
+    x0, y0 = x.astype(np.intp), y.astype(np.intp)  # (T, S) int, top-left pixel (x >= 0)
+    fx, fy = x - x0, y - y0  # (T, S) float64 fractions
+    v = ((mp_[y0, x0] * (1 - fx) + mp_[y0, x0 + 1] * fx) * (1 - fy)
+         + (mp_[y0 + 1, x0] * (1 - fx) + mp_[y0 + 1, x0 + 1] * fx) * fy)  # (T, S)
+    return v.sum(axis=1) * ds
+
+
+def _width_tip(vis, apex, u, t_max, half_lat, w_star, cover=None):
+    """Blur-aware tip: the first t (0.05 px grid, 0..t_max) behind the apex where
+    the visible width w(t) >= w_star (float px > 0).
+
+    Model: a Gaussian blur of std sigma turns a bar of width w and contrast D
+    into a bump of peak contrast D * erf(w / (2 sqrt(2) sigma)).  The tip one
+    can still see is the farthest axis point where that peak keeps a fraction
+    c of the full contrast, i.e. where w(t) reaches
+
+        w* = 2 sqrt(2) erfinv(c) sigma_eff,  sigma_eff = sqrt(sigma_blur^2 + sigma_0^2)
+
+    (Gaussians add in quadrature; sigma_0 = tip_label.base_blur is the
+    observer / downscale floor, so a 1-px sliver is no cue with the blur off;
+    c = 0.5 -> w* ~ 1.349 sigma_eff).  For a clean wedge of half-angle a:
+
+        hub side (-u)                          pointer points this way (+u) ->
+        ----------------+--.__
+                        |     ``--..__       w(t) = 2 t tan(a)
+        axis -----------+-------------``*  ideal apex (a = half-angle)
+                        |     __..--''
+        ----------------+--''
+                      label: w(t_tip) = w*
+                        |<--- t_tip ----->|
+        t_tip ~ w* / (2 tan a) + the edge-ring loss behind the apex
+        e.g. sigma_eff = 3 (w* = 4.05), a = 5.6 deg -> ~21 px
+
+    vis : (C, C) bool / float in [0, 1] visible weight; cover : None or (C, C)
+    bool pixels painted over later (weight 0).  apex, u, half_lat as in
+    _width_profile.  Returns ((x, y) label float px, t float px, w(t) float px),
+    or None when the width never reaches w_star.
+    """
+    m = np.asarray(vis, dtype=np.float32)  # (C, C) float32 weight
+    if cover is not None:
+        m = np.where(cover, np.float32(0), m)
+    n_t = int(math.floor(t_max / TIP_T_STEP + 1e-9)) + 1  # int, fine grid points 0..t_max
+    # w(t) ripples by ~0.2 px on a rasterised slender wedge, so it can touch w*
+    # between coarse points.  A coarse pass (every TIP_COARSE fine steps) finds
+    # the first point within TIP_NEAR of w*; the fine scan starts one coarse
+    # step before it and runs on in chunks until the first fine hit.  Same
+    # answer as a full fine scan unless w jumps by > TIP_NEAR within 0.25 px.
+    start = None  # int, first fine index to scan (None = w never comes near w*)
+    for lo in range(0, n_t, TIP_COARSE * TIP_CHUNK // 2):  # coarse chunks of 50 points (12.5 px)
+        idx_c = np.arange(lo, min(lo + TIP_COARSE * TIP_CHUNK // 2, n_t), TIP_COARSE)  # (<=50,) int
+        w_c = _width_profile(m, apex, u, idx_c * TIP_T_STEP, half_lat)  # float64 px
+        near = np.flatnonzero(w_c >= w_star - TIP_NEAR)  # (Kc,) int
+        if near.size:
+            start = max(int(idx_c[near[0]]) - TIP_COARSE + 1, 0)
+            break
+    if start is None:
+        return None
+    for lo in range(start, n_t, TIP_CHUNK):
+        idx_f = np.arange(lo, min(lo + TIP_CHUNK, n_t))  # (<= TIP_CHUNK,) int fine indices
+        w_f = _width_profile(m, apex, u, idx_f * TIP_T_STEP, half_lat)  # float64 px
+        hit = np.flatnonzero(w_f >= w_star)  # (K,) int
+        if hit.size:
+            t = float(idx_f[hit[0]] * TIP_T_STEP)
+            return (apex[0] - t * u[0], apex[1] - t * u[1]), t, float(w_f[hit[0]])
+    return None
 
 
 # ── main render ────────────────────────────────────────────────────────
@@ -1171,10 +1292,30 @@ def render_image(cfg, image_seed):
     v_n = math.hypot(*v_s)  # float, its length
     u_s = (v_s[0] / v_n, v_s[1] / v_n)  # (ux, uy) float, unit stretched axis
     back0 = (cut_r if C["enabled"] else 0) * v_n  # float px, the old formula's recession
-    apex = _visible_tip(vis_s, ideal_apex, u_s, back0 + 20,
-                        fallback=(ideal_apex[0] - back0 * u_s[0],
-                                  ideal_apex[1] - back0 * u_s[1]),
-                        cover=covered)  # (x, y) float px, label on the stretched canvas
+    vis_end = _visible_tip(vis_s, ideal_apex, u_s, back0 + 20,
+                           cover=covered)  # (x, y) float px visible end, or None
+    apex = vis_end if vis_end is not None else (ideal_apex[0] - back0 * u_s[0],
+                                                ideal_apex[1] - back0 * u_s[1])
+    # blur-aware label: farthest axis point whose visible width survives the
+    # blur, w(t) >= w* = 2 sqrt(2) erfinv(c) sigma_eff (see _width_tip), never
+    # ahead of the visible end (so raising sigma never moves it forward); no draws
+    TL = cfg["tip_label"]
+    sigma_blur = float(B["dial_circle_blur_radius"]) if B["dial_circle_blur"] else 0.0  # float px
+    sigma_eff = math.hypot(sigma_blur, float(TL["base_blur"]))  # float px
+    w_star = tip_width_threshold(float(TL["contrast_frac"]), sigma_eff)  # float px
+    half_lat = chord_half * max(stretch_h, stretch_v) + 2  # float px, lateral reach
+    vis_cov = np.where(covered, np.float32(0), vis_s)  # (C, C) float32, weight minus cover
+    if w_star > 0:
+        hit = _width_tip(vis_cov, ideal_apex, u_s, (tip_dist + chord_dist) * v_n,
+                         half_lat, w_star)
+        if hit is not None:
+            t_end = 0.0 if vis_end is None else -(
+                (vis_end[0] - ideal_apex[0]) * u_s[0] + (vis_end[1] - ideal_apex[1]) * u_s[1])
+            apex = hit[0] if hit[1] >= t_end else vis_end
+    # distance (float px) behind the ideal apex along the stretched axis, and
+    # the visible width there (float px), measured like _width_tip does
+    t_lab = -((apex[0] - ideal_apex[0]) * u_s[0] + (apex[1] - ideal_apex[1]) * u_s[1])
+    tip_width = float(_width_profile(vis_cov, ideal_apex, u_s, np.array([t_lab]), half_lat)[0])
     # px between the ideal apex and the label, measured before the stretch (float)
     tip_recession = math.hypot((apex[0] - ideal_apex[0]) / stretch_h,
                                (apex[1] - ideal_apex[1]) / stretch_v)
@@ -1291,10 +1432,13 @@ def render_image(cfg, image_seed):
                       "tip_x": apex[0] + off_x, "tip_y": apex[1] + off_y,
                       "ideal_apex_x": ideal_apex[0] + off_x,
                       "ideal_apex_y": ideal_apex[1] + off_y,
-                      "tip_recession": tip_recession}
-    # ideal apex in image px (float) and label recession behind it (float px, pre-stretch)
+                      "tip_recession": tip_recession, "sigma_eff": sigma_eff,
+                      "w_star": w_star, "tip_width": tip_width}
+    # ideal apex in image px (float), label recession behind it (float px,
+    # pre-stretch), blur model sigma_eff / w* and the visible width at the label (float px)
     rec["cut_tip"].update(ideal_apex_x=ideal_apex[0] + off_x,
-                          ideal_apex_y=ideal_apex[1] + off_y, tip_recession=tip_recession)
+                          ideal_apex_y=ideal_apex[1] + off_y, tip_recession=tip_recession,
+                          sigma_eff=sigma_eff, w_star=w_star, tip_width=tip_width)
     return RenderResult(image=out,
                         tip_x=apex[0] + off_x, tip_y=apex[1] + off_y,
                         angle_deg=angle_deg, params=_plain(rec))

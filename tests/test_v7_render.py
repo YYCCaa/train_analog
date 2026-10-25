@@ -1047,13 +1047,22 @@ def _tip_overshoot(res):
 
 @pytest.mark.parametrize("case", list(_CUT_CASES))
 def test_tip_label_on_visible_end(case):
+    # blur off and no observer floor (tip_label.base_blur 0): sigma_eff = 0, w* = 0,
+    # so the label is the raw visible end; the default floor (sigma_0 = 1) only
+    # ever moves it back from there (width-based label, w* ~ 1.35 px)
     enabled, rr = _CUT_CASES[case]
-    cfg = _cfg(**_CLEAN_TIP, **{"cut_tip.enabled": enabled, "cut_tip.radius_range": rr})
+    pins = {**_CLEAN_TIP, "cut_tip.enabled": enabled, "cut_tip.radius_range": rr}  # dict
+    cfg = _cfg(**pins, **{"tip_label.base_blur": 0.0})
+    cfg_floor = _cfg(**pins)  # default base_blur 1.0
     over = []  # list[float] px, label overshoot per seed
     for seed in range(60):
-        o = _tip_overshoot(g7.render_image(cfg, seed))
+        res = g7.render_image(cfg, seed)
+        assert res.params["derived"]["w_star"] == 0.0
+        o = _tip_overshoot(res)
         assert o is not None, (case, seed)
         over.append(o)
+        o_floor = _tip_overshoot(g7.render_image(cfg_floor, seed))  # float px
+        assert o_floor <= o + 1e-6, (case, seed, o, o_floor)
     over = np.array(over)  # (60,) float64
     assert abs(over.mean()) <= 0.35, (case, over.mean(), over.max())
     assert over.max() <= 1.0, (case, over.mean(), over.max())
@@ -1097,3 +1106,152 @@ def test_visible_tip_square_on_axis():
     vis[12, :] = 0.5  # an even 50/50 ring does not count
     tx, ty = g7._visible_tip(vis, (15.0, 4.0), (0.0, -1.0), 20)
     assert tx == 15.0 and abs(ty - 13.0) < 0.05 + 1e-9
+
+
+# ── width-based tip label (blur aware) ────────────────────────────────────
+
+def _aa_wedge(apex, half_deg, size=96, ss=8):
+    """Area-coverage wedge (size, size) float32 in [0, 1] opening left (-x) from
+    apex (x, y), half-angle half_deg: each pixel (centre at integer coords) is
+    the fraction of its ss x ss sub-samples inside the ideal wedge (no edge ring)."""
+    off = (np.arange(ss) + 0.5) / ss - 0.5  # (ss,) float64, sub-sample offsets in a pixel
+    ys, xs = np.mgrid[:size, :size]  # (size, size) int pixel grids
+    sx = xs[..., None, None] + off[None, None, None, :]  # (size, size, 1, ss) float64
+    sy = ys[..., None, None] + off[None, None, :, None]  # (size, size, ss, 1) float64
+    dx, dy = apex[0] - sx, sy - apex[1]  # broadcast (size, size, ss, ss); + dx = behind the apex
+    inside = (dx >= 0) & (np.abs(dy) <= dx * math.tan(math.radians(half_deg)))
+    return inside.mean(axis=(2, 3)).astype(np.float32)
+
+
+@pytest.mark.parametrize("half_deg", [4.0, 6.0, 10.0])
+@pytest.mark.parametrize("sigma", [0.5, 1.0, 2.0, 3.0])
+def test_width_tip_wedge_closed_form(half_deg, sigma):
+    apex = (80.3, 48.0)  # (x, y) float px, clean wedge apex; the wedge points to +x
+    vis = _aa_wedge(apex, half_deg)  # (96, 96) float32
+    w_star = g7.tip_width_threshold(0.5, sigma)  # float px
+    assert abs(w_star - 2 * math.sqrt(2) * 0.4769362762044699 * sigma) < 1e-9
+    hit = g7._width_tip(vis, apex, (1.0, 0.0), 75.0, 20.0, w_star)
+    assert hit is not None
+    (tx, ty), t, w = hit  # label (x, y), recession t, width at the label (floats)
+    want = w_star / (2 * math.tan(math.radians(half_deg)))  # float px, closed form
+    assert abs(t - want) <= 0.5, (half_deg, sigma, t, want)
+    assert ty == apex[1] and abs(tx - (apex[0] - t)) < 1e-9
+    assert w >= w_star and abs(w - w_star) < 0.2, (w, w_star)
+
+
+def test_width_tip_none_and_cover():
+    vis = np.zeros((32, 32), dtype=np.float32)  # (32, 32) nothing visible
+    assert g7._width_tip(vis, (16.0, 16.0), (0.0, -1.0), 20.0, 8.0, 1.0) is None
+    vis[10:20, 14:19] = 1.0  # 5-px wide bar, top row y = 10
+    hit = g7._width_tip(vis, (16.0, 5.0), (0.0, -1.0), 20.0, 8.0, 4.0)
+    # bilinear: the width ramps 0 -> 5 between y = 9 and y = 10, reaching 4 at y = 9.8
+    assert hit is not None and abs(hit[1] - 4.8) <= 0.06, hit
+    cov = np.ones((32, 32), dtype=bool)  # everything covered
+    assert g7._width_tip(vis, (16.0, 5.0), (0.0, -1.0), 20.0, 8.0, 4.0, cover=cov) is None
+    # a bar thinner than w* never qualifies
+    assert g7._width_tip(vis, (16.0, 5.0), (0.0, -1.0), 20.0, 8.0, 6.0) is None
+
+
+def test_tip_threshold_math():
+    from scipy.special import erfinv
+    for c in (0.05, 0.3, 0.5, 0.77, 0.95):
+        assert abs(g7._erfinv(c) - float(erfinv(c))) < 1e-10, c
+    assert g7.tip_width_threshold(0.5, 0.0) == 0.0
+    assert abs(g7.tip_width_threshold(0.5, 1.0) - 1.3490) < 1e-3
+
+
+def _slender(res):
+    """Pointer wedge half-angle (float deg) recorded with a render."""
+    g = res.params["geometry"]
+    return math.degrees(math.atan2(g["chord_half"], g["tip_dist"] + g["chord_dist"]))
+
+
+# "section.key" -> value pins (dict): a slender pointer, chord_half = 0.1 x
+# dial radius, so the wedge half-angle is ~5-6 deg (the user's thin-tip case)
+_SLENDER = {"geometry.hub_ratio_range": [0.2, 0.2], "geometry.chord_ratio_range": [0.5, 0.5]}
+
+
+@pytest.mark.parametrize("pins", [{}, _SLENDER], ids=["default", "slender"])
+def test_tip_label_recedes_with_blur(pins):
+    radii = (1, 3, 6)  # int px, dial blur radii in increasing order
+    for seed in range(8):
+        recs = []  # list[float], tip_recession per radius
+        for r in radii:
+            res = g7.render_image(_cfg(**{**pins, "background.dial_circle_blur": True,
+                                          "background.dial_circle_blur_radius": r}), seed)
+            d = res.params["derived"]
+            assert abs(d["sigma_eff"] - math.hypot(r, 1.0)) < 1e-3
+            assert d["w_star"] == res.params["cut_tip"]["w_star"]
+            assert d["tip_width"] == res.params["cut_tip"]["tip_width"]
+            assert d["tip_width"] >= d["w_star"]
+            recs.append(d["tip_recession"])
+        # blurrier never moves the label forward along the axis
+        assert recs[0] <= recs[1] + 1e-6 and recs[1] <= recs[2] + 1e-6, (seed, recs)
+        if pins:  # a slender pointer moves strictly back, by ~ dw* / (2 tan a)
+            assert _slender(res) < 7.0, _slender(res)
+            assert recs[0] < recs[1] < recs[2], (seed, recs)
+            assert recs[2] - recs[0] > 15.0, (seed, recs)
+
+
+def _bilinear(img, x, y):
+    """Bilinear gray of img (H, W) at float arrays x, y (same shape) -> float64 array."""
+    h, w = img.shape
+    x = np.clip(x, 0, w - 1.001)
+    y = np.clip(y, 0, h - 1.001)
+    x0, y0 = np.floor(x).astype(int), np.floor(y).astype(int)  # int arrays, top-left pixel
+    fx, fy = x - x0, y - y0  # float arrays, fractional offsets
+    f = img.astype(np.float64)  # (H, W) float64 copy of the image
+    return ((f[y0, x0] * (1 - fx) + f[y0, x0 + 1] * fx) * (1 - fy)
+            + (f[y0 + 1, x0] * (1 - fx) + f[y0 + 1, x0 + 1] * fx) * fy)
+
+
+def _axis_contrast(res, ahead):
+    """Blurred pointer contrast (float) on the final image, judged the way a
+    person reads a tip: the darkest point of the perpendicular profile through
+    the point `ahead` px beyond the label along the (stretched) axis (within 3 px
+    of the axis), against the face beside it (median of the profile at 9..14 px
+    off the axis): (bg - min) / (bg - pointer gray)."""
+    g = res.params["geometry"]
+    ux, uy = _unit_dir(res.angle_deg)  # unit pointer direction, unstretched (floats)
+    vx, vy = ux * g["stretch_h"], uy * g["stretch_v"]
+    n = math.hypot(vx, vy)
+    vx, vy = vx / n, vy / n  # unit stretched axis (floats)
+    px, py = res.tip_x + ahead * vx, res.tip_y + ahead * vy  # profile centre (floats)
+    s = np.arange(-14.0, 14.0 + 1e-9, 0.25)  # (113,) float64 lateral offsets
+    prof = _bilinear(res.image, px - s * vy, py + s * vx)  # (113,) float64 gray profile
+    bg = float(np.median(prof[np.abs(s) >= 9]))  # float, face gray beside the pointer
+    return (bg - float(prof[np.abs(s) <= 3].min())) / (bg - res.params["pointer"]["gray"])
+
+
+# contrast tolerances (float) picked from the measured distributions, see
+# test_tip_label_visible_after_blur: at the label >= c - _AT_LABEL_TOL, and
+# 3 sigma_eff beyond it < c + _AHEAD_TOL
+# (40 seeds x radius 2 / 4, measured): slender at-label min 0.42 mean 0.48-0.50,
+# 3 sigma ahead max 0.40.  The default (wide, a ~ 22 deg) pointer is cut off
+# abruptly, wider than w*, so the label sits on the cut arc and the blurred
+# contrast there is the half-max of a sharp end, ~ 0.5 x erf(w / 2 sqrt(2)
+# sigma): min 0.35 mean 0.38-0.43, ahead max 0.03; it gets the wider tolerance
+_AT_LABEL_TOL = {"slender": 0.12, "default": 0.17}  # case -> float
+_AHEAD_TOL = 0.10
+
+
+@pytest.mark.parametrize("case", ["slender", "default"])
+def test_tip_label_visible_after_blur(case):
+    c = 0.5  # float, default tip_label.contrast_frac
+    at, ahead = [], []  # list[float], contrast at / 3 sigma_eff beyond the label
+    pins = _SLENDER if case == "slender" else {}  # dict, geometry pins
+    for radius in (2, 4):
+        cfg = _cfg(**{**_CLEAN_TIP, **pins, "background.dial_circle_blur": True,
+                      "background.dial_circle_blur_radius": radius,
+                      "cut_tip.enabled": True, "cut_tip.radius_range": [7, 10]})
+        for seed in range(40):
+            res = g7.render_image(cfg, seed)
+            se = res.params["derived"]["sigma_eff"]  # float px
+            a, b = _axis_contrast(res, 0.0), _axis_contrast(res, 3 * se)
+            at.append(a)
+            ahead.append(b)
+            assert a >= c - _AT_LABEL_TOL[case], (radius, seed, a)
+            assert b < c + _AHEAD_TOL, (radius, seed, b)
+    print("contrast at label: min %.3f mean %.3f max %.3f" % (min(at), np.mean(at), max(at)))
+    print("contrast 3 sigma ahead: min %.3f mean %.3f max %.3f"
+          % (min(ahead), np.mean(ahead), max(ahead)))

@@ -652,6 +652,48 @@ def test_cut_tip_toggle_moves_marker_to_visible_tip(page):
     assert max(shifts) >= 3.0, shifts  # the user does see the marker move
 
 
+def _centre_dists(marks):
+    """list[float]: marker distance to its tile's image centre, image px, per tile
+    (marks = _marker_geometry output)."""
+    out = []  # list[float]
+    for m in marks:
+        scale = m["iw"] / 256.0  # displayed px per image px (float)
+        mid_x, mid_y = m["ix"] + m["iw"] / 2.0, m["iy"] + m["iw"] / 2.0  # tile centre (CSS px)
+        out.append(math.hypot(m["cx"] - mid_x, m["cy"] - mid_y) / scale)
+    return out
+
+
+def test_blur_moves_tip_marker_back(page):
+    # a user turns the dial blur up and watches the tip markers retreat to where
+    # the blurred pointer is still visible; raising the observer blur floor
+    # (tip_label.base_blur) never pushes them forward again
+    page.get_by_test_id("overlay-toggle").check()
+    box = page.locator('[data-param="background.dial_circle_blur"] input[type=checkbox]')
+    if not box.is_checked():
+        old = _applied_seq(page)
+        box.check()
+        _wait_applied_after(page, old)
+    radius = _num(page, "background.dial_circle_blur_radius")  # number input (Locator)
+    radius.scroll_into_view_if_needed()
+    _commit_and_wait(page, radius, "1")
+    low = _marker_geometry(page)  # blur radius 1, list[dict] (9)
+    _commit_and_wait(page, radius, "12")
+    high = _marker_geometry(page)  # blur radius 12, list[dict] (9)
+    base = _num(page, "tip_label.base_blur")  # number input (Locator)
+    base.scroll_into_view_if_needed()
+    assert base.input_value() == "1"
+    _commit_and_wait(page, base, "4")
+    floor = _marker_geometry(page)  # radius 12 + base_blur 4, list[dict] (9)
+    assert [m["seed"] for m in low] == [m["seed"] for m in high] == [m["seed"] for m in floor]
+    assert all(m["cx"] is not None for m in low + high + floor)
+    moved = [math.hypot(a["cx"] - b["cx"], a["cy"] - b["cy"]) for a, b in zip(low, high)]
+    assert max(moved) > 2.0, moved  # the markers visibly move
+    d_low, d_high, d_floor = _centre_dists(low), _centre_dists(high), _centre_dists(floor)
+    assert sum(d_high) / 9 < sum(d_low) / 9 - 1.0, (d_low, d_high)
+    for a, b in zip(d_high, d_floor):
+        assert b <= a + 0.5, (d_high, d_floor)  # back further or put, never forward
+
+
 def test_reset_after_yaml_load_uses_builtin_default(page, tmp_path):
     saved = tmp_path / "default.yaml"  # downloaded default YAML (Path)
     text = _save_yaml(page, saved)

@@ -80,8 +80,14 @@ background:
   dial_circle_blur_radius: 3  # int scalar; that blur radius (px)
 
 cut_tip:
-  enabled: true  # bool; erase pointer pixels near the apex; tip label = visible end of the pointer on its axis, after the edge ring and the cut
+  enabled: true  # bool; erase pointer pixels near the apex; tip label = farthest point on the axis where the pointer is still wide enough to see after blur (edge ring, cut and rim aware)
   radius_range: [7, 10]  # [lo, hi] int; erased radius (px)
+
+tip_label:
+  # label = farthest axis point where the visible pointer width w >= w* = 2*sqrt(2)*erfinv(c)*sigma_eff,
+  # sigma_eff = sqrt(sigma_blur^2 + base_blur^2), sigma_blur = dial_circle_blur_radius when the blur is on
+  contrast_frac: 0.5  # float scalar; c, fraction of the pointer contrast the blurred tip must keep
+  base_blur: 1.0  # float scalar; observer blur sigma_0 (px) added in quadrature to the dial blur
 
 shadows:
   # physical model: out = in x (1 - d), d = max(s_p x pointer shape, s_r x rim shape)
