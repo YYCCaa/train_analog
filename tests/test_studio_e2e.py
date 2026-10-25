@@ -786,6 +786,27 @@ def test_shadow_strength_darkens_preview(page):
         assert f < n - 2.0, (n, f)
 
 
+def test_shadow_distance_slider_casts_farther(page, tmp_path):
+    # a person turns shadows on for every tile, then pushes the cast distance
+    # (fraction of the dial radius) up by typing into its range's max box
+    _commit_and_wait(page, _num(page, "shadows.prob"), "1")  # shadow on every tile
+    for key in ("shadows.distance_frac_range", "shadows.blur_min", "shadows.blur_per_px"):
+        assert page.locator(f'[data-param="{key}"]').count() == 1, key  # sliders rendered
+    near = _tile_srcs(page)  # tile srcs at the default [0.05, 0.3], list[str] (9)
+    _commit_and_wait(page, _num(page, "shadows.distance_frac_range", "hi"), "0.55")
+    _commit_and_wait(page, _num(page, "shadows.distance_frac_range", "lo"), "0.45")
+    far = _tile_srcs(page)  # tile srcs at [0.45, 0.55], list[str] (9)
+    assert all(a != b for a, b in zip(near, far)), "a tile did not change"
+    _, _, params, _ = _save_tile(page, 0, tmp_path / "far")  # dict, params.json
+    sh = params["sampled"]["shadows"]  # dict, the tile's shadow draws
+    radius = params["sampled"]["geometry"]["dial_radius"]  # int px
+    assert sh["active"] is True and "offset" not in sh, sh
+    assert 0.45 <= sh["distance_frac"] <= 0.55, sh
+    # distance_frac is recorded to 4 decimals: d is good to radius * 5e-5
+    assert abs(sh["distance"] - sh["distance_frac"] * radius) < 0.02, (sh, radius)
+    assert params["config"]["shadows"]["distance_frac_range"] == [0.45, 0.55]
+
+
 def test_glares_and_reflections_change_preview(page):
     # the shapes are font glyphs rendered in memory: no data files needed
     # a person makes the glares pure white first (value [255, 255]), then turns them on
