@@ -35,9 +35,9 @@ is shown in the UI if present; otherwise the shipped card is shown.
 | Action | How |
 |--------|-----|
 | Get an image | **Open image…** · drop a file on the stage · **Ctrl+V** · **Camera** → **Capture** · **Samples** |
-| Draw a square | press and drag on the image; side = max(\|dx\|, \|dy\|), growing into the drag's quadrant, clamped to the image |
+| Draw a square | press and drag on the image, like Paint. **Pixel-inclusive**: the pixel under the press and the pixel under the pointer are both inside the square, wherever in each pixel the mouse is. With dx, dy = pointer pixel − press pixel, side = max(\|dx\|, \|dy\|) + 1, growing into the drag's quadrant (right/down when dx/dy ≥ 0, else left/up), clamped to the image |
 | Move it | drag inside the square (cursor `move`) |
-| Resize it | drag one of the 4 corner handles; the opposite corner stays put and it stays square |
+| Resize it | drag one of the 4 corner handles; the opposite corner stays put and it stays square. Handles sit on pixel *edges*, so the pointer snaps to the nearest edge here (unlike drawing) |
 | Nudge / size | **← ↑ → ↓** 1 px (**Shift** 10 px) · **+ / −** grow / shrink by 2 px around the centre |
 | Predict | **Predict** button or **Enter**; with **Auto-predict on release** (default on) it runs after every drag, and 300 ms after the last key |
 | Cancel a drag | **Esc** puts the previous square back |
@@ -239,7 +239,10 @@ python -m pytest -q tip_webapp/tests      # from the directory containing tip_we
   `--model` guard.
 - `test_e2e_browser.py`: starts the real `python -m tip_webapp` in a subprocess (killed in teardown)
   and drives headless Chromium like a person. It opens a 900 × 700 noisy composite through the
-  file chooser, mouse-drags the dial's square, and checks the auto-predicted tip within 3 px. It
+  file chooser, mouse-drags the dial's square from the centre of its first pixel to the centre of its
+  last (Paint's pixel-inclusive rule), and checks the auto-predicted tip within 3 px. A separate test
+  zooms to >= 4x and draws down-right (press at 0.8 of a pixel, release at 0.2 of another) and up-left,
+  checking the exact pixel-inclusive squares. It
   presses ArrowRight ×3, drags inside to move, drags corner handles (stays square, anchored,
   clamped), and uses −/Enter. It wheel-zooms around the cursor, pans with Space+drag and
   middle-drag, resets with Fit, and cancels a drag with Esc. It toggles the heatmap and changes
