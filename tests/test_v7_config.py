@@ -211,6 +211,23 @@ def test_glyph_shape_keys_and_defaults():
             assert leaf.get("help"), (sec, key)
 
 
+def test_tip_label_keys_and_defaults():
+    # blur-aware tip label section: right after cut_tip, pinned defaults + bounds
+    cfg = vc.default_config()
+    schema = vc.load_schema()
+    assert cfg["tip_label"] == {"contrast_frac": 0.5, "base_blur": 1.0}
+    order = list(cfg)  # list[str], section order of the default YAML
+    assert order.index("tip_label") == order.index("cut_tip") + 1
+    assert list(schema).index("tip_label") == list(schema).index("cut_tip") + 1
+    bounds = {"contrast_frac": ("float", 0.05, 0.95, 0.01),
+              "base_blur": ("float", 0, 4, 0.1)}  # key -> (type, min, max, step)
+    for key, (typ, lo, hi, step) in bounds.items():
+        leaf = schema["tip_label"][key]  # dict, schema leaf
+        assert (leaf["type"], leaf["min"], leaf["max"], leaf["step"]) == (typ, lo, hi, step), key
+        assert leaf.get("help"), key
+    assert "wide enough to see after blur" in schema["cut_tip"]["enabled"]["help"]
+
+
 def test_range_types_match_draw_kind():
     schema = _leaves(vc.load_schema())
     cfg = _leaves(vc.default_config())
