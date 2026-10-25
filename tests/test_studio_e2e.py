@@ -885,6 +885,13 @@ def test_min_bg_contrast_avoids_shadowed_face(page, tmp_path):
     # a person turns shadows on for every tile, then asks for a pointer/face
     # contrast: the pointer gray is redrawn outside the bare AND shadowed face
     _commit_and_wait(page, _num(page, "shadows.prob"), "1")  # shadow on every tile
+    # and a flat pointer (no gradient, no noise): the gray draw then needs no
+    # headroom from 0 / 255, so the whole gray range is open to the contrast
+    # rule (with the default +-25 gradient and noise the headroom interval
+    # [51, 204] can lie inside the forbidden one -> the endpoint fallback)
+    _commit_and_wait(page, _num(page, "pointer.gradient_range", "lo"), "0")
+    _commit_and_wait(page, _num(page, "pointer.gradient_range", "hi"), "0")
+    _commit_and_wait(page, _num(page, "pointer.noise_amplitude"), "0")
     before_src = _tile_srcs(page)  # tile srcs with the contrast off, list[str] (9)
     _commit_and_wait(page, _num(page, "pointer.min_bg_contrast"), "60")
     after_src = _tile_srcs(page)  # tile srcs with the contrast on, list[str] (9)
@@ -900,6 +907,7 @@ def test_min_bg_contrast_avoids_shadowed_face(page, tmp_path):
         f_lo = bg * (1 - max(sh["s_p"], sh["s_r"])) - 60  # float
         assert abs(pt["forbidden_lo"] - f_lo) < 0.02, (pt, sh)
         assert pt["forbidden_hi"] == bg + 60, (pt, bg)
+        assert pt["headroom"] == 0 and pt["gray_fallback"] is False, pt
         assert pt["gray"] <= pt["forbidden_lo"] or pt["gray"] >= pt["forbidden_hi"], pt
 
 
@@ -922,3 +930,50 @@ def test_edge_max_frac_slider_changes_tiles(page):
     assert float(box.input_value()) == 0.0
     after = _tile_srcs(page)  # tile srcs at frac 0, list[str] (9)
     assert any(a != b for a, b in zip(before, after)), "no tile changed"
+
+
+# ── no clamping: capped exposure jitter, triangles always placed ────────────
+
+def _dial_disc_255_frac(png, sampled):
+    """Fraction (float) of dial-face pixels at 255 in a saved tile PNG (bytes).
+
+    The dial face = the stretched dial ellipse shrunk by the rim band and 2 px of
+    blur margin, about the dial centre (canvas centre + canvas offset), read
+    from the tile's params (sampled: dict, params.json "sampled")."""
+    import io
+    import numpy as np
+    from PIL import Image
+    im = np.asarray(Image.open(io.BytesIO(png)), dtype=np.uint8)  # (256, 256) uint8
+    d, g = sampled["derived"], sampled["geometry"]  # dicts
+    c = g["canvas_size"] // 2  # int px, canvas centre (pixel-centre coords)
+    cx, cy = c + d["canvas_offset_x"], c + d["canvas_offset_y"]  # int px, dial centre (image)
+    ys, xs = np.mgrid[:im.shape[0], :im.shape[1]]  # (256, 256) int grids
+    rx, ry = d["dial_rx"] - 5, d["dial_ry"] - 5  # float px, face radii (rim + blur margin)
+    face = ((xs - cx) / rx) ** 2 + ((ys - cy) / ry) ** 2 <= 1  # (256, 256) bool
+    return float((im[face] == 255).mean())
+
+
+def test_saved_tile_has_capped_jitter_and_placed_triangles(page, tmp_path):
+    # a person pushes the exposure up (brightness [1.5, 2.0]: hi first, so lo <= hi
+    # at every step) and asks for a bright pointer (gray [200, 255])
+    _commit_and_wait(page, _num(page, "jitter.brightness_range", "hi"), "2")
+    _commit_and_wait(page, _num(page, "jitter.brightness_range", "lo"), "1.5")
+    _commit_and_wait(page, _num(page, "pointer.gray_range", "lo"), "200")
+    assert _num(page, "pointer.gray_range", "hi").input_value() == "255"
+    for i in range(3):
+        _, png, params, _ = _save_tile(page, i, tmp_path / f"bright{i}")  # bytes, dict
+        jit = params["sampled"]["jitter"]  # dict, factors + caps
+        assert params["config"]["jitter"]["brightness_range"] == [1.5, 2.0]
+        assert jit["brightness_max"] is not None, jit
+        assert jit["brightness"] <= jit["brightness_max"] + 1e-4, jit
+        assert jit["capped"]["brightness"] is True, jit
+        # the dial face shows (almost) no blown-out white: <= 0.5% of its pixels
+        frac = _dial_disc_255_frac(png, params["sampled"])  # float
+        assert frac <= 0.005, (i, frac)
+    # then six triangles on every image: every one lands on the dial
+    _commit_and_wait(page, _num(page, "tri_artifacts.count_range", "lo"), "6")
+    assert _num(page, "tri_artifacts.count_range", "hi").input_value() == "6"
+    _, _, params, _ = _save_tile(page, 0, tmp_path / "tris")  # dict, params.json
+    tri = params["sampled"]["tri_artifacts"]  # dict
+    assert tri["n"] == 6 and len(tri["items"]) == 6, tri
+    assert all(it["placed"] is True and it["pixels"] >= 1 for it in tri["items"]), tri

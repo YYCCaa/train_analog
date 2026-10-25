@@ -38,10 +38,12 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
   │ 7  mounting hole, pointer body (gradient + noise), pointer edge, │
   │    cut-tip (restore pre-pointer pixels near the apex)            │
   │ 8  stretch h/v (canvas + overlay + d + apex)                     │
-  │ 9  brightness -> contrast -> sharpness jitter                    │
+  │ 9  brightness -> contrast -> sharpness jitter, each factor       │
+  │    capped per image so no surviving pixel saturates              │
   │ 10 outer annulus fill, rim band                                  │
   │ 11 hierarchical (block + pixel) noise inside outer ring          │
-  │ 12 triangle artifacts (avoid pointer + hole)                     │
+  │ 12 triangle artifacts: centres drawn from B minus pointer + hole │
+  │    (every triangle placed)                                       │
   │ 13 black outside outer ring; erase overlay over pointer;         │
   │    composite overlay; apply shadow out = round(in * (1 - d))     │
   │    (d zeroed outside the dial face, on the rim, pointer, hole)   │
@@ -132,6 +134,59 @@ drawn earlier, so no draw order changes):
 (bg_gray_range draw; jitter and noise make this approximate, as for the bare
 rule).  params["pointer"] records forbidden_lo / forbidden_hi.
 
+Pointer palette: no value is clamped at 0 / 255.  The gray draw keeps headroom
+for the lengthwise gradient and the noise, and the variation is scaled down
+continuously when even that is not enough (gray_range near 0 / 255):
+
+    H   = max|gradient_range| * along_max + noise_amplitude   (pointer_headroom;
+          along_max = (max(tip, hub) + 2) / tip, this image's geometry)
+    I   = [lo, hi] ∩ [ceil H, floor(255 - H)]   (empty: I = [lo, hi])
+    g   = one randint over I minus the forbidden interval      (_pick_pointer_gray)
+
+    0 ─── H ───[════════ I: g lands here ════════]─── H ─── 255
+                 g - H_img ◄── body ──► g + H_img
+
+    body px = g + rint(k (grad_shift + noise)),  k = min(1, min(g, 255 - g) / H_img)
+    edge px = v + k_e noise,  v = bg + blend (edge - bg),  k_e = min(1, min(v, 255 - v) / amp)
+
+H_img is this image's max |grad_shift| + noise_amplitude.  k = k_e = 1 leaves
+the old sums bit for bit; the noise arrays are drawn as before (same size,
+dtype) and only multiplied.  params["pointer"] records headroom (H),
+headroom_ok (I is the restricted interval) and amp_scale (k).
+
+Exposure jitter (step 9): PIL's enhance is out = trunc(D + f (img - D)),
+saturated at 0 / 255, with D = 0 (brightness), the int-rounded mean of the
+whole canvas (contrast) or img.filter(SMOOTH) (sharpness).  Before each
+enhance, on the CURRENT canvas, over the pixels that survive to the output
+(inside the dial ellipse, off the rim band):
+
+    f_max = the largest f with D + f (img - D) in [-0.5, 255.5]  (> 1 always;
+            f <= 1 blends between img and D, so only the upper side can saturate)
+
+         lo ═══════════════ hi                 f = U(lo, hi)            f_max >= hi
+         lo ══════ f_max ┄┄ hi                 f = U(lo, f_max)         lo <= f_max < hi
+    f_max lo/hi ══ f_max    lo ┄┄┄┄┄ hi        f = U(f_max lo/hi, f_max) f_max < lo
+
+Each is one random() (random.uniform), so the jitter stream's draws are
+unchanged.  params["jitter"] records the factors, <kind>_max (None when
+unbounded) and capped (dict of bool per kind: the range was shortened).
+
+Triangle artifacts (step 12): the centre is ONE draw from the valid set
+V = inside B & off the (stretched) pointer and hole, row-major flat index
+randrange(|V|); the triangle (size, 3 vertices as before) is translated so its
+centroid sits on the centre, which is always inside it:
+
+        V (inside B, off pointer)        centre c ∈ V, centroid G := c
+       ┌──────────────────────┐               ●
+       │  ░░░░░  ▲            │              ╱ ╲
+       │ ░░░░░░ ╱█╲ pointer   │             ╱ c ╲    painted = triangle ∩ V
+       │  ░░░░ ╱███╲          │            ●──────●  (empty, sub-pixel: c alone)
+       └──────────────────────┘
+
+so every triangle is placed (items[i].placed True, items[i].pixels >= 1).  V
+depends on where B sits, so triangles do not follow the displacement as a pure
+translation.  The per-triangle numpy noise is drawn for every triangle.
+
 Reflections and glares sit on the cover glass.  Each item takes a random
 ASCII glyph (GLYPHS = A-Z a-z 0-9) in a random available font (GLYPH_FONTS,
 rendered in memory and cached per (font, char); no data files), gives it a
@@ -178,12 +233,15 @@ bool, str, list); positions are image px unless named otherwise.
     pointer        gray, hole_gray, edge_gray, gradient, edge_thickness,
                    forbidden_lo, forbidden_hi (pointer gray interval it avoided;
                    only enforced when min_bg_contrast > 0), gray_fallback (bool:
-                   the allowed set was empty, farthest endpoint used)
+                   the allowed set was empty, farthest endpoint used), headroom
+                   (H), headroom_ok (bool), amp_scale (k)
     cut_tip        enabled, cut_r, ideal_apex_x / _y, tip_recession
-    jitter         brightness, contrast, sharpness
+    jitter         brightness, contrast, sharpness, brightness_max,
+                   contrast_max, sharpness_max (cap, None = unbounded),
+                   capped {brightness, contrast, sharpness} (bool)
     hier_noise     block_min, block_max, block_std (of the block offsets)
     tri_artifacts  enabled, count_drawn, n, items[n] {gray, center_x,
-                   center_y, size, placed}
+                   center_y, size, placed (always True), pixels}
     reflections    active, count_drawn, n, items[n] {char, font, size,
                    rotation, aspect, shear, P, px, py, warp_strength, g,
                    center_x, center_y, darken}
