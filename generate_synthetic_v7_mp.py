@@ -160,14 +160,18 @@ drawn strengths; instead pointer.min_bg_contrast (c) restrains the POINTER gray,
 which is drawn after the bg gray and the shadow strengths (separate streams,
 drawn earlier, so no draw order changes):
 
-    face levels the pointer may sit on:  [bg (1 - s_max), bg],  s_max = max(s_p, s_r)
-                                                                (0 without a shadow)
-    0 ...... f_lo = bg (1 - s_max) - c ][ forbidden ][ f_hi = bg + c ...... 255
-     allowed: |g - face| >= c for every face             allowed
-    ptr_gray = one randint over [lo, hi] minus (f_lo, f_hi)  (_pick_pointer_gray)
+    the two face levels the pointer sits on: the bare face bg and the darkest
+    shadowed face sh = bg (1 - s_max),  s_max = max(s_p, s_r)  (0 without a
+    shadow: sh == bg, the windows coincide)
+
+    0 ...[sh-c ██ sh+c]..... allowed .....[bg-c ██ bg+c]... 255   total <= 4c
+     darker than both      between the faces             lighter than both
+    allowed: |g - sh| >= c and |g - bg| >= c (window ends allowed; overlapping
+    windows merge into one)
+    ptr_gray = one randint over [lo, hi] minus both windows  (_pick_pointer_gray)
 
 (bg_gray_range draw; jitter and noise make this approximate, as for the bare
-rule).  params["pointer"] records forbidden_lo / forbidden_hi.
+rule).  params["pointer"]["forbidden"] records the merged windows.
 
 Pointer palette: no value is clamped at 0 / 255.  The gray draw keeps headroom
 for the lengthwise gradient and the noise, and the variation is scaled down
@@ -176,7 +180,7 @@ continuously when even that is not enough (gray_range near 0 / 255):
     H   = max|gradient_range| * along_max + noise_amplitude   (pointer_headroom;
           along_max = (max(tip, hub) + 2) / tip, this image's geometry)
     I   = [lo, hi] ∩ [ceil H, floor(255 - H)]   (empty: I = [lo, hi])
-    g   = one randint over I minus the forbidden interval      (_pick_pointer_gray)
+    g   = one randint over I minus the forbidden windows       (_pick_pointer_gray)
 
     0 ─── H ───[════════ I: g lands here ════════]─── H ─── 255
                  g - H_img ◄── body ──► g + H_img
@@ -268,8 +272,9 @@ bool, str, list); positions are image px unless named otherwise.
                    = distance_frac * dial_radius), blur_triangle (sigma px),
                    blur_hub_far (sigma px of the last hub slice)
     pointer        gray, hole_gray, edge_gray, gradient, edge_thickness,
-                   forbidden_lo, forbidden_hi (pointer gray interval it avoided;
-                   only enforced when min_bg_contrast > 0), gray_fallback (bool:
+                   forbidden (list of [lo, hi] float pairs: the merged open
+                   gray windows sh +- c / bg +- c it avoided; [] when
+                   min_bg_contrast = 0), gray_fallback (bool:
                    the allowed set was empty, farthest endpoint used), headroom
                    (H), headroom_ok (bool), amp_scale (k)
     cut_tip        enabled, cut_r, ideal_apex_x / _y, tip_recession
@@ -943,18 +948,51 @@ def _draw_pointer_edge(img, mask, edge_gray, bg_arr, thickness, noise_amp, nrng,
     return Image.fromarray(arr), bg_painted
 
 
-def pointer_forbidden_interval(bg_gray, min_contrast, s_max=0.0):
-    """Gray interval (float, float) a pointer must stay out of: [f_lo, f_hi] =
-    [bg_gray (1 - s_max) - c, bg_gray + c].
+def pointer_forbidden_windows(bg_gray, min_contrast, s_max=0.0):
+    """Merged gray windows (list of [lo, hi] float pairs, ascending) a pointer
+    must stay out of: the bare face bg and the darkest shadowed face
+    sh = bg (1 - s_max), each +- c, open intervals ([] when c <= 0):
+
+        ───[sh-c ██ sh+c]──── allowed ────[bg-c ██ bg+c]───   total width <= 4c
 
     bg_gray      : int, palette bg_gray_range draw (bare face level)
     min_contrast : int >= 0, c = pointer.min_bg_contrast
-    s_max        : float 0-1, max(s_p, s_r) when the image has a shadow, else 0;
-                   bg_gray (1 - s_max) is the darkest shadowed face (masks <= 1)
-    A gray g keeps |g - face| >= c for every face level in
-    [bg (1 - s_max), bg] iff g <= f_lo or g >= f_hi (endpoints allowed).
+    s_max        : float 0-1, max(s_p, s_r) when the image has a shadow, else 0
+                   (sh == bg: the two windows coincide, the bare |g - bg| >= c rule)
+    A gray g is allowed iff |g - sh| >= c and |g - bg| >= c (window ends
+    allowed).  Overlapping windows (sh + c > bg - c) merge into one; windows
+    that only touch stay two (the shared end is allowed).  A gray between the
+    faces (sh + c <= g <= bg - c) contrasts with both.
     """
-    return bg_gray * (1.0 - s_max) - min_contrast, float(bg_gray + min_contrast)
+    c = float(min_contrast)  # float, contrast c
+    if c <= 0:
+        return []
+    sh = bg_gray * (1.0 - s_max)  # float, darkest shadowed face level
+    bg = float(bg_gray)  # float, bare face level
+    if sh + c > bg - c:  # overlap (always when s_max = 0): one window
+        return [[sh - c, bg + c]]
+    return [[sh - c, sh + c], [bg - c, bg + c]]
+
+
+def _pointer_allowed_pieces(i_lo, i_hi, windows):
+    """Allowed int pieces (list of (a, b) int pairs, inclusive, ascending, each
+    a <= b) of I = [i_lo, i_hi] minus the open float windows (list of [lo, hi]
+    floats, ascending, disjoint; pointer_forbidden_windows).  A window
+    (w_lo, w_hi) forbids the ints floor(w_lo) + 1 .. ceil(w_hi) - 1, so g with
+    |g - level| >= c is allowed exactly (1e-9 tolerance for float rounding):
+
+        i_lo ── piece ──]( w0 )[── piece ──]( w1 )[── piece ── i_hi   (<= 3 pieces)
+    """
+    pieces = []  # list of (int, int), allowed pieces so far
+    a = i_lo  # int, bottom of the next candidate piece
+    for w_lo, w_hi in windows:
+        top = min(i_hi, int(math.floor(w_lo + 1e-9)))  # int, last allowed int below the window
+        if a <= top:
+            pieces.append((a, top))
+        a = max(a, int(math.ceil(w_hi - 1e-9)))  # int, first allowed int above the window
+    if a <= i_hi:
+        pieces.append((a, i_hi))
+    return pieces
 
 
 def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0, info=None,
@@ -979,25 +1017,27 @@ def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0, info=None,
         (I empty, e.g. gray_range [255, 255]: I = [lo, hi]; the amplitude
          scale in _pointer_variation then keeps the body in range)
 
-    Everything below (forbidden interval, index map, fallback) works on I.
+    Everything below (forbidden windows, index map, fallback) works on I.
 
     The pointer gray is drawn after the bg and the shadow strengths (they live
-    on the palette / shadows streams, drawn earlier).  The faces it may sit on
-    span [bg (1 - s_max), bg], so the forbidden interval is
-    (f_lo, f_hi) = (bg (1 - s_max) - c, bg + c) (pointer_forbidden_interval)
-    and the allowed set is at most two contiguous intervals, [lo, floor(f_lo)]
-    and [bg + c, hi].  An index drawn with randint(0, n_allowed - 1) is mapped
-    onto them in ascending order:
+    on the palette / shadows streams, drawn earlier).  It must contrast with
+    the two face levels it can sit on, the darkest shadowed face
+    sh = bg (1 - s_max) and the bare face bg: two open windows of +- c
+    (pointer_forbidden_windows; merged when they overlap).  The allowed set
+    is I minus the windows, up to three contiguous int pieces
+    (_pointer_allowed_pieces).  ONE index drawn with randint(0, n_allowed - 1)
+    is mapped onto them in ascending order:
 
-        lo ...... floor(f_lo) | forbidden: bare + shadowed face +- c | bg+c ...... hi
-        [ index 0 .. n_low-1 ]                                         [ n_low .. n-1 ]
+        I_lo ... sh-c ](  sh +- c  )[ sh+c ... bg-c ](  bg +- c  )[ bg+c ... I_hi
+        [ idx 0 .. n0-1 ]            [ n0 .. n0+n1-1 ]            [ .. n - 1   ]
+          darker than both            between the faces            lighter than both
 
     With c = 0 the set is all of I = [I_lo, I_hi] (whatever s_max) and
     randint(0, n-1) + I_lo equals randint(I_lo, I_hi) bit for bit (both are
-    I_lo + randbelow(n)).  With s_max = 0 this is the plain |g - bg| >= c rule.
-    If the set is empty, one randint(I_lo, I_hi) draw is still consumed and
-    the endpoint of I farthest from the forbidden interval is returned (the
-    lower one on a tie).
+    I_lo + randbelow(n)).  With s_max = 0 the windows coincide: the plain
+    |g - bg| >= c rule.  If the set is empty, one randint(I_lo, I_hi) draw is
+    still consumed and the endpoint of I farthest from its NEAREST face level
+    (min(|e - sh|, |e - bg|)) is returned; on a tie the lower endpoint.
     """
     # base interval I = [lo, hi] ∩ [ceil(H), floor(255 - H)] when non-empty
     # (headroom for the gradient + noise), else [lo, hi]; ints
@@ -1009,22 +1049,23 @@ def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0, info=None,
     if info is not None:
         info["headroom_ok"] = headroom_ok
     lo, hi = i_lo, i_hi  # everything below works on I
-    f_lo, f_hi = pointer_forbidden_interval(bg_gray, min_contrast, s_max)  # float bounds
-    low_hi = min(hi, int(math.floor(f_lo + 1e-9)))  # int, top of the lower interval
-    high_lo = max(lo, bg_gray + min_contrast)  # int, bottom of the upper interval
-    if min_contrast <= 0:  # whole range allowed (c = 0 must not split at bg)
-        low_hi, high_lo = hi, hi + 1
-    n_low = max(0, low_hi - lo + 1)  # int, size of [lo, low_hi]
-    n_high = max(0, hi - high_lo + 1)  # int, size of [high_lo, hi]
+    windows = pointer_forbidden_windows(bg_gray, min_contrast, s_max)  # list of [lo, hi] floats
+    pieces = _pointer_allowed_pieces(lo, hi, windows)  # list of (a, b) ints, allowed
+    n = sum(b - a + 1 for a, b in pieces)  # int, allowed set size
     if info is not None:
-        info["fallback"] = n_low + n_high == 0
-    if n_low + n_high == 0:
+        info["fallback"] = n == 0
+    if n == 0:
         rng.randint(lo, hi)  # keep the stream's draw count fixed
-        # distance of each endpoint of I from the forbidden interval (float): hi
-        # above f_hi, lo below f_lo; c cancels, so compare hi - bg with bg (1 - s) - lo
-        return hi if hi - bg_gray > bg_gray * (1.0 - s_max) - lo else lo
-    idx = rng.randint(0, n_low + n_high - 1)  # int, index into the allowed set
-    return lo + idx if idx < n_low else high_lo + (idx - n_low)
+        sh = bg_gray * (1.0 - s_max)  # float, darkest shadowed face level
+        d_lo = min(abs(lo - sh), abs(lo - bg_gray))  # float, lo to its nearest face
+        d_hi = min(abs(hi - sh), abs(hi - bg_gray))  # float, hi to its nearest face
+        return hi if d_hi > d_lo else lo
+    idx = rng.randint(0, n - 1)  # int, index into the allowed set
+    for a, b in pieces:  # ascending: map idx onto the pieces in order
+        if idx <= b - a:
+            return a + idx
+        idx -= b - a + 1
+    raise AssertionError("unreachable: idx < n")
 
 
 # ── config-level pointer gray warnings (studio + CLI; no rendering) ─────
@@ -1100,10 +1141,18 @@ def pointer_fallback_share(cfg, headroom=None):
     no shadow with probability 1 - shadows.prob (s_max = 0); with a shadow
     s_max follows _max_strength_cdf.  I is built from `headroom` (float;
     default pointer_headroom_bound, the worst case; an image with a smaller H
-    can have an I one level wider, see pointer_gray_warnings).  The upper part
-    [bg + c, I_hi] does not depend on s; the lower part [I_lo, floor(f_lo)] is
-    non-empty iff bg (1 - s_max) - c >= I_lo, i.e. s_max <= s* =
-    1 - (I_lo + c) / bg, so P(empty | bg, shadow) = 1 - P(s_max <= s*).
+    can have an I one level wider, see pointer_gray_warnings).
+
+        I_lo ......... A ......... a_hi ](  bg +- c  )[ bg+c .. I_hi
+               ](  sh +- c  )[   sh = bg (1 - s) slides left as s grows
+
+    The upper part [bg + c, I_hi] does not depend on s; when it is non-empty
+    the set is never empty.  Else the allowed grays all lie in
+    A = [I_lo, a_hi], a_hi = min(I_hi, floor(bg - c)).  A empty: always empty.
+    A non-empty: empty iff the shadowed window covers all of A, i.e.
+    sh - c < I_lo AND sh + c > a_hi, i.e. s* < s_max < s2 with
+    s* = 1 - (I_lo + c) / bg and s2 = 1 - (a_hi - c) / bg (s = 0 never: A's top
+    is >= c below bg), so P(empty | bg, shadow) = P(s_max < s2) - P(s_max <= s*).
     """
     PT, S = cfg["pointer"], cfg["shadows"]  # dict sections
     c = int(PT["min_bg_contrast"])  # int, contrast c
@@ -1123,14 +1172,18 @@ def pointer_fallback_share(cfg, headroom=None):
     for bg in range(b_lo, b_hi + 1):  # int, every bg gray
         if max(i_lo, bg + c) <= i_hi:  # upper part non-empty: never empty
             continue
-        # without a shadow (s = 0): empty iff floor(bg - c + 1e-9) < I_lo (float 0 / 1)
-        e0 = 0.0 if math.floor(bg - c + 1e-9) >= i_lo else 1.0
-        if bg <= 0:
-            e1 = e0  # f_lo = -c whatever s
-        else:
-            s_star = 1.0 - (i_lo + c - 1e-9) / bg  # float, largest s with a lower part
-            e1 = 1.0 - _max_strength_cdf(s_star, s_lo, s_hi, j)  # float, P(empty | shadow)
-        total += (1.0 - p) * e0 + p * e1
+        a_hi = min(i_hi, int(math.floor(bg - c + 1e-9)))  # int, top of A (below the bare window)
+        if a_hi < i_lo:  # A empty: no allowed gray whatever the shadow
+            total += 1.0
+            continue
+        # A non-empty (so bg >= I_lo + c > 0): without a shadow never empty; with
+        # one, empty for s* < s_max < s2 (same 1e-9 tolerance as the pieces)
+        s_star = 1.0 - (i_lo + c - 1e-9) / bg  # float, largest s keeping I_lo allowed
+        s_two = 1.0 - (a_hi - c + 1e-9) / bg  # float, smallest s freeing a_hi
+        if s_two > s_star:
+            e1 = (_max_strength_cdf(s_two - 1e-12, s_lo, s_hi, j)
+                  - _max_strength_cdf(s_star, s_lo, s_hi, j))  # float, P(empty | shadow)
+            total += p * e1
     return total / (b_hi - b_lo + 1)
 
 
@@ -1139,12 +1192,12 @@ def pointer_gray_warnings(cfg):
     pointer gray ranges are too tight; [] when fine.  Deterministic, no rendering.
 
     Picture (gray axis, H = pointer_headroom_bound, the worst case over the
-    geometry ranges; F = forbidden interval of one image, c = min_bg_contrast):
+    geometry ranges; c = min_bg_contrast; sh = bg (1 - s_max) the darkest
+    shadowed face of one image, both windows open, pointer_forbidden_windows):
 
         0 ── H ──[════════ I = [lo, hi] ∩ [ceil H, floor(255 - H)] ════════]── H ── 255
-                        F = ( bg (1 - s_max) - c ,  bg + c )
-                 [ I_lo .. floor(F_lo) ] ░░░░░░ F ░░░░░░ [ bg + c .. I_hi ]
-                   allowed (lower)        forbidden        allowed (upper)
+                 [ I_lo .. ](░ sh +- c ░)[ .. between .. ](░ bg +- c ░)[ .. I_hi ]
+                  darker        window       the faces       window      lighter
 
       (a) I empty               -> grays from all of [lo, hi], texture scaled down
       (b) 0 < |I| < 32 levels   -> narrow, few distinct pointer grays
@@ -1885,7 +1938,7 @@ def render_image(cfg, image_seed):
     # darkest shadowed face bg_gray (1 - max(s_p, s_r)); both drawn already
     # (palette / shadows streams), so the pointer stream's order is unchanged
     s_max = max(s_p, s_r) if has_shadow else 0.0  # float 0-1, strongest shadow
-    f_lo, f_hi = pointer_forbidden_interval(bg_gray, PT["min_bg_contrast"], s_max)  # float bounds
+    forbidden = pointer_forbidden_windows(bg_gray, PT["min_bg_contrast"], s_max)  # list of [lo, hi] floats
     # headroom H (float, gray levels) the body gray keeps from 0 / 255: the
     # largest |gradient| the config allows times this image's largest
     # |along_norm| (geometry, drawn already) + the noise amplitude
@@ -1903,7 +1956,7 @@ def render_image(cfg, image_seed):
         shade = shadow_darkening(m_p, m_r, s_p, s_r)  # (C, C) float32
     rec["pointer"] = {"gray": ptr_gray, "hole_gray": hole_gray, "edge_gray": edge_gray,
                       "gradient": grad_strength, "edge_thickness": edge_thickness,
-                      "forbidden_lo": f_lo, "forbidden_hi": f_hi,
+                      "forbidden": forbidden,
                       "gray_fallback": gray_info["fallback"],
                       "headroom": headroom, "headroom_ok": gray_info["headroom_ok"]}
 
