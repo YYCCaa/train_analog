@@ -1,0 +1,11 @@
+{
+  "file": "tipnet_v9.tflite",
+  "name": "TipNet v9 (float32 TFLite)",
+  "source": "train_v9_tip.py run v9_tipnet_a (best p99, epoch 50) -> model.onnx -> onnx2tf float32",
+  "train_data": "sv9_150k: 150,000 synthetic 256x256 gray dials from v9_config.yaml (seed 0)",
+  "params": 100001,
+  "input": {"name": "input", "shape": [1, 256, 256, 1], "dtype": "float32", "range": "gray / 255 in [0, 1]", "layout": "NHWC"},
+  "output": {"shape": [1, 128, 128, 1], "dtype": "float32", "meaning": "tip logits; softmax over all 128x128 cells = tip probability", "layout": "NHWC"},
+  "decode": "argmax cell (iy, ix) -> softmax of the 5x5 logits around it (cells outside the map ignored) -> centroid (u, v) in heatmap px -> image x = 2u + 0.5, y = 2v + 0.5 (pixel i centred at coordinate i)",
+  "validation": {"split": "random_split seed 42, 15% = 22,500 images", "mean_px": 0.578, "median_px": 0.415, "p95_px": 1.547, "p99_px": 3.073, "max_px": 140.1, "n_over_7px": 13}
+}

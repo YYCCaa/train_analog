@@ -35,3 +35,7 @@ Desktop.ini
 studio/frontend/node_modules/
 studio/frontend/dist/
 tmp_smoke/
+
+# tip_webapp ships its model and sample dials
+!tip_webapp/model/*.tflite
+!tip_webapp/samples/*.png

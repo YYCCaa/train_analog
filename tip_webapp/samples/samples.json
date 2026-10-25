@@ -1,0 +1,59 @@
+{
+  "coords": "image px, pixel i centred at coordinate i (256x256 images)",
+  "samples": [
+    {
+      "file": "v9_val_1.png",
+      "source": "dial_63970.png",
+      "label": {
+        "x": 203.71,
+        "y": 115.26
+      },
+      "note": "random val-split image"
+    },
+    {
+      "file": "v9_val_2.png",
+      "source": "dial_87856.png",
+      "label": {
+        "x": 102.66,
+        "y": 209.8
+      },
+      "note": "random val-split image"
+    },
+    {
+      "file": "v9_val_3.png",
+      "source": "dial_43486.png",
+      "label": {
+        "x": 176.57,
+        "y": 176.38
+      },
+      "note": "random val-split image"
+    },
+    {
+      "file": "v9_val_4.png",
+      "source": "dial_27203.png",
+      "label": {
+        "x": 96.98,
+        "y": 53.73
+      },
+      "note": "random val-split image"
+    },
+    {
+      "file": "v9_val_5.png",
+      "source": "dial_100763.png",
+      "label": {
+        "x": 142.0,
+        "y": 192.59
+      },
+      "note": "random val-split image"
+    },
+    {
+      "file": "v9_val_6.png",
+      "source": "dial_77439.png",
+      "label": {
+        "x": 70.96,
+        "y": 180.94
+      },
+      "note": "hardest val image: model picks a look-alike (140 px off)"
+    }
+  ]
+}
