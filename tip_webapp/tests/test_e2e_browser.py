@@ -141,6 +141,15 @@ def _edge_to_screen(v: dict, ex: float, ey: float) -> tuple[float, float]:
     return v["x"] + ex * v["scale"] + v["ox"], v["y"] + ey * v["scale"] + v["oy"]
 
 
+def _pixel_to_screen(v: dict, X: int, Y: int, fx: float = 0.5, fy: float = 0.5) -> tuple[float, float]:
+    """Image pixel (X, Y) -> page px at fraction (fx, fy) across that pixel; default (0.5, 0.5) = its centre.
+
+    Drawing a new square is pixel-inclusive (the pixel under the pointer is inside), so a person aims at
+    the middle of the first and last pixel they want, not at the edges between pixels.
+    """
+    return _edge_to_screen(v, X + fx, Y + fy)
+
+
 def _drag(page, a: tuple[float, float], b: tuple[float, float], steps: int = 12) -> None:
     """Press at a, move to b in small steps, release: a human mouse drag."""
     page.mouse.move(*a)
@@ -222,9 +231,9 @@ def test_upload_select_predict_nudge_move_resize(page, composite_png):
     v = _view(page)
     assert v["scale"] >= 1.0, f"viewport too small: scale {v['scale']}"
 
-    # 2. Drag a square from the pasted dial's top-left corner to its bottom-right corner.
+    # 2. Drag a square from the centre of the pasted dial's first pixel to the centre of its last pixel.
     x, y = OFFSET
-    _drag(page, _edge_to_screen(v, x, y), _edge_to_screen(v, x + 256, y + 256))
+    _drag(page, _pixel_to_screen(v, x, y), _pixel_to_screen(v, x + 255, y + 255))
     assert _view(page)["sel"] == (x, y, 256)
     expect(page.get_by_test_id("status-selection")).to_have_text(f"{x},{y} · 256×256 px", timeout=WAIT_MS)
     d = _wait_prediction(page, x, y, 256)
@@ -321,15 +330,55 @@ def test_zoom_pan_fit_and_escape(page):
 
     # Esc during a drag puts the previous square back and does not predict.
     v = _view(page)
-    page.mouse.move(*_edge_to_screen(v, 40, 40))
+    page.mouse.move(*_pixel_to_screen(v, 40, 40))
     page.mouse.down()
-    page.mouse.move(*_edge_to_screen(v, 120, 120), steps=6)
+    page.mouse.move(*_pixel_to_screen(v, 119, 119), steps=6)  # pixels 40..119 -> an 80 px square
     assert _view(page)["sel"] == (40, 40, 80)
     page.keyboard.press("Escape")
     page.mouse.up()
     assert _view(page)["sel"] == (0, 0, 256)
     page.wait_for_timeout(400)
     assert page.get_by_test_id("readout").get_attribute("data-seq") == d0["seq"]
+
+
+def test_draw_square_is_pixel_inclusive_like_paint(page):
+    """Paint rule for a NEW square: the pixel under the press and the pixel under the pointer are both inside it,
+    wherever in each pixel the mouse is. Needs a zoomed-in view so one pixel is several screen px wide."""
+    _open_sample(page, 1)
+    stage = page.get_by_test_id("stage")
+
+    # Wheel-zoom (around the stage centre) until a pixel is >= 4 screen px wide.
+    box = stage.bounding_box(timeout=WAIT_MS)
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    for _ in range(12):
+        if _view(page)["scale"] >= 4:
+            break
+        page.mouse.wheel(0, -200)
+        page.wait_for_timeout(100)
+    v = _view(page)
+    assert v["scale"] >= 4, f"could not zoom in: scale {v['scale']}"
+
+    # (vx0, vy0, vx1, vy1): the range of whole pixel indices fully visible in the stage (image px).
+    vx0 = max(0, math.ceil(-v["ox"] / v["scale"]))
+    vy0 = max(0, math.ceil(-v["oy"] / v["scale"]))
+    vx1 = min(v["w"], math.floor((box["width"] - v["ox"]) / v["scale"]))
+    vy1 = min(v["h"], math.floor((box["height"] - v["oy"]) / v["scale"]))
+    ax, ay = vx0 + 8, vy0 + 8  # first draw: press pixel
+    bx, by = ax + 60, ay + 40  # second draw: press pixel, right of / below the first square
+    assert bx + 3 < vx1 and by + 3 < vy1, f"visible pixels {(vx0, vy0, vx1, vy1)} too small for the drags"
+
+    # 1. Down-right: press 80 % across pixel (ax, ay), release 20 % across pixel (ax + 40, ay + 25).
+    #    Both pixels are inside, so the square is 41 wide (it would be 39 if the pointer snapped to the nearest edge).
+    _drag(page, _pixel_to_screen(v, ax, ay, 0.8, 0.8), _pixel_to_screen(v, ax + 40, ay + 25, 0.2, 0.2))
+    assert _view(page)["sel"] == (ax, ay, 41)
+    expect(page.get_by_test_id("status-selection")).to_have_text(f"{ax},{ay} · 41×41 px", timeout=WAIT_MS)
+    _wait_prediction(page, ax, ay, 41)
+
+    # 2. Up-left: press in pixel (bx, by), release in pixel (bx - 30, by - 10). The square grows left and up
+    #    from the press pixel, side = max(30, 10) + 1 = 31, and the press pixel is its bottom-right pixel.
+    _drag(page, _pixel_to_screen(v, bx, by, 0.3, 0.3), _pixel_to_screen(v, bx - 30, by - 10, 0.7, 0.7))
+    assert _view(page)["sel"] == (bx - 30, by - 30, 31)
+    _wait_prediction(page, bx - 30, by - 30, 31)
 
 
 def test_heatmap_controls_change_the_overlay(page):
@@ -539,7 +588,7 @@ def test_camera_capture_once(playwright_instance, server_url, tmp_path):
         v = _view(tab)
         x, y = PAD
         with tab.expect_response("**/api/predict", timeout=WAIT_MS) as res:
-            _drag(tab, _edge_to_screen(v, x, y), _edge_to_screen(v, x + 256, y + 256))
+            _drag(tab, _pixel_to_screen(v, x, y), _pixel_to_screen(v, x + 255, y + 255))
         d = _wait_prediction(tab, x, y, 256)
         seen = _model_input(res.value)
         mean_diff = float(np.abs(seen.astype(np.int16) - frame_gray[y:y + 256, x:x + 256]).mean())

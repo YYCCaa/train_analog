@@ -13,6 +13,8 @@
 //
 // Coordinates: "image px" use the centre convention (pixel i is centred at i). The selection and the
 // view work in pixel EDGES (pixel i spans [i, i + 1]), so edge e sits at screen e * scale + offsetX.
+// Drawing a NEW square is pixel-inclusive like Paint (the pixels under the press and the pointer are both
+// inside); resizing by a corner handle snaps to the nearest pixel edge.
 "use strict";
 
 (() => {
@@ -149,7 +151,8 @@
   //   selAuto:    boolean, sel is the automatic preselection (largest centred square). It is "soft":
   //               pressing inside it draws a new square instead of moving it, because it usually covers
   //               almost the whole image. Any user edit (draw / move / resize / keys) makes it a normal one.
-  //   drag:      null | {mode: "draw"|"move"|"resize"|"pan", pointerId, startSel, anchor?: {x, y},
+  //   drag:      null | {mode: "draw"|"move"|"resize"|"pan", pointerId, startSel,
+  //                       anchor?: {x, y} (draw: integer pixel INDICES; resize: integer EDGE coords),
   //                       startImg?: {x, y}, startScreen: {x, y}, startView?: {...}}
   //   pointers:   Map<pointerId, {x, y}> CSS px positions of active pointers (for two-finger gestures)
   //   pinch:      null | {d0: number, mid0: {x, y}, scale0: number, ox0: number, oy0: number}
@@ -340,8 +343,31 @@
     };
   }
 
+  // squareFromPixels: (ax, ay: integer anchor pixel indices in 0..w-1 / 0..h-1, qx, qy: number continuous
+  // pointer EDGE coords) => {left, top, size}. The DRAW rule, pixel-inclusive like MS Paint: the pixel
+  // under the press and the pixel under the pointer are both inside the square, wherever in the pixel
+  // the pointer is. side = max(|dx|, |dy|) + 1 (dx, dy = pointer pixel − anchor pixel), growing from the
+  // anchor pixel into the drag's quadrant (right when dx >= 0, else left; down when dy >= 0, else up),
+  // clamped to the room the image leaves in that quadrant.
+  //
+  //   dx >= 0 (right):  left = ax            room = w − ax        dx < 0 (left):  left = ax + 1 − side   room = ax + 1
+  //   pixels:           [ax] . . . [cx]                                           [cx] . . . [ax]
+  function squareFromPixels(ax, ay, qx, qy) {
+    const { w, h } = state.work;
+    const cx = clamp(Math.floor(qx), 0, w - 1);
+    const cy = clamp(Math.floor(qy), 0, h - 1);
+    const dx = cx - ax;
+    const dy = cy - ay;
+    const right = dx >= 0;
+    const down = dy >= 0;
+    const room = Math.min(right ? w - ax : ax + 1, down ? h - ay : ay + 1);
+    const side = Math.min(Math.max(Math.abs(dx), Math.abs(dy)) + 1, room);
+    return { left: right ? ax : ax + 1 - side, top: down ? ay : ay + 1 - side, size: side };
+  }
+
   // squareFromAnchor: (ax, ay integer edge coords, px, py edge coords, minSide: number) => {left, top, size}
-  // The Paint rule: side = max(|dx|, |dy|), growing from the anchor into the drag's quadrant, clamped to the image.
+  // The RESIZE rule (corner handles sit on pixel EDGES, so the pointer snaps to the nearest edge):
+  // side = max(|dx|, |dy|), growing from the anchor corner into the drag's quadrant, clamped to the image.
   function squareFromAnchor(ax, ay, px, py, minSide) {
     const { w, h } = state.work;
     const dx = Math.round(px) - ax;
@@ -491,7 +517,8 @@
         state.drag = { ...base, mode: "resize", corner: hit, anchor };
       } else {
         const q = toImage(p.x, p.y);
-        const anchor = { x: clamp(Math.round(q.x), 0, state.work.w), y: clamp(Math.round(q.y), 0, state.work.h) };
+        // anchor: {x, y} integer pixel INDICES (the pixel under the press, clamped into the image), not edges
+        const anchor = { x: clamp(Math.floor(q.x), 0, state.work.w - 1), y: clamp(Math.floor(q.y), 0, state.work.h - 1) };
         state.drag = { ...base, mode: "draw", anchor };
       }
     }
@@ -550,7 +577,7 @@
       const moved = Math.hypot(p.x - drag.startScreen.x, p.y - drag.startScreen.y);
       if (moved >= DRAG_CLICK_PX || drag.drawing) {
         drag.drawing = true;
-        setSel(squareFromAnchor(drag.anchor.x, drag.anchor.y, q.x, q.y, 0));
+        setSel(squareFromPixels(drag.anchor.x, drag.anchor.y, q.x, q.y));
       }
     }
   }
