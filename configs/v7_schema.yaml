@@ -77,14 +77,11 @@ background:
   dial_circle_blur_radius: {type: int, min: 1, max: 16, step: 1, help: "Gaussian blur radius inside the dial circle (px)."}
 
 cut_tip:
-  enabled: {type: bool, min: 0, max: 1, step: 1, help: "Erase pointer pixels within this radius of the apex; the tip label is the farthest point on the axis where the pointer is still wide enough to see after blur (edge ring, cut and rim aware)."}
+  enabled: {type: bool, min: 0, max: 1, step: 1, help: "Erase pointer pixels within this radius of the apex; the tip label moves back to where the cut pointer still crosses more than tip_label.min_pixels pixels."}
   radius_range: {type: int_range, min: 1, max: 20, step: 1, help: "Radius of the erased circle around the apex (px)."}
 
 tip_label:
-  contrast_frac: {type: float, min: 0.05, max: 0.95, step: 0.01, help: "Tip label = farthest point on the pointer axis where the blurred pointer keeps at least this fraction of its contrast, per pixel (a long bar keeps it when wider than 2√2·erfinv(c)·σ)."}
-  base_blur: {type: float, min: 0, max: 4, step: 0.1, help: "Observer blur σ₀ (px) added in quadrature to the dial blur before the per-pixel contrast is measured; a pointer thinner than ≈1.35·σ is not a visual cue."}
-  patch_size: {type: int, min: 3, max: 31, step: 2, help: "Side (px) of the square patch centred on the tip that must support it."}
-  min_ratio: {type: float, min: 0, max: 0.9, step: 0.01, help: "Minimum fraction of that patch whose blurred pointer contrast ≥ contrast_frac (0 = off)."}
+  min_pixels: {type: int, min: 0, max: 30, step: 1, help: "Tip label = point on the pointer triangle's height nearest the apex where the line parallel to the base crosses more than this many pointer pixels."}
 
 shadows:
   prob: {type: float, min: 0.0, max: 1.0, step: 0.05, help: "Probability of rendering pointer and rim shadows."}

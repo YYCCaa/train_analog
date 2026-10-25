@@ -48,7 +48,7 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
   │ 13c cover glass, inside B: m_k = transformed font glyphs;        │
   │    reflections out = in - sum(dk * m_k),                         │
   │    then glares out = lerp(out, V, m) one by one (glare wins);    │
-  │    glare m zeroed within clear_distance of the visible tip       │
+  │    glare m zeroed within clear_distance of the tip label         │
   │ 14 Gaussian blur inside outer ring; black outside again          │
   │ 15 place canvas on a black img_size^2 at centred offset + d;     │
   │    boundary B stays centred (everything inside B shifts by d)    │
@@ -59,48 +59,46 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
 The pointer: a hub circle + an isosceles triangle whose base is a chord
 of the hub, apex pointing outward.  Pixel coordinates: pixel i's centre at i.
 
-Label axis = the triangle's height (apex -> base-chord midpoint) as drawn:
-ImageDraw floors float polygon vertices, so the drawn apex is floor(apex) and
-the base corners floor(base_left / _right).  The axis is mapped through the
-same stretch as the image (Image.AFFINE works in pixel-corner coords, so the
-stretch is about (cx - 0.5, cy - 0.5)); after a non-uniform stretch the
-triangle is no longer isosceles and the label follows the stretched image of
-the original height, not the stretched triangle's perpendicular altitude.
-Then the integer canvas offset is added.  The label = drawn apex - t u, on that
-line by construction.
+Tip label (tip_count_label): a pixel count on the triangle actually DRAWN.
 
-Label rule (blur aware, see _TipField / _patch_tip):
+    1  drawn triangle: ImageDraw floors float polygon vertices, so the drawn
+       apex A = floor(apex) and base corners B_l, B_r = floor(base_left / _right);
+       M = (B_l + B_r) / 2 is the base midpoint, A -> M the isosceles height
+    2  stretch: the same affine as the image.  Image.AFFINE works in pixel-corner
+       coords, so with pixel centres at integer coords the stretch is about
+       (cx - 0.5, cy - 0.5): A, B_l, B_r, M -> A', B_l', B_r', M'.  Lines parallel
+       to the base stay parallel; after a non-uniform stretch A'M' is the image of
+       the height, not the stretched triangle's perpendicular altitude
+    3  pointer pixels, on the stretched canvas, geometry only (before noise,
+       blur and effects): the pre-stretch set (cut mask, minus the edge-ring
+       pixels painted pure background, plus the outline sliver with the cut
+       off) stretched BICUBIC like the image and thresholded >= 128, minus the
+       rim band / outer fill (`covered`).  Hub-disc pixels count too.
+    4  scan t on a 0.05 px grid in [0, |M' - A'|]:
 
-    m    = visible pointer weight (edge ring, cut, rim / outer fill aware,
-           through the same bicubic stretch as the image)
-    Cmap = G_sigma_eff * m   per-pixel contrast fraction kept after the blur
-           (sigma_eff = sqrt(dial blur^2 + tip_label.base_blur^2); a long bar
-           of width w keeps erf(w / 2 sqrt 2 sigma) on its centre line, so a
-           bar meets c exactly at w* = 2 sqrt 2 erfinv(c) sigma_eff)
-    B    = Cmap >= c          pixels meeting the criterion (c = contrast_frac)
+            A'  ●            height' = A' -> M'
+               ╱ ╲
+          t ─ ●───●─ ─ ─  L(t) through P(t) = A' + t (M' - A') / |M' - A'|, parallel to B_l'B_r'
+             ╱  ●  ╲       count(t) = # pointer pixels whose centre lies in the 1-px band
+            ╱       ╲                 -0.5 < signed distance to L(t) <= 0.5
+     B_l' ●─────M'────● B_r'
 
-    label = drawn apex - t u, smallest t (0.05 px grid) with
-            Cmap(p) >= c  and  share of B in the P x P patch on p >= min_ratio
+       label = P(t*), t* = the smallest t with count(t) > n = tip_label.min_pixels
+       (no such t: M', tip_fallback = True)
 
-         hub side                                       apex ->
-          ##########################                    .
-          ##############################   +---------+  .
-     axis ===============================B=B=*=B=B==t==|  1-px tail: Cmap ok,
-          ##############################   |B B B B .|     but B fills < 20 %
-          ##########################       +---------+     of the patch -> no
-                                       patch P x P on the label p: >= min_ratio
-                                       of it meets Cmap >= c  -> label here
+The label lies on A'M' exactly; a larger n never moves it toward the apex.
+Example, n = 2, cut tip on (o = pointer pixel, . = erased / background):
 
-Fallbacks: contrast-only point (min_ratio ignored) -> visible end (farthest
-pixel with weight > 1/2 within TIP_STRIP px of the axis) -> cut-radius guess;
-the label is never ahead of the visible end ("clamped").  Raising sigma,
-base_blur, c, patch_size or min_ratio never moves it forward (blur envelope +
-nested patch squares, see _TipField).  params["derived"] / ["cut_tip"] record
-ideal_apex_x/y (ideal apex), axis_apex_x/y and axis_base_mid_x/y (the drawn
-height, derived only), tip_recession (px from the drawn apex, pre-stretch),
-sigma_eff, w_star, contrast_at_tip (Cmap), patch_ratio_at_tip (plain P x P
-share) and tip_rule ("patch" | "contrast" | "clamped" | "visible_end" |
-"fallback").
+          . . . . .          t = 0 .. 7: count 0 (cut disc)
+        o . . . . . o        t ~ 7.4: count 2 (the cut arc's two horns) -> not > 2
+       o o o o o o o o   <-  t ~ 7.6: count 8 > 2 -> label on the height here
+
+Then the integer canvas offset is added.  params["derived"] records
+axis_apex_x/y (A'), axis_base_mid_x/y (M'), axis_base_dir_x/y (unit B_l' -> B_r'),
+tip_t (t*, px along A'M'), tip_count (count(t*)), tip_fallback, tip_recession
+(= t* measured before the stretch: t* |M - A| / |M' - A'|) and ideal_apex_x/y
+(the ideal float apex, for reference); RenderResult.tip_axis holds A', M' and
+the base direction unrounded.
 
 Shadows are physical: a shadow blocks the direct light and keeps only the
 ambient light, so it scales the surface by an albedo-independent factor,
@@ -166,8 +164,7 @@ bool, str, list); positions are image px unless named otherwise.
                    rim_cutout_frac, rim_blur, offset
     pointer        gray, hole_gray, edge_gray, gradient, edge_thickness,
                    forbidden_lo, forbidden_hi (pointer gray interval it avoided)
-    cut_tip        enabled, cut_r, ideal_apex_x / _y, tip_recession,
-                   sigma_eff, w_star, contrast_at_tip, patch_ratio_at_tip, tip_rule
+    cut_tip        enabled, cut_r, ideal_apex_x / _y, tip_recession
     jitter         brightness, contrast, sharpness
     hier_noise     block_min, block_max, block_std (of the block offsets)
     tri_artifacts  enabled, count_drawn, n, items[n] {gray, center_x,
@@ -179,8 +176,8 @@ bool, str, list); positions are image px unless named otherwise.
     blur           enabled, radius
     derived        img_size, canvas_offset_x / _y, dial_rx, dial_ry,
                    outer_rx, outer_ry, tip_x, tip_y, ideal_apex_x / _y,
-                   axis_apex_x / _y, axis_base_mid_x / _y, tip_recession,
-                   sigma_eff, w_star, contrast_at_tip, patch_ratio_at_tip, tip_rule
+                   axis_apex_x / _y, axis_base_mid_x / _y, axis_base_dir_x / _y,
+                   tip_t, tip_count, tip_fallback, tip_recession
 """
 
 import argparse
@@ -238,13 +235,17 @@ def section_rngs(image_seed):
 class RenderResult:
     """One rendered dial and its label."""
     image: np.ndarray  # gray dial image, (img_size, img_size) uint8
-    tip_x: float  # visible pointer end x on its axis, image px (float; edge ring + cut aware)
-    tip_y: float  # visible pointer end y on its axis, image px (float; edge ring + cut aware)
+    tip_x: float  # tip label x, image px (float): on the drawn triangle's height (tip_count_label)
+    tip_y: float  # tip label y, image px (float)
     angle_deg: int  # pointer angle, whole degrees (0 = up, clockwise)
     # sampled per-image values, dict[str, dict]: section name -> key -> JSON-plain
     # value (int / float rounded to 4 decimals / bool / str / list); see "Params"
     # in the module docstring.  Recorded only, never drawn for.
     params: dict = field(default_factory=dict)
+    # label geometry, unrounded floats in image px: (A' (x, y), M' (x, y), unit
+    # base direction (x, y)) of the stretched drawn triangle; the label is
+    # A' + tip_t (M' - A') / |M' - A'|.  Recorded only.
+    tip_axis: tuple = None
 
 
 def _plain(v):
@@ -520,21 +521,28 @@ def _draw_pointer_edge(img, mask, edge_gray, bg_arr, thickness, noise_amp, nrng)
     (bg_arr, (C, C) uint8), inner rings toward edge_gray; each pixel gets
     independent noise from nrng.  Because ring 0 is repainted with the
     background (blend = 0), the visible pointer is the mask minus ring 0.
+    Thickness 0 draws no band (and no noise).
+
+    Returns (img "L" (C, C), bg_painted (C, C) bool): bg_painted marks the
+    band pixels painted pure background (blend 0, i.e. ring 0), which the tip
+    label does not count as pointer pixels.
     """
     m = np.array(mask)  # (C, C) uint8
     arr = np.array(img)  # (C, C) uint8
     # dist[y, x] = erosion steps survived (0 = outermost ring), (C, C) float32
     dist = _erosion_dist(m, thickness)
+    bg_painted = np.zeros(m.shape, dtype=bool)  # (C, C) bool, ring pixels with blend 0
 
     ys, xs = np.where((m > 0) & (dist < thickness))
     if len(ys) == 0:
-        return img
+        return img, bg_painted
     blend = dist[ys, xs] / max(thickness - 1, 1)  # (N,) 0 = bg .. 1 = edge
     noise = nrng.integers(-noise_amp, noise_amp + 1, size=len(ys), dtype=np.int16)
     bg = bg_arr[ys, xs].astype(np.int16)  # (N,) int16
     blended = (bg + blend * (edge_gray - bg) + noise).astype(np.int16)
     arr[ys, xs] = np.clip(blended, 0, 255).astype(np.uint8)
-    return Image.fromarray(arr)
+    bg_painted[ys[blend == 0], xs[blend == 0]] = True
+    return Image.fromarray(arr), bg_painted
 
 
 def pointer_forbidden_interval(bg_gray, min_contrast, s_max=0.0):
@@ -600,12 +608,14 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
                  edge_thickness, cut_tip_radius):
     """Draw the pointer on the "L" canvas.
 
-    Returns (img, apex, base_left, base_right, mask, vis) where mask is the "L"
-    pointer mask with the apex disc erased when cut_tip_radius is not None, and
-    vis, (C, C) float32 in [0, 1], is the VISIBLE pointer: that (cut) mask
-    weighted by how far _draw_pointer_edge blends each edge ring away from the
-    background (ring 0 = background = 0, same erosion of the uncut mask), plus,
-    with the cut off, the outline-only pixels the img draw adds (weight 1).  apex is the ideal triangle apex, (x, y) float px.
+    Returns (img, apex, base_left, base_right, mask, ptr_pix): apex / base_left
+    / base_right are the ideal (float) triangle vertices, (x, y) float px; mask
+    is the "L" pointer mask with the apex disc erased when cut_tip_radius is
+    not None; ptr_pix, (C, C) bool, is the set of POINTER pixels the tip label
+    counts (pre-stretch): inside that (cut) mask and not an edge pixel painted
+    pure background (bg_painted of _draw_pointer_edge, rings of the uncut
+    mask), plus, with the cut off, the outline-only pixels the img draw adds
+    (they keep ptr_gray).
     """
     a = math.radians(angle_deg - 90)
     apex = (cx + tip_dist * math.cos(a), cy + tip_dist * math.sin(a))
@@ -629,8 +639,9 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
 
     img = _pointer_variation(img, mask, cx, cy, angle_deg, tip_dist,
                              grad_strength, pcfg["noise_amplitude"], nrng)
-    img = _draw_pointer_edge(img, mask, edge_gray, bg_arr, edge_thickness,
-                             pcfg["edge_noise_amplitude"], nrng)
+    # bg_painted: (C, C) bool, edge pixels repainted pure background (ring 0)
+    img, bg_painted = _draw_pointer_edge(img, mask, edge_gray, bg_arr, edge_thickness,
+                                         pcfg["edge_noise_amplitude"], nrng)
 
     m_uncut = np.array(mask)  # (C, C) uint8, uncut pointer mask (before the cut)
     if cut_tip_radius is not None:
@@ -638,245 +649,86 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
         ys_t, xs_t = np.ogrid[:mask_arr.shape[0], :mask_arr.shape[1]]
         mask_arr[(xs_t - apex[0]) ** 2 + (ys_t - apex[1]) ** 2 <= cut_tip_radius ** 2] = 0
         mask = Image.fromarray(mask_arr)
-    # visible pointer, (C, C) float32 in [0, 1]: how much each pixel shows the
-    # pointer rather than the background.  0 outside the (cut) mask; ring k of
-    # the edge band of the uncut mask blends bg -> edge gray by
-    # k / max(t - 1, 1) (see _draw_pointer_edge), so it gets that weight (ring 0
-    # = pure background = 0); deeper pixels 1.  Thickness 0 draws no band.
-    dist = _erosion_dist(m_uncut, edge_thickness)  # (C, C) float32 ring index
-    vis = np.where(dist < edge_thickness, dist / max(edge_thickness - 1, 1),
-                   1.0).astype(np.float32)  # (C, C) float32, band weight
-    vis[np.array(mask) == 0] = 0.0
+    ptr_pix = (np.array(mask) > 0) & ~bg_painted  # (C, C) bool, pointer pixels
     if cut_tip_radius is None:
         # the img polygon / ellipse are drawn WITH an outline, which can paint a
         # sliver of pixels the fill-only mask lacks (thin apex); they keep the
-        # flat ptr_gray (weight 1).  With the cut on, render_image restores
-        # everything outside the cut mask, so they vanish there.
+        # flat ptr_gray, so they are pointer pixels.  With the cut on,
+        # render_image restores everything outside the cut mask: they vanish.
         drawn = Image.new("L", img.size, 0)  # "L" (C, C), pixels the img draw painted
         ddraw = ImageDraw.Draw(drawn)
         ddraw.polygon([apex, base_left, base_right], fill=255, outline=255)
         ddraw.ellipse(hub_box, fill=255, outline=255)
-        vis[(np.array(drawn) > 0) & (m_uncut == 0)] = 1.0
-    return img, apex, base_left, base_right, mask, vis
+        ptr_pix |= (np.array(drawn) > 0) & (m_uncut == 0)
+    return img, apex, base_left, base_right, mask, ptr_pix
 
 
-# float px, half-width of the strip about the pointer axis in which visible
-# pixels count toward the tip: catches a 1-px apex sliver drawn just off-axis
-# and the two "horns" a cut arc leaves where it meets the triangle sides
-TIP_STRIP = 6.0
+# ── tip label: first base-parallel line with > n pointer pixels ──────────
+TIP_T_STEP = 0.05  # float px, grid of the scan along the triangle height
 
 
-def _visible_tip(vis, apex, u, max_back, fallback=None, cover=None):
-    """Visible end of the pointer on its axis.
+def tip_count_label(pix, apex, base_left, base_right, n):
+    """Tip label on the (stretched, drawn) pointer triangle by pixel count.
 
-    vis      : (C, C) bool or float in [0, 1], visible-pointer weight; pixel
-               centres at integer coords (ImageDraw convention)
-    apex     : (x, y) float px, ideal triangle apex
-    u        : (ux, uy) float, unit pointer direction (hub -> apex)
-    max_back : float px, how far back from the apex to search
-    fallback : (x, y) float px (or None), returned when no visible pixel is found
-    cover    : None, or (C, C) bool, pixels painted over the pointer later
-               (rim band / outer fill); they never count as visible
-    A pixel is visible when its weight is > 0.5 (more pointer than background;
-    an even 50/50 edge ring does not count) and it is not covered.  The
-    tip is the point on the axis, apex - t * u, level with the farthest visible
-    pixel (largest projection on u) inside the strip |lateral| <= TIP_STRIP and
-    at most max_back behind the apex; t is rounded up to the 0.05 px walk grid
-    (so the label never sits beyond that pixel).  Returns (x, y) float px.
+    pix        : (H, W) bool, pointer pixels; pixel centres at integer coords
+    apex       : (x, y) float px, A' (drawn apex, stretched)
+    base_left, base_right : (x, y) float px, B_l' and B_r' (drawn base corners, stretched)
+    n          : int >= 0, tip_label.min_pixels
+
+        A' ●   P(t) = A' + t h,  h = (M' - A') / |M' - A'|,  M' = (B_l' + B_r') / 2
+          ╱ ╲
+     ── ●─●─● ── L(t): the line through P(t) parallel to B_l' B_r'
+        ╱     ╲   count(t) = # pointer pixels p with -0.5 < d(p) - t k <= 0.5,
+    B_l' ●──M'──● B_r'   d(p) = (p - A') . nb, nb the unit base normal (toward
+                         the base), k = h . nb: a 1-px band, each axis-aligned
+                         pixel row counted once (rows at t in [row - 0.5, row + 0.5))
+
+    t* = the smallest t on the TIP_T_STEP grid in [0, |M' - A'|] with
+    count(t) > n; fallback (no such t): M'.  Vectorised: each pixel projects
+    once onto nb, covers a grid-index interval of t, and a difference array +
+    cumsum gives count on the whole grid.  A larger n can only move t* toward
+    the base (monotonic by construction).
+
+    Returns (label (x, y) float px, t* float px from A', count(t*) int,
+    fallback bool).  The label is A' + t* h: on the line A'M' exactly.
     """
-    reach = int(math.ceil(max_back + TIP_STRIP)) + 2  # int px, search window half-size
-    h, w = vis.shape
-    xa, ya = int(math.floor(apex[0])), int(math.floor(apex[1]))  # int px, window anchor
-    x_lo, x_hi = max(xa - reach, 0), min(xa + reach + 1, w)  # int px column range
-    y_lo, y_hi = max(ya - reach, 0), min(ya + reach + 1, h)  # int px row range
-    if x_lo >= x_hi or y_lo >= y_hi:
-        return fallback
-    ys, xs = np.mgrid[y_lo:y_hi, x_lo:x_hi]  # (h', w') int pixel coords of the window
-    ok = vis[y_lo:y_hi, x_lo:x_hi] > 0.5  # (h', w') bool, more pointer than background
-    if cover is not None:
-        ok &= ~cover[y_lo:y_hi, x_lo:x_hi]
-    dx, dy = xs - apex[0], ys - apex[1]  # (h', w') float64 offsets from the apex
-    back = -(dx * u[0] + dy * u[1])  # (h', w') float64, distance behind the apex
-    lat = np.abs(-dx * u[1] + dy * u[0])  # (h', w') float64, distance off the axis
-    sel = ok & (lat <= TIP_STRIP) & (back <= max_back)  # (h', w') bool
-    if not sel.any():
-        return fallback
-    t = math.ceil(round(float(back[sel].min()) / 0.05, 6)) * 0.05  # float px on the grid
-    return apex[0] - t * u[0], apex[1] - t * u[1]
-
-
-# ── blur-aware tip label: per-pixel contrast + patch support (_patch_tip) ──
-TIP_T_STEP = 0.05  # float px, along-axis grid of the label scan
-TIP_CHUNK = 200  # int, grid points scanned per vectorised chunk (10 px)
-TIP_PATCH_MIN = 3  # int px, smallest square of the nested patch support (_TipField.rule_support)
-# blur ladder (tuple[float, ...] px, increasing, the same for every sigma) of
-# the monotone contrast envelope in _TipField: 0.25 px steps up to 2, 0.5 up
-# to 6, 1 up to 40 (fine where the raster jaggies matter, cheap at big blurs)
-TIP_SIGMA_LADDER = tuple([0.25 * k for k in range(1, 8)] + [2.0 + 0.5 * k for k in range(8)]
-                         + [6.0 + k for k in range(35)])
-
-
-def _erfinv(c):
-    """Inverse error function of c (float in (-1, 1)) -> float, Newton on math.erf."""
-    x = math.sqrt(-math.log((1 - c) * (1 + c))) * math.copysign(0.8, c)  # float, start
-    for _ in range(60):
-        step = (math.erf(x) - c) / (2 / math.sqrt(math.pi) * math.exp(-x * x))
-        x -= step
-        if abs(step) < 1e-15:
-            break
-    return x
-
-
-def tip_width_threshold(contrast_frac, sigma_eff):
-    """w* (float px) = 2 sqrt(2) erfinv(c) sigma_eff: the narrowest bar that keeps
-    contrast fraction c (float) after a Gaussian blur of std sigma_eff (float px).
-    Recorded for reference: the contrast map reaches c on a long bar's centre
-    line exactly when the bar is w* wide."""
-    if sigma_eff <= 0:
-        return 0.0
-    return 2 * math.sqrt(2) * _erfinv(contrast_frac) * sigma_eff
-
-
-class _TipField:
-    """Per-pixel blurred pointer contrast and patch support near the label scan.
-
-    Built on a window around the search segment apex - t u, 0 <= t <= t_max:
-
-        Cmap = G_sigma * m       contrast fraction the pointer keeps per pixel
-        B    = Cmap >= c         "meets the contrast criterion" (0 off-canvas)
-        R_s(p) = mean of B over the s x s square on p's nearest pixel
-
-    Monotone guard: Cmap is in fact min(G_s * m) over s in {0} + the rungs of
-    TIP_SIGMA_LADDER below sigma + {sigma}.  On a convex end (and inside a
-    region star-shaped about the point) G_s * m only falls as s grows, so this
-    is G_sigma * m there; it differs only on raster jaggies / concave notches,
-    where a larger blur could otherwise "fill in" a point and move the label
-    forward.  The rungs are the same for every sigma, so raising sigma (dial
-    blur or base_blur) cannot raise Cmap anywhere except between rungs.
-
-    m      : (C, C) float, visible pointer weight in [0, 1], covered pixels zeroed;
-             pixel centres at integer coords
-    apex   : (x, y) float px, scan origin; u : (ux, uy) float unit axis direction
-    t_max  : float px, scan length
-    sigma  : float px, sigma_eff (0 = no blur: Cmap = m)
-    c      : float, contrast_frac
-    patch  : int px, patch side P (odd; an even value is rounded up)
-
-    Attributes: x0, y0 int px, canvas coords of window pixel [0, 0]; cmap
-    (h, w) float32 Cmap over the window, exact (the blur runs on a crop
-    kr = ceil(4 sigma) px larger, zero beyond the canvas); integ (h + 1, w + 1)
-    int64, integral image of B; patch int.
-    """
-
-    def __init__(self, m, apex, u, t_max, sigma, c, patch):
-        self.patch = int(patch) + 1 - int(patch) % 2  # int px, odd patch side
-        end = (apex[0] - t_max * u[0], apex[1] - t_max * u[1])  # (x, y) float px, scan end
-        mar = self.patch // 2 + 2  # int px, window margin: patches + bilinear neighbours
-        self.x0 = int(math.floor(min(apex[0], end[0]))) - mar  # int px, window origin x
-        self.y0 = int(math.floor(min(apex[1], end[1]))) - mar  # int px, window origin y
-        x1 = int(math.ceil(max(apex[0], end[0]))) + mar + 1  # int px, window end x (excl.)
-        y1 = int(math.ceil(max(apex[1], end[1]))) + mar + 1  # int px, window end y (excl.)
-        kr = int(math.ceil(4 * sigma)) if sigma > 0 else 0  # int px, blur kernel radius
-        h, w = m.shape
-        # crop of m, window + kr all round, (y1-y0+2kr, x1-x0+2kr) float32, 0 off-canvas
-        crop = np.zeros((y1 - self.y0 + 2 * kr, x1 - self.x0 + 2 * kr), dtype=np.float32)
-        ya, yb = max(self.y0 - kr, 0), min(y1 + kr, h)  # int px, canvas rows in the crop
-        xa, xb = max(self.x0 - kr, 0), min(x1 + kr, w)  # int px, canvas cols in the crop
-        if ya < yb and xa < xb:
-            crop[ya - self.y0 + kr:yb - self.y0 + kr, xa - self.x0 + kr:xb - self.x0 + kr] = \
-                np.asarray(m[ya:yb, xa:xb], dtype=np.float32)
-        # monotone envelope over the blur ladder sigma_k (TIP_SIGMA_LADDER) < sigma
-        # (k = 0, 1, ...) and sigma itself: Cmap = min of G_sigma' * m (G_0 * m = m).
-        # Rung k is rung k-1 blurred by sqrt(sigma_k^2 - sigma_(k-1)^2) (Gaussians
-        # add in quadrature; small kernels, cheap), so the rungs are the same for
-        # every sigma.  Sampled small kernels blur a little less than their std,
-        # so the rungs sit slightly above the true G_sigma_k * m: they only ever
-        # guard, never set, the value.  G_sigma * m itself is blurred directly
-        env = crop  # (h'+2kr, w'+2kr) float32, running minimum
-        if kr:
-            import cv2
-
-            def gblur(a, sg):
-                """a (H, W) float32 blurred by a Gaussian of std sg (float px), 0 outside."""
-                kk = int(math.ceil(4 * sg))  # int px, kernel radius
-                return cv2.GaussianBlur(a, (2 * kk + 1, 2 * kk + 1), sg, sigmaY=sg,
-                                        borderType=cv2.BORDER_CONSTANT)
-            rung, prev = crop, 0.0  # (h'+2kr, w'+2kr) float32 G_prev * m, float px std
-            for sk in TIP_SIGMA_LADDER:
-                if sk >= sigma - 1e-9:
-                    break
-                rung = gblur(rung, math.sqrt(sk * sk - prev * prev))
-                env = np.minimum(env, rung)
-                prev = sk
-            env = np.minimum(env, gblur(crop, sigma))
-        self.cmap = env[kr:env.shape[0] - kr, kr:env.shape[1] - kr]  # (h', w') float32
-        gy, gx = np.ogrid[self.y0:y1, self.x0:x1]  # (h', 1), (1, w') int canvas coords
-        meets = (self.cmap >= c) & (gy >= 0) & (gy < h) & (gx >= 0) & (gx < w)  # (h', w') bool
-        self.integ = np.zeros((meets.shape[0] + 1, meets.shape[1] + 1), dtype=np.int64)
-        self.integ[1:, 1:] = meets.cumsum(0).cumsum(1)
-
-    def contrast(self, x, y):
-        """Bilinear Cmap at canvas points (x, y) (float or arrays) -> float64 array."""
-        hh, ww = self.cmap.shape
-        fx = np.clip(np.asarray(x, dtype=np.float64) - self.x0, 0, ww - 1.001)  # window coords
-        fy = np.clip(np.asarray(y, dtype=np.float64) - self.y0, 0, hh - 1.001)
-        x0, y0 = fx.astype(np.intp), fy.astype(np.intp)  # top-left pixel (>= 0)
-        ax, ay = fx - x0, fy - y0  # float64 fractions
-        g = self.cmap
-        return ((g[y0, x0] * (1 - ax) + g[y0, x0 + 1] * ax) * (1 - ay)
-                + (g[y0 + 1, x0] * (1 - ax) + g[y0 + 1, x0 + 1] * ax) * ay)
-
-    def ratio(self, x, y, size=None):
-        """R_s: share of the s x s square (s = size or the patch, odd) centred on
-        the nearest pixel of each (x, y) whose Cmap >= c -> float64 array."""
-        s = self.patch if size is None else int(size)  # int px, square side
-        r = s // 2  # int px, half side
-        hh, ww = self.cmap.shape
-        ix = np.floor(np.asarray(x, dtype=np.float64) + 0.5).astype(np.intp) - self.x0
-        iy = np.floor(np.asarray(y, dtype=np.float64) + 0.5).astype(np.intp) - self.y0
-        xa, xb = np.clip(ix - r, 0, ww), np.clip(ix + r + 1, 0, ww)  # window col bounds
-        ya, yb = np.clip(iy - r, 0, hh), np.clip(iy + r + 1, 0, hh)  # window row bounds
-        I = self.integ  # (h' + 1, w' + 1) int64
-        return (I[yb, xb] - I[ya, xb] - I[yb, xa] + I[ya, xa]) / float(s * s)
-
-    def rule_support(self, x, y):
-        """Support the patch rule tests: min over odd s = TIP_PATCH_MIN..P of R_s,
-        float64 array.  Nested squares make a larger patch never accept a point a
-        smaller one rejects (a plain R_P can grow with P near a wedge apex)."""
-        out = self.ratio(x, y)  # float64, R_P
-        for s in range(TIP_PATCH_MIN, self.patch, 2):
-            out = np.minimum(out, self.ratio(x, y, s))
-        return out
-
-
-def _patch_tip(field, apex, u, t_max, c, min_ratio, t_start=0.0):
-    """Label: the smallest t (TIP_T_STEP grid, t_start..t_max) behind apex with
-    Cmap(p) >= c (bilinear) and, when min_ratio > 0, rule_support(p) >= min_ratio,
-    p = apex - t u.  field is the _TipField of that segment.
-
-    Model: a Gaussian blur of std sigma keeps a fraction Cmap = G_sigma * m of
-    the pointer's contrast at each pixel (a long bar of width w keeps
-    erf(w / (2 sqrt 2 sigma)) on its centre line, the width rule); a point can
-    pass that per-pixel test on a thin sliver yet stay invisible when its
-    neighbourhood holds almost no other passing pixel, hence the patch ratio.
-    The scan runs in chunks of TIP_CHUNK points and stops at the first hit
-    (each point is 4 Cmap reads + a few integral-image boxes).
-    Returns ((x, y) float px, t float px) or None.
-    """
-    n_t = int(math.floor(t_max / TIP_T_STEP + 1e-9)) + 1  # int, grid points 0..t_max
-    i0 = int(math.ceil(t_start / TIP_T_STEP - 1e-9))  # int, first grid index scanned
-    for lo in range(i0, n_t, TIP_CHUNK):
-        idx = np.arange(lo, min(lo + TIP_CHUNK, n_t))  # (<= TIP_CHUNK,) int grid indices
-        ts = idx * TIP_T_STEP  # (K,) float64 px behind the apex
-        px, py = apex[0] - ts * u[0], apex[1] - ts * u[1]  # (K,) float64 points
-        ok = field.contrast(px, py) >= c  # (K,) bool
-        if min_ratio > 0 and ok.any():
-            ok &= field.rule_support(px, py) >= min_ratio
-        hit = np.flatnonzero(ok)  # (H,) int
-        if hit.size:
-            t = float(ts[hit[0]])
-            return (apex[0] - t * u[0], apex[1] - t * u[1]), t
-    return None
+    ax, ay = float(apex[0]), float(apex[1])
+    mx = (base_left[0] + base_right[0]) / 2.0  # float px, M' x
+    my = (base_left[1] + base_right[1]) / 2.0  # float px, M' y
+    h_len = math.hypot(mx - ax, my - ay)  # float px, |M' - A'|
+    if h_len <= 0:  # degenerate triangle: no height to scan
+        return (ax, ay), 0.0, 0, True
+    hx, hy = (mx - ax) / h_len, (my - ay) / h_len  # (float, float) unit height
+    bx, by = base_right[0] - base_left[0], base_right[1] - base_left[1]  # float, base vector
+    b_len = math.hypot(bx, by)  # float px, base length
+    if b_len > 0:
+        nbx, nby = -by / b_len, bx / b_len  # (float, float) unit base normal
+    else:
+        nbx, nby = hx, hy
+    k = hx * nbx + hy * nby  # float, h . nb: rate of the band along t
+    if k < 0:
+        nbx, nby, k = -nbx, -nby, -k  # orient nb toward the base
+    k = max(k, 1e-6)
+    n_grid = int(math.floor(h_len / TIP_T_STEP + 1e-9))  # int, last grid index
+    ys, xs = np.nonzero(pix)  # (N,) int64 pointer pixel coords
+    d = (xs - ax) * nbx + (ys - ay) * nby  # (N,) float64 signed distance from A' along nb
+    # pixel counted at grid t_i = i * step iff d - 0.5 <= t_i k < d + 0.5, i.e.
+    # i in [ceil((d - 0.5) / (k step)), ceil((d + 0.5) / (k step)) - 1]
+    i_lo = np.ceil(np.round((d - 0.5) / (k * TIP_T_STEP), 6)).astype(np.int64)  # (N,) int64
+    i_hi = np.ceil(np.round((d + 0.5) / (k * TIP_T_STEP), 6)).astype(np.int64) - 1  # (N,) int64
+    i_lo = np.maximum(i_lo, 0)
+    i_hi = np.minimum(i_hi, n_grid)
+    ok = i_lo <= i_hi  # (N,) bool, pixel's band meets the scan
+    diff = np.zeros(n_grid + 2, dtype=np.int64)  # (n_grid + 2,) int64 difference array
+    np.add.at(diff, i_lo[ok], 1)
+    np.add.at(diff, i_hi[ok] + 1, -1)
+    count = np.cumsum(diff[:n_grid + 1])  # (n_grid + 1,) int64, count(t_i)
+    hit = np.flatnonzero(count > n)  # (H,) int64 grid indices passing
+    if hit.size:
+        i = int(hit[0])
+        t = i * TIP_T_STEP  # float px
+        return (ax + t * hx, ay + t * hy), t, int(count[i]), False
+    return (mx, my), h_len, int(count[-1]) if count.size else 0, True
 
 
 # ── main render ────────────────────────────────────────────────────────
@@ -1127,7 +979,7 @@ def _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy, b_radius, tip, xs, ys
     """Step 13c: reflections (out = in - sum darken*m), then glares
     (out = lerp(out, V, m), glare zeroed within clear_distance of the tip).
 
-    img: canvas "L" (C, C); rngs: section_rngs dict; tip: visible tip (x, y)
+    img: canvas "L" (C, C); rngs: section_rngs dict; tip: tip label (x, y)
     float px in canvas coords; xs (1, C) / ys (C, 1) int pixel grids.
     Shapes are transformed font glyphs (_glyph_shape).  rec: optional dict,
     gets rec["reflections"] / rec["glares"] = {active bool, count_drawn int,
@@ -1163,7 +1015,7 @@ def _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy, b_radius, tip, xs, ys
     work = np.clip(work - dark, 0, 255)
     if n_g:
         clear = float(Gl["clear_distance"])  # float px
-        # (C, C) bool, pixels a glare may never cover (around the visible tip)
+        # (C, C) bool, pixels a glare may never cover (around the tip label)
         near_tip = (xs - tip[0]) ** 2 + (ys - tip[1]) ** 2 <= clear ** 2
         for _ in range(n_g):
             it = {}  # dict, this item's record
@@ -1359,7 +1211,7 @@ def render_image(cfg, image_seed):
     cut_r = rngs["cut_tip"][0].randint(*C["radius_range"])  # int px
     rec["cut_tip"] = {"enabled": bool(C["enabled"]), "cut_r": cut_r}
     bg_pre_ptr = img.copy() if C["enabled"] else None  # pre-pointer canvas, "L"
-    img, apex, base_l, base_r, ptr_mask, ptr_vis = draw_pointer(
+    img, apex, base_l, base_r, ptr_mask, ptr_pix = draw_pointer(
         img, ptr_cx, ptr_cy, angle_deg, hub_radius, tip_dist, chord_half,
         chord_dist, ptr_gray, edge_gray, grad_strength, PT, ptr_np,
         edge_thickness, cut_r if C["enabled"] else None)
@@ -1372,8 +1224,9 @@ def render_image(cfg, image_seed):
     # triangle's apex is floor(apex) and its base corners floor(base_l / _r);
     # (x, y) float px, canvas, pre-stretch
     apex_drawn = (float(math.floor(apex[0])), float(math.floor(apex[1])))
-    base_mid_drawn = ((math.floor(base_l[0]) + math.floor(base_r[0])) / 2.0,
-                      (math.floor(base_l[1]) + math.floor(base_r[1])) / 2.0)
+    bl_drawn = (float(math.floor(base_l[0])), float(math.floor(base_l[1])))  # drawn B_l
+    br_drawn = (float(math.floor(base_r[0])), float(math.floor(base_r[1])))  # drawn B_r
+    base_mid_drawn = ((bl_drawn[0] + br_drawn[0]) / 2.0, (bl_drawn[1] + br_drawn[1]) / 2.0)
 
     # --- 8 horizontal / vertical stretch inside dial ---
     # inverse affine (output -> input) coefficients, 6-tuple of float: stretch about (cx, cy)
@@ -1418,73 +1271,45 @@ def render_image(cfg, image_seed):
     rim_half = O["rim_width"] / min(max(dial_rx, 1), max(dial_ry, 1))
     arr[(r_norm > 1 - rim_half) & (r_norm < 1 + rim_half)] = rim_gray
 
-    # label = visible tip: the visible end of the pointer on its axis, after the
-    # background-blended edge ring 0, the cut and the rim band / outer fill that
-    # paint over it (raster-exact walk back from the drawn apex along -u,
-    # u the unit stretched height direction), stretched like the image
+    # --- tip label (geometry only: before noise, blur and effects) ---
+    # pointer pixels on the stretched canvas: the pre-stretch pointer pixels
+    # (cut mask minus the edge ring painted pure background, + outline sliver
+    # with the cut off; see draw_pointer) stretched with the image's affine and
+    # BICUBIC resample, thresholded at >= 128 (more pointer than background, the
+    # same resample as the image, so a black-on-face pointer pixel counts iff it
+    # renders darker than the face/pointer midpoint), minus `covered` (rim band
+    # and outer fill paint over them)
     covered = r_norm > 1 - rim_half  # (C, C) bool, rim band + outer fill + outside
-    # visible weight through the same bicubic stretch as the canvas: the image
-    # is bg + w * (pointer - bg) with w resampled exactly like it, (C, C) float32
-    vis_s = np.asarray(Image.fromarray(np.round(ptr_vis * 255).astype(np.uint8)).transform(
-        size2, Image.AFFINE, affine, resample=Image.BICUBIC), dtype=np.float32) / 255.0
+    pix_s = np.asarray(Image.fromarray(ptr_pix.astype(np.uint8) * 255).transform(
+        size2, Image.AFFINE, affine, resample=Image.BICUBIC)) >= 128  # (C, C) bool
+    pix_s &= ~covered
     # Image.AFFINE maps pixel-corner coords, so with pixel centres at integer
     # coords the stretch is about (cx - 0.5, cy - 0.5): point (x, y) -> sxy(x, y)
     def sxy(x, y):
         """Canvas point (x, y) float px -> where the stretch puts it, (x, y) float px."""
         return (cx - 0.5 + (x - cx + 0.5) * stretch_h, cy - 0.5 + (y - cy + 0.5) * stretch_v)
     ideal_apex = sxy(*ideal_apex)  # (x, y) float px, stretched ideal apex (reference)
-    axis_apex = sxy(*apex_drawn)  # (x, y) float px, stretched drawn apex: the scan origin
-    # stretched base-chord midpoint, (x, y) float px.  The stretch is affine, so
-    # the label follows the stretched image of the original height (apex ->
-    # base midpoint); after a non-uniform stretch the triangle is no longer
-    # isosceles and that line differs slightly from its perpendicular altitude
+    axis_apex = sxy(*apex_drawn)  # (x, y) float px, A': stretched drawn apex
+    axis_bl, axis_br = sxy(*bl_drawn), sxy(*br_drawn)  # (x, y) float px, B_l', B_r'
+    # stretched base-chord midpoint M', (x, y) float px.  The stretch is affine,
+    # so A'M' is the image of the drawn height and lines parallel to the base
+    # stay parallel; after a non-uniform stretch the triangle is no longer
+    # isosceles and A'M' differs slightly from its perpendicular altitude
     axis_base_mid = sxy(*base_mid_drawn)
-    d_len = math.hypot(apex_drawn[0] - base_mid_drawn[0],
-                       apex_drawn[1] - base_mid_drawn[1])  # float px, height length
-    u_d = ((apex_drawn[0] - base_mid_drawn[0]) / d_len,
-           (apex_drawn[1] - base_mid_drawn[1]) / d_len)  # (ux, uy) float, unit height, pre-stretch
-    v_s = (u_d[0] * stretch_h, u_d[1] * stretch_v)  # stretched axis direction
-    v_n = math.hypot(*v_s)  # float, its length (stretched px per pre-stretch px)
-    u_s = (v_s[0] / v_n, v_s[1] / v_n)  # (ux, uy) float, unit stretched axis
-    back0 = (cut_r if C["enabled"] else 0) * v_n  # float px, the old formula's recession
-    vis_end = _visible_tip(vis_s, axis_apex, u_s, back0 + 20,
-                           cover=covered)  # (x, y) float px visible end, or None
-    apex = vis_end if vis_end is not None else (axis_apex[0] - back0 * u_s[0],
-                                                axis_apex[1] - back0 * u_s[1])
-    # blur-aware label (see _patch_tip): the farthest axis point whose blurred
-    # contrast Cmap = G_sigma_eff * (visible weight minus cover) is >= c there
-    # and on >= min_ratio of the patch around it; fallbacks contrast-only ->
-    # visible end -> its fallback; never ahead of the visible end; no draws
     TL = cfg["tip_label"]
-    sigma_blur = float(B["dial_circle_blur_radius"]) if B["dial_circle_blur"] else 0.0  # float px
-    sigma_eff = math.hypot(sigma_blur, float(TL["base_blur"]))  # float px
-    c_tip = float(TL["contrast_frac"])  # float, contrast fraction c
-    w_star = tip_width_threshold(c_tip, sigma_eff)  # float px, reference bar width
-    min_ratio = float(TL["min_ratio"])  # float, patch support threshold (0 = off)
-    t_max = (tip_dist + chord_dist) * v_n  # float px, scan length (apex -> base chord)
-    vis_cov = np.where(covered, np.float32(0), vis_s)  # (C, C) float32, weight minus cover
-    field = _TipField(vis_cov, axis_apex, u_s, t_max, sigma_eff, c_tip, TL["patch_size"])
-    hit_c = _patch_tip(field, axis_apex, u_s, t_max, c_tip, 0.0)  # contrast-only, or None
-    hit = hit_c  # ((x, y), t) or None, the label candidate
-    tip_rule = "contrast"  # str, which rule produced the label
-    if hit_c is not None and min_ratio > 0:
-        hit_p = _patch_tip(field, axis_apex, u_s, t_max, c_tip, min_ratio, hit_c[1])
-        if hit_p is not None:
-            hit, tip_rule = hit_p, "patch"
-    if hit is None:
-        tip_rule = "visible_end" if vis_end is not None else "fallback"
-    else:
-        t_end = -1.0 if vis_end is None else -(
-            (vis_end[0] - axis_apex[0]) * u_s[0] + (vis_end[1] - axis_apex[1]) * u_s[1])
-        if hit[1] >= t_end:
-            apex = hit[0]
-        else:  # ahead of the visible end: clamp onto it
-            tip_rule = "clamped"
-    contrast_at_tip = float(field.contrast(apex[0], apex[1]))  # float, Cmap at the label
-    patch_ratio_at_tip = float(field.ratio(apex[0], apex[1]))  # float, R_P at the label
-    # px between the drawn apex and the label, measured before the stretch (float)
-    tip_recession = math.hypot((apex[0] - axis_apex[0]) / stretch_h,
-                               (apex[1] - axis_apex[1]) / stretch_v)
+    # label (x, y) float px, t* float px along A'M', count(t*) int, fallback bool
+    apex, tip_t, tip_count, tip_fallback = tip_count_label(
+        pix_s, axis_apex, axis_bl, axis_br, int(TL["min_pixels"]))
+    bdx, bdy = axis_br[0] - axis_bl[0], axis_br[1] - axis_bl[1]  # float, stretched base vector
+    b_n = math.hypot(bdx, bdy) or 1.0  # float px, its length
+    base_dir = (bdx / b_n, bdy / b_n)  # (x, y) float, unit B_l' -> B_r'
+    h_pre = math.hypot(apex_drawn[0] - base_mid_drawn[0],
+                       apex_drawn[1] - base_mid_drawn[1])  # float px, drawn height pre-stretch
+    h_post = math.hypot(axis_apex[0] - axis_base_mid[0],
+                        axis_apex[1] - axis_base_mid[1])  # float px, |M' - A'|
+    # tip_t measured before the stretch (float px): the affine scales the height
+    # line uniformly, by h_post / h_pre
+    tip_recession = tip_t * h_pre / h_post if h_post > 0 else 0.0
 
     # --- 11 hierarchical noise inside the outer ring ---
     H, hnp = cfg["hier_noise"], rngs["hier_noise"][1]
@@ -1601,19 +1426,19 @@ def render_image(cfg, image_seed):
                       "axis_base_mid_x": axis_base_mid[0] + off_x,
                       "axis_base_mid_y": axis_base_mid[1] + off_y,
                       "axis_apex_x": axis_apex[0] + off_x, "axis_apex_y": axis_apex[1] + off_y,
-                      "tip_recession": tip_recession, "sigma_eff": sigma_eff,
-                      "w_star": w_star, "contrast_at_tip": contrast_at_tip,
-                      "patch_ratio_at_tip": patch_ratio_at_tip, "tip_rule": tip_rule}
-    # ideal apex in image px (float), label recession behind it (float px,
-    # pre-stretch), blur model sigma_eff / w* (float px), Cmap and patch ratio
-    # at the label (float) and the rule that produced it (str)
+                      "axis_base_dir_x": base_dir[0], "axis_base_dir_y": base_dir[1],
+                      "tip_t": tip_t, "tip_count": tip_count, "tip_fallback": tip_fallback,
+                      "tip_recession": tip_recession}
+    # ideal apex in image px (float) and the label recession behind the drawn
+    # apex (float px, pre-stretch), also under cut_tip
     rec["cut_tip"].update(ideal_apex_x=ideal_apex[0] + off_x,
-                          ideal_apex_y=ideal_apex[1] + off_y, tip_recession=tip_recession,
-                          sigma_eff=sigma_eff, w_star=w_star, contrast_at_tip=contrast_at_tip,
-                          patch_ratio_at_tip=patch_ratio_at_tip, tip_rule=tip_rule)
+                          ideal_apex_y=ideal_apex[1] + off_y, tip_recession=tip_recession)
     return RenderResult(image=out,
                         tip_x=apex[0] + off_x, tip_y=apex[1] + off_y,
-                        angle_deg=angle_deg, params=_plain(rec))
+                        angle_deg=angle_deg, params=_plain(rec),
+                        tip_axis=((axis_apex[0] + off_x, axis_apex[1] + off_y),
+                                  (axis_base_mid[0] + off_x, axis_base_mid[1] + off_y),
+                                  base_dir))
 
 
 # ── Multiprocessing worker plumbing + dataset driver ──────────────────────

@@ -1026,371 +1026,185 @@ _CLEAN_TIP = {
     "shadows.prob": 0.0, "tri_artifacts.enabled": False,
     "digits.show_prob": 0.0, "ticks.gray_range": [215, 215]}
 
-# case name (str) -> (cut_tip.enabled bool, cut_tip.radius_range [lo, hi] int)
-_CUT_CASES = {"off": (False, [7, 10]), "r1": (True, [1, 1]), "r2": (True, [2, 2]),
-              "r4": (True, [4, 4]), "r7-10": (True, [7, 10])}
-
-
-def _tip_overshoot(res):
-    """How far (float px) the label sits beyond the last dark pointer pixel,
-    measured along the (stretched) pointer axis in the rendered image, the way a
-    person would judge the tip by eye.  Positive = label floats past the pointer.
-
-    Dark pixels (< 100) within |lateral| < 6 px of the axis and along-axis in
-    (-30, 12) px of the label are the pointer end; overshoot = -max(along).
-    Returns None when no such pixel exists.
-    """
-    g = res.params["geometry"]
-    ux, uy = _unit_dir(res.angle_deg)  # unit pointer direction, unstretched (floats)
-    vx, vy = ux * g["stretch_h"], uy * g["stretch_v"]  # stretched axis direction (floats)
-    n = math.hypot(vx, vy)
-    vx, vy = vx / n, vy / n  # unit stretched axis (floats)
-    ys, xs = np.nonzero(res.image < 100)  # (N,) int64 dark pixel coords
-    dx, dy = xs - res.tip_x, ys - res.tip_y  # (N,) float64, offsets from the label
-    along = dx * vx + dy * vy  # (N,) float64, + = beyond the label
-    lat = -dx * vy + dy * vx  # (N,) float64, perpendicular distance (signed)
-    sel = (np.abs(lat) < 6) & (along > -30) & (along < 12)  # (N,) bool
-    if not sel.any():
-        return None
-    return -float(along[sel].max())
-
-
-@pytest.mark.parametrize("case", list(_CUT_CASES))
-def test_tip_label_on_visible_end(case):
-    # blur off, no observer floor (tip_label.base_blur 0) and no patch rule
-    # (min_ratio 0): sigma_eff = 0, so the contrast map is the visible weight
-    # itself and the label is the raw visible end; the default floor (sigma_0 = 1)
-    # and patch rule only ever move it back from there
-    enabled, rr = _CUT_CASES[case]
-    pins = {**_CLEAN_TIP, "cut_tip.enabled": enabled, "cut_tip.radius_range": rr}  # dict
-    cfg = _cfg(**pins, **{"tip_label.base_blur": 0.0, "tip_label.min_ratio": 0.0})
-    cfg_floor = _cfg(**pins)  # default base_blur 1.0, default patch rule
-    over = []  # list[float] px, label overshoot per seed
-    for seed in range(60):
-        res = g7.render_image(cfg, seed)
-        assert res.params["derived"]["w_star"] == 0.0
-        o = _tip_overshoot(res)
-        assert o is not None, (case, seed)
-        over.append(o)
-        o_floor = _tip_overshoot(g7.render_image(cfg_floor, seed))  # float px
-        assert o_floor <= o + 1e-6, (case, seed, o, o_floor)
-    over = np.array(over)  # (60,) float64
-    assert abs(over.mean()) <= 0.35, (case, over.mean(), over.max())
-    assert over.max() <= 1.0, (case, over.mean(), over.max())
-
-
-# ── _visible_tip unit tests (pure helper) ─────────────────────────────────
-
-def _wedge(apex, half_deg, size=64):
-    """Bool mask (size, size) of a wedge opening left from apex (x, y), half-angle half_deg."""
-    ys, xs = np.mgrid[:size, :size]  # (size, size) int pixel grids
-    dx, dy = apex[0] - xs, ys - apex[1]  # (size, size) float, + dx = behind the apex
-    return (dx >= 0) & (np.abs(dy) <= dx * math.tan(math.radians(half_deg)))
-
-
-def test_visible_tip_wedge_recedes():
-    apex = (40.3, 32.0)  # (x, y) float px, ideal apex; the wedge points to +x
-    full = _wedge(apex, 20)  # (64, 64) bool
-    tx, ty = g7._visible_tip(full, apex, (1.0, 0.0), 20)
-    assert ty == apex[1] and abs(tx - 40.0) < 0.05 + 1e-9  # last pixel centre x = 40
-    # erase the outer 3 px of the wedge: the visible end recedes by 3 px
-    trimmed = full & (np.mgrid[:64, :64][1] <= 37)  # (64, 64) bool
-    tx2, ty2 = g7._visible_tip(trimmed, apex, (1.0, 0.0), 20)
-    assert ty2 == apex[1] and abs(tx2 - 37.0) < 0.05 + 1e-9
-
-
-def test_visible_tip_empty_falls_back():
-    vis = np.zeros((32, 32), dtype=bool)  # (32, 32) bool, nothing visible
-    assert g7._visible_tip(vis, (16.0, 16.0), (0.0, -1.0), 20, fallback=(1.5, 2.5)) == (1.5, 2.5)
-    assert g7._visible_tip(vis, (16.0, 16.0), (0.0, -1.0), 20) is None
-    # a covered pointer is not visible either
-    vis[10:20, 14:19] = True
-    assert g7._visible_tip(vis, (16.0, 9.0), (0.0, -1.0), 20, fallback=(0.0, 0.0),
-                           cover=np.ones((32, 32), dtype=bool)) == (0.0, 0.0)
-
-
-def test_visible_tip_square_on_axis():
-    vis = np.zeros((32, 32), dtype=float)  # (32, 32) float weights
-    vis[12:30, 10:21] = 1.0  # flat-ended bar, top row y = 12, pointing up (-y)
-    tx, ty = g7._visible_tip(vis, (15.0, 4.0), (0.0, -1.0), 20)
-    assert tx == 15.0 and abs(ty - 12.0) < 0.05 + 1e-9  # on the axis, at the top row
-    vis[12, :] = 0.5  # an even 50/50 ring does not count
-    tx, ty = g7._visible_tip(vis, (15.0, 4.0), (0.0, -1.0), 20)
-    assert tx == 15.0 and abs(ty - 13.0) < 0.05 + 1e-9
-
-
-# ── tip label = per-pixel blurred contrast + patch support (blur aware) ───
-
-def _aa_wedge(apex, half_deg, size=96, ss=8):
-    """Area-coverage wedge (size, size) float32 in [0, 1] opening left (-x) from
-    apex (x, y), half-angle half_deg: each pixel (centre at integer coords) is
-    the fraction of its ss x ss sub-samples inside the ideal wedge (no edge ring)."""
-    off = (np.arange(ss) + 0.5) / ss - 0.5  # (ss,) float64, sub-sample offsets in a pixel
-    ys, xs = np.mgrid[:size, :size]  # (size, size) int pixel grids
-    sx = xs[..., None, None] + off[None, None, None, :]  # (size, size, 1, ss) float64
-    sy = ys[..., None, None] + off[None, None, :, None]  # (size, size, ss, 1) float64
-    dx, dy = apex[0] - sx, sy - apex[1]  # broadcast (size, size, ss, ss); + dx = behind the apex
-    inside = (dx >= 0) & (np.abs(dy) <= dx * math.tan(math.radians(half_deg)))
-    return inside.mean(axis=(2, 3)).astype(np.float32)
-
-
-def _scan(vis, origin, u, t_max, sigma, c, patch, min_ratio):
-    """Label of the patch rule on vis from origin along -u -> (((x, y), t), field):
-    hit ((x, y) float px, t float px) or None, and the _TipField it used."""
-    field = g7._TipField(vis, origin, u, t_max, sigma, c, patch)  # contrast + support maps
-    return g7._patch_tip(field, origin, u, t_max, c, min_ratio), field
-
-
-@pytest.mark.parametrize("sigma", [0.0, 0.5])
-def test_patch_tip_rejects_slender_tail(sigma):
-    # a wide wedge (half-angle 22 deg, the default pointer) pointing +x with a
-    # 1-px-wide, 6-px-long tail glued to its apex: the tail is sharp enough to
-    # pass the per-pixel contrast test (sigma <= 0.5), but it fills only a sliver
-    # of the 9 x 9 patch, so the patch rule puts the label back on the wedge
-    apex = (60.0, 48.0)  # (x, y) float px, wedge apex
-    vis = _aa_wedge(apex, 22.0)  # (96, 96) float32
-    vis[48, 60:67] = 1.0  # tail pixels x = 60..66 (6 px beyond the apex), row 48
-    origin, u = (75.0, 48.0), (1.0, 0.0)  # search start ahead of the tail, axis +x
-    contrast_only, _ = _scan(vis, origin, u, 60.0, sigma, 0.5, 9, 0.0)
-    (tx, ty), _t = contrast_only  # label with min_ratio 0 (floats)
-    assert ty == 48.0 and 64.0 <= tx <= 66.55, tx  # at the tail end
-    (px, py), _t2 = _scan(vis, origin, u, 60.0, sigma, 0.5, 9, 0.2)[0]  # patch rule (floats)
-    assert py == 48.0 and 54.0 <= px <= apex[0] + 0.5, px  # on the wedge, not the tail
-
-
-def test_patch_tip_bar_end_half_max():
-    # a long, wide bar (31 px) pointing up (-y) with an abrupt end; its pixels
-    # cover y >= 19.5, so the 2-D half-max of the sigma = 2 blur sits at 19.5
-    vis = np.zeros((96, 96), dtype=np.float32)  # (96, 96) float32
-    vis[20:90, 30:61] = 1.0
-    origin, u = (45.0, 5.0), (0.0, -1.0)  # (x, y) search start, axis -y
-    for ratio in (0.0, 0.2):
-        (tx, ty), _t = _scan(vis, origin, u, 60.0, 2.0, 0.5, 9, ratio)[0]  # floats
-        assert tx == 45.0 and abs(ty - 19.5) <= 0.5, (ratio, ty)
-    hit, field = _scan(vis, origin, u, 60.0, 2.0, 0.5, 9, 0.2)
-    # a blunt end fills about half the patch
-    assert 0.4 <= field.ratio(*hit[0]) <= 0.6, field.ratio(*hit[0])
-
-
-@pytest.mark.parametrize("w", [1, 2, 4, 8])
-@pytest.mark.parametrize("sigma", [0.0, 1.0, 2.0, 3.0])
-def test_contrast_map_is_erf_of_width(w, sigma):
-    # the 2-D map generalises the width rule: a long bar of width w keeps
-    # erf(w / (2 sqrt 2 sigma)) of its contrast at the centre line; on a pixel
-    # centre x it keeps Phi((e - x) / sigma) - Phi((s - x) / sigma), the bar
-    # covering [s, e] = [x_lo - 0.5, x_lo + w - 0.5]
-    vis = np.zeros((128, 128), dtype=np.float32)  # (128, 128) float32
-    x_lo = 64 - w // 2  # int px, first bar column
-    vis[:, x_lo:x_lo + w] = 1.0
-    xc = x_lo + (w - 1) // 2  # int px, pixel column at (or next to) the centre line
-    field = g7._TipField(vis, (xc, 20.0), (0.0, -1.0), 80.0, sigma, 0.5, 9)
-    got = float(field.contrast(xc, 64.0))  # float, Cmap on that column
-    if sigma == 0:
-        want = 1.0  # float, no blur: Cmap = the weight
-    else:
-        phi = lambda z: 0.5 * (1 + math.erf(z / math.sqrt(2)))  # standard normal CDF
-        want = phi((x_lo + w - 0.5 - xc) / sigma) - phi((x_lo - 0.5 - xc) / sigma)
-        if w % 2:  # odd w: that column is the centre line, the width rule exactly
-            assert abs(want - math.erf(w / (2 * math.sqrt(2) * sigma))) < 1e-12
-    assert abs(got - want) < 0.02, (w, sigma, got, want)
-
-
-def test_patch_tip_none_and_canvas_border():
-    vis = np.zeros((32, 32), dtype=np.float32)  # (32, 32) nothing visible
-    assert _scan(vis, (16.0, 16.0), (0.0, -1.0), 20.0, 1.0, 0.5, 9, 0.2)[0] is None
-    # pixels outside the canvas never meet the criterion: the 9 x 9 patch on
-    # the corner pixel of an all-visible canvas holds 5 x 5 canvas pixels
-    full = np.ones((32, 32), dtype=np.float32)  # (32, 32) all visible
-    field = g7._TipField(full, (0.0, 0.0), (-1.0, 0.0), 0.0, 0.0, 0.5, 9)
-    assert abs(field.ratio(0.0, 0.0) - 25 / 81) < 1e-9
-    assert abs(field.ratio(0.4, -0.4) - 25 / 81) < 1e-9  # nearest pixel (0, 0)
-
-
-def test_patch_support_never_grows_with_patch_size():
-    # the rule's support is the smallest ratio over the odd squares 3..P, so a
-    # larger patch (same ratio) can only reject more: a wedge apex fills a
-    # growing square ever better, yet the rule's support must not grow
-    apex = (60.0, 48.0)  # (x, y) float px
-    vis = _aa_wedge(apex, 22.0)  # (96, 96) float32
-    xs = np.arange(40.0, 61.0, 0.5)  # (41,) float64 axis points behind the apex
-    ys = np.full_like(xs, 48.0)  # (41,) float64
-    prev = None  # (41,) float64, rule support at the previous patch size
-    for p in (3, 5, 9, 15, 21, 31):
-        f = g7._TipField(vis, (70.0, 48.0), (1.0, 0.0), 40.0, 1.0, 0.5, p)
-        s = f.rule_support(xs, ys)  # (41,) float64
-        assert np.all(s <= f.ratio(xs, ys) + 1e-12)  # never above the plain P x P ratio
-        if prev is not None:
-            assert np.all(s <= prev + 1e-12), p
-        prev = s
-
-
-def test_tip_threshold_math():
-    from scipy.special import erfinv
-    for c in (0.05, 0.3, 0.5, 0.77, 0.95):
-        assert abs(g7._erfinv(c) - float(erfinv(c))) < 1e-10, c
-    assert g7.tip_width_threshold(0.5, 0.0) == 0.0
-    assert abs(g7.tip_width_threshold(0.5, 1.0) - 1.3490) < 1e-3
-def _slender(res):
-    """Pointer wedge half-angle (float deg) recorded with a render."""
-    g = res.params["geometry"]
-    return math.degrees(math.atan2(g["chord_half"], g["tip_dist"] + g["chord_dist"]))
-
-
 # "section.key" -> value pins (dict): a slender pointer, chord_half = 0.1 x
 # dial radius, so the wedge half-angle is ~5-6 deg (the user's thin-tip case)
 _SLENDER = {"geometry.hub_ratio_range": [0.2, 0.2], "geometry.chord_ratio_range": [0.5, 0.5]}
 
 
-_TIP_RULES = ("patch", "contrast", "clamped", "visible_end", "fallback")  # tuple[str], tip_rule values
+# ── tip label = first base-parallel line with > n pointer pixels ──────────
+
+def _tri_mask(apex, tan_a, height, size=96):
+    """Bool mask (size, size) of an isosceles triangle pointing up (-y): apex
+    (x, y) float px, half-angle tan tan_a (float), height (float px), base at
+    y = apex_y + height.  Pixel (x, y) is in iff 0 <= y - ay <= height and
+    |x - ax| <= (y - ay) tan_a (pixel centres at integer coords)."""
+    ys, xs = np.mgrid[:size, :size]  # (size, size) int pixel grids
+    r = ys - apex[1]  # (size, size) float, depth below the apex
+    return (r >= 0) & (r <= height) & (np.abs(xs - apex[0]) <= r * tan_a + 1e-12)
+
+
+def _tri_corners(apex, tan_a, height):
+    """(B_l, B_r) base corners (x, y) floats of the _tri_mask triangle."""
+    w = height * tan_a  # float px, half base
+    return (apex[0] - w, apex[1] + height), (apex[0] + w, apex[1] + height)
+
+
+@pytest.mark.parametrize("tan_a", [0.21, 0.3, 0.37, 0.45])
+def test_tip_count_label_closed_form(tan_a):
+    # axis-aligned triangle (height along +y, base parallel to x, so the band
+    # around L(t) is the pixel row r with t in [r - 0.5, r + 0.5)).
+    # Apex on a pixel centre (32, 10): row r holds 2 floor(r tan a) + 1 pixels
+    # (row 0 = the apex pixel), so n = 0 puts the label at t = 0, the first row.
+    apex = (32.0, 10.0)  # (x, y) float px
+    pix = _tri_mask(apex, tan_a, 60.0)  # (96, 96) bool
+    (x, y), t, cnt, fb = g7.tip_count_label(pix, apex, *_tri_corners(apex, tan_a, 60.0), 0)
+    assert (x, y, t, cnt, fb) == (32.0, 10.0, 0.0, 1, False)
+    # Apex on a pixel-column boundary (32.5, 10): row r holds
+    # 2 floor(r tan a + 1/2) pixels (even), so count > n (n even) first holds on
+    # row r* = ceil((n + 1) / (2 tan a)) and t* = r* - 1/2 exactly; the closed
+    # form t = (n + 1) / (2 tan a) is within 1/2 of it (the row discretisation).
+    apex = (32.5, 10.0)  # (x, y) float px
+    pix = _tri_mask(apex, tan_a, 60.0)
+    corners = _tri_corners(apex, tan_a, 60.0)  # (B_l, B_r)
+    first_row = math.ceil(0.5 / tan_a)  # int, first non-empty row (2 px)
+    (x, y), t, cnt, fb = g7.tip_count_label(pix, apex, *corners, 0)
+    assert x == 32.5 and abs(t - (first_row - 0.5)) < 1e-9 and cnt == 2 and not fb, (t, cnt)
+    for n in (2, 4, 8):
+        closed = (n + 1) / (2 * tan_a)  # float px, continuous cross-section W = n + 1
+        want = math.ceil(closed) - 0.5  # float px, exact discrete expectation
+        (x, y), t, cnt, fb = g7.tip_count_label(pix, apex, *corners, n)
+        assert abs(t - want) < 1e-9 and abs(t - closed) <= 0.5, (n, t, want, closed)
+        assert x == 32.5 and abs(y - (10.0 + t)) < 1e-12 and cnt > n and not fb
+        assert cnt == 2 * math.floor(math.ceil(closed) * tan_a + 0.5)
+
+
+def _brute_count(pix, apex, base_left, base_right, t):
+    """count(t) of tip_count_label by direct evaluation (int): pointer pixels with
+    -0.5 < d - t k <= 0.5, d along the unit base normal toward the base."""
+    mx, my = (base_left[0] + base_right[0]) / 2, (base_left[1] + base_right[1]) / 2
+    hl = math.hypot(mx - apex[0], my - apex[1])
+    hx, hy = (mx - apex[0]) / hl, (my - apex[1]) / hl  # unit height (floats)
+    bx, by = base_right[0] - base_left[0], base_right[1] - base_left[1]
+    bl = math.hypot(bx, by)
+    nx, ny = -by / bl, bx / bl  # unit base normal (floats)
+    if hx * nx + hy * ny < 0:
+        nx, ny = -nx, -ny
+    k = hx * nx + hy * ny  # float
+    ys, xs = np.nonzero(pix)
+    d = (xs - apex[0]) * nx + (ys - apex[1]) * ny - t * k  # (N,) float64
+    return int(((d > -0.5) & (d <= 0.5)).sum())
+
+
+def test_tip_count_label_matches_brute_force_any_angle():
+    rng = np.random.default_rng(0)  # np Generator for random triangles
+    ys, xs = np.mgrid[:128, :128]  # (128, 128) int grids
+    for _ in range(25):
+        ang = rng.uniform(0, 2 * math.pi)  # float rad, height direction
+        ax, ay = rng.uniform(50, 78, 2)  # float px apex
+        hl, half = rng.uniform(25, 45), rng.uniform(4, 14)  # float px height, half base
+        hx, hy = math.cos(ang), math.sin(ang)
+        # slightly skewed base (a stretched triangle): base direction off the normal
+        sk = rng.uniform(-0.1, 0.1)  # float rad
+        bx, by = -math.sin(ang + sk), math.cos(ang + sk)
+        mx, my = ax + hl * hx, ay + hl * hy
+        bl_, br_ = (mx - half * bx, my - half * by), (mx + half * bx, my + half * by)
+        # pixel mask: inside the triangle (barycentric half-planes) or a hub disc
+        def side(p, q):
+            return (q[0] - p[0]) * (ys - p[1]) - (q[1] - p[1]) * (xs - p[0])
+        s1, s2, s3 = side((ax, ay), bl_), side(bl_, br_), side(br_, (ax, ay))
+        tri = ((s1 >= 0) & (s2 >= 0) & (s3 >= 0)) | ((s1 <= 0) & (s2 <= 0) & (s3 <= 0))
+        pix = tri | (np.hypot(xs - mx, ys - my) <= half * 1.2)  # (128, 128) bool
+        for n in (0, 2, 5):
+            (lx, ly), t, cnt, fb = g7.tip_count_label(pix, (ax, ay), bl_, br_, n)
+            assert not fb
+            assert cnt == _brute_count(pix, (ax, ay), bl_, br_, t) > n, (n, t, cnt)
+            if t > 0:
+                assert _brute_count(pix, (ax, ay), bl_, br_, t - g7.TIP_T_STEP) <= n
+            # on the height A -> M
+            assert abs((lx - ax) * hy - (ly - ay) * hx) < 1e-9
+
+
+def test_tip_count_label_fallback_and_monotonic_unit():
+    apex = (32.5, 10.0)  # (x, y) float px
+    pix = _tri_mask(apex, 0.3, 20.0)  # (96, 96) bool, base width 12 px
+    corners = _tri_corners(apex, 0.3, 20.0)  # (B_l, B_r)
+    ts = [g7.tip_count_label(pix, apex, *corners, n)[1] for n in range(40)]  # list[float]
+    assert all(b >= a for a, b in zip(ts, ts[1:])), ts
+    (x, y), t, cnt, fb = g7.tip_count_label(pix, apex, *corners, 30)
+    assert fb and (x, y) == (32.5, 30.0) and t == 20.0  # no line exceeds 30 px: M'
+    empty = np.zeros((96, 96), dtype=bool)  # (96, 96) bool, no pointer at all
+    assert g7.tip_count_label(empty, apex, *corners, 0)[3] is True
+
+
+# n values (list[int]) for the render-level monotonicity test, increasing
+_N_LADDER = [0, 1, 2, 3, 5, 8, 12, 20, 30]
 
 
 @pytest.mark.parametrize("pins", [{}, _SLENDER], ids=["default", "slender"])
-def test_tip_label_recedes_with_blur(pins):
-    radii = (1, 3, 6)  # int px, dial blur radii in increasing order
-    for seed in range(8):
-        recs = []  # list[float], tip_recession per radius
-        for r in radii:
-            res = g7.render_image(_cfg(**{**pins, "background.dial_circle_blur": True,
-                                          "background.dial_circle_blur_radius": r}), seed)
-            d, ct = res.params["derived"], res.params["cut_tip"]  # dicts
-            assert abs(d["sigma_eff"] - math.hypot(r, 1.0)) < 1e-3
-            for key in ("sigma_eff", "w_star", "tip_recession", "contrast_at_tip",
-                        "patch_ratio_at_tip", "tip_rule"):
-                assert d[key] == ct[key], key
-            assert "tip_width" not in d and "tip_width" not in ct
-            assert d["tip_rule"] in _TIP_RULES, d["tip_rule"]
-            if d["tip_rule"] in ("patch", "contrast"):
-                assert d["contrast_at_tip"] >= 0.5 - 1e-3, d
-            if d["tip_rule"] == "patch":
-                assert d["patch_ratio_at_tip"] >= 0.2 - 1e-3, d
-            recs.append(d["tip_recession"])
-        # blurrier never moves the label forward along the axis
-        assert recs[0] <= recs[1] + 1e-4 and recs[1] <= recs[2] + 1e-4, (seed, recs)
-        if pins:  # a slender pointer moves strictly back with the blur
-            assert _slender(res) < 7.0, _slender(res)
-            assert recs[0] < recs[1] < recs[2], (seed, recs)
-            assert recs[2] - recs[0] > 10.0, (seed, recs)
+def test_tip_label_monotonic_in_min_pixels(pins):
+    for seed in range(12):
+        ts = []  # list[float] px, tip_t per n
+        for n in _N_LADDER:
+            res = g7.render_image(_cfg(**{**pins, "tip_label.min_pixels": n}), seed)
+            d = res.params["derived"]  # dict
+            ts.append(d["tip_t"])
+            if not d["tip_fallback"]:
+                assert d["tip_count"] > n, (seed, n, d["tip_count"])
+        assert all(b >= a - 1e-9 for a, b in zip(ts, ts[1:])), (seed, ts)
+        assert ts[-1] > ts[0], (seed, ts)
 
 
-# knob ("section.key", str) -> increasing values (list): raising any of them
-# must never move the label forward along the pointer axis
-_MONO_KNOBS = {
-    "background.dial_circle_blur_radius": [0, 1, 2, 3, 4, 6],
-    "tip_label.base_blur": [0.0, 0.5, 1.0, 2.0, 4.0],
-    "tip_label.contrast_frac": [0.2, 0.35, 0.5, 0.65, 0.8],
-    "tip_label.patch_size": [3, 5, 9, 15, 21, 31],
-    "tip_label.min_ratio": [0.0, 0.1, 0.2, 0.4, 0.6, 0.9],
-}
+def _dark_on_line(res, back, dark=100, reach=12.0):
+    """Dark pixels a person counts on a base-parallel line of the final image (int).
+
+    The line runs through the label moved `back` px (float) along the height
+    toward the apex (A'), parallel to the stretched drawn base
+    (RenderResult.tip_axis); a pixel counts when its gray < dark (int), its
+    centre lies in the 1-px band -0.5 < signed distance <= 0.5 (distance along
+    the base normal, + toward the base) and within `reach` px of the line point
+    along the base direction (keeps the far face / boundary out).
+    """
+    (ax, ay), (mx, my), (bx, by) = res.tip_axis  # floats, image px
+    hl = math.hypot(mx - ax, my - ay)
+    hx, hy = (mx - ax) / hl, (my - ay) / hl  # unit height (floats)
+    nx, ny = -by, bx  # unit base normal (floats)
+    if hx * nx + hy * ny < 0:
+        nx, ny = -nx, -ny
+    px, py = res.tip_x - back * hx, res.tip_y - back * hy  # float px, point on the line
+    ys, xs = np.nonzero(res.image < dark)  # (N,) int dark pixel coords
+    d = (xs - px) * nx + (ys - py) * ny  # (N,) float64 distance from the line
+    lat = (xs - px) * bx + (ys - py) * by  # (N,) float64 position along the line
+    return int(((d > -0.5) & (d <= 0.5) & (np.abs(lat) <= reach)).sum())
 
 
-@pytest.mark.parametrize("knob", list(_MONO_KNOBS))
-@pytest.mark.parametrize("pins", [{}, _SLENDER], ids=["default", "slender"])
-def test_tip_label_monotonic(knob, pins):
-    base = {**pins, "background.dial_circle_blur": True}  # dict, blur on (radius 3)
-    for seed in range(10):
-        recs = [g7.render_image(_cfg(**{**base, knob: v}), seed).params["derived"]["tip_recession"]
-                for v in _MONO_KNOBS[knob]]  # list[float] px, label recession per value
-        for a, b in zip(recs, recs[1:]):
-            assert b >= a - 1e-4, (knob, seed, recs)
+# "section.key" -> value pins (dict): _CLEAN_TIP (flat face 200, black pointer,
+# no noise / blur / effects / shadows) with a light rim / outer fill, so the
+# only dark pixels near the tip are pointer pixels.  Edge band <= 2 px: a 3-px
+# band blends ring 1 halfway (gray 100 on this face), a pointer pixel by the
+# rule that a "< 100" reader never calls dark
+_COUNT_CLEAN = {**_CLEAN_TIP, "palette.outer_gray_range": [220, 220],
+                "palette.rim_gray_range": [220, 220], "pointer.edge_thickness_range": [1, 2]}
 
 
-@pytest.mark.parametrize("radius", [0, 2, 4])
-def test_patch_rule_keeps_wide_end(radius):
-    # the default (wide, blunt-ended) pointer: the patch rule keeps the label
-    # within ~1 px of the contrast-only rule (min_ratio 0)
-    blur = {"background.dial_circle_blur": radius > 0,
-            "background.dial_circle_blur_radius": max(radius, 1)}  # dict
-    shifts = []  # list[float] px, patch-rule recession - contrast-only recession
-    for seed in range(40):
-        a = g7.render_image(_cfg(**blur, **{"tip_label.min_ratio": 0.0}), seed)
-        b = g7.render_image(_cfg(**blur), seed)
-        shifts.append(b.params["derived"]["tip_recession"] - a.params["derived"]["tip_recession"])
-    shifts = np.array(shifts)  # (40,) float64
-    print("radius %d shift: min %.2f mean %.2f p95 %.2f max %.2f"
-          % (radius, shifts.min(), shifts.mean(), np.percentile(shifts, 95), shifts.max()))
-    assert shifts.min() >= -1e-4
-    assert np.percentile(shifts, 95) <= 1.0, shifts
-
-def _bilinear(img, x, y):
-    """Bilinear gray of img (H, W) at float arrays x, y (same shape) -> float64 array."""
-    h, w = img.shape
-    x = np.clip(x, 0, w - 1.001)
-    y = np.clip(y, 0, h - 1.001)
-    x0, y0 = np.floor(x).astype(int), np.floor(y).astype(int)  # int arrays, top-left pixel
-    fx, fy = x - x0, y - y0  # float arrays, fractional offsets
-    f = img.astype(np.float64)  # (H, W) float64 copy of the image
-    return ((f[y0, x0] * (1 - fx) + f[y0, x0 + 1] * fx) * (1 - fy)
-            + (f[y0 + 1, x0] * (1 - fx) + f[y0 + 1, x0 + 1] * fx) * fy)
-
-
-def _axis_contrast(res, ahead):
-    """Blurred pointer contrast (float) on the final image, judged the way a
-    person reads a tip: the darkest point of the perpendicular profile through
-    the point `ahead` px beyond the label along the (stretched) axis (within 3 px
-    of the axis), against the face beside it (median of the profile at 9..14 px
-    off the axis): (bg - min) / (bg - pointer gray)."""
-    g = res.params["geometry"]
-    ux, uy = _unit_dir(res.angle_deg)  # unit pointer direction, unstretched (floats)
-    vx, vy = ux * g["stretch_h"], uy * g["stretch_v"]
-    n = math.hypot(vx, vy)
-    vx, vy = vx / n, vy / n  # unit stretched axis (floats)
-    px, py = res.tip_x + ahead * vx, res.tip_y + ahead * vy  # profile centre (floats)
-    s = np.arange(-14.0, 14.0 + 1e-9, 0.25)  # (113,) float64 lateral offsets
-    prof = _bilinear(res.image, px - s * vy, py + s * vx)  # (113,) float64 gray profile
-    bg = float(np.median(prof[np.abs(s) >= 9]))  # float, face gray beside the pointer
-    return (bg - float(prof[np.abs(s) <= 3].min())) / (bg - res.params["pointer"]["gray"])
-
-
-def _patch_share(res, patch, frac, bg):
-    """Share (float) of the patch x patch square centred on the label's nearest
-    pixel whose measured contrast fraction (bg - gray) / (bg - pointer gray) in
-    the final image is >= frac; pixels outside the image count as failing."""
-    ix, iy = int(math.floor(res.tip_x + 0.5)), int(math.floor(res.tip_y + 0.5))  # int px
-    h = patch // 2  # int px, half side
-    win = np.zeros((patch, patch), dtype=np.float64)  # (P, P) float64, 0 = fails
-    sub = res.image[max(iy - h, 0):iy + h + 1, max(ix - h, 0):ix + h + 1]  # in-image part
-    oy, ox = max(h - iy, 0), max(h - ix, 0)  # int, where it lands in the window
-    win[oy:oy + sub.shape[0], ox:ox + sub.shape[1]] = (
-        (bg - sub.astype(np.float64)) / (bg - res.params["pointer"]["gray"]) >= frac)
-    return float(win.mean())
-
-
-# contrast tolerances (float), see test_tip_label_visible_after_blur: the
-# perpendicular profile at the label keeps >= c - _AT_LABEL_TOL, 3 sigma_eff
-# beyond it < c + _AHEAD_TOL, and >= min_ratio - _PATCH_TOL of the label's
-# patch measures >= c - 0.1 in the final image
-_AT_LABEL_TOL = 0.12
-_AHEAD_TOL = 0.10
-_PATCH_TOL = 0.05
-
-
-@pytest.mark.parametrize("case", ["slender", "default"])
-def test_tip_label_visible_after_blur(case):
-    tl = v7_config.default_config()["tip_label"]  # dict, default tip_label section
-    c, ratio, patch = tl["contrast_frac"], tl["min_ratio"], tl["patch_size"]  # float, float, int
-    at, ahead, share = [], [], []  # list[float], contrast at / ahead of the label, patch share
-    pins = _SLENDER if case == "slender" else {}  # dict, geometry pins
-    for radius in (2, 4):
-        cfg = _cfg(**{**_CLEAN_TIP, **pins, "background.dial_circle_blur": True,
-                      "background.dial_circle_blur_radius": radius,
-                      "cut_tip.enabled": True, "cut_tip.radius_range": [7, 10]})
-        for seed in range(40):
-            res = g7.render_image(cfg, seed)
-            se = res.params["derived"]["sigma_eff"]  # float px
-            a, b = _axis_contrast(res, 0.0), _axis_contrast(res, 3 * se)
-            s = _patch_share(res, patch, c - 0.1, 200.0)  # bg pinned to 200
-            at.append(a)
-            ahead.append(b)
-            share.append(s)
-            assert a >= c - _AT_LABEL_TOL, (radius, seed, a)
-            assert b < c + _AHEAD_TOL, (radius, seed, b)
-            assert s >= ratio - _PATCH_TOL, (radius, seed, s)
-    print("%s contrast at label: min %.3f mean %.3f max %.3f"
-          % (case, min(at), np.mean(at), max(at)))
-    print("%s contrast 3 sigma ahead: min %.3f mean %.3f max %.3f"
-          % (case, min(ahead), np.mean(ahead), max(ahead)))
-    print("%s patch share: min %.3f mean %.3f max %.3f"
-          % (case, min(share), np.mean(share), max(share)))
+@pytest.mark.parametrize("cut", [False, True], ids=["cut_off", "cut_on"])
+def test_tip_label_counts_dark_pixels(cut):
+    # a person draws the base-parallel line through the label on the final
+    # image and counts the dark pixels on it: more than n; one pixel closer to
+    # the apex: at most n
+    n = v7_config.default_config()["tip_label"]["min_pixels"]  # int, default n
+    cfg = _cfg(**{**_COUNT_CLEAN, "cut_tip.enabled": cut})
+    at, closer = [], []  # list[int], dark counts on the label line / 1 px closer
+    for seed in range(60):
+        res = g7.render_image(cfg, seed)
+        assert not res.params["derived"]["tip_fallback"], seed
+        at.append(_dark_on_line(res, 0.0))
+        closer.append(_dark_on_line(res, 1.0))
+    at, closer = np.array(at), np.array(closer)  # (60,) int64 each
+    print("%s n=%d: count at label %s; 1 px closer %s; closer <= n for %.0f%%"
+          % ("cut on" if cut else "cut off", n, np.bincount(at).tolist(),
+             np.bincount(closer).tolist(), 100 * (closer <= n).mean()))
+    assert (at > n).all(), at
+    assert (closer <= n).mean() >= 0.9, closer
 
 
 # ── the label sits on the principal axis (after stretch, displacements, offset) ──
@@ -1410,17 +1224,21 @@ def _line_dist(px, py, ax, ay, bx, by):
 
 
 def test_tip_on_principal_axis_geometry():
+    # 200 seeds at the schema-max stretch / displacements: the label lies on the
+    # stretched drawn height A' -> M' (unrounded RenderResult.tip_axis)
     cfg = _cfg(**_AXIS_EXTREMES)
-    dist = []  # list[float] px, label distance from the hub -> apex line
+    dist, ts = [], []  # list[float] px, label distance from A'M', and tip_t
     for seed in range(200):
         res = g7.render_image(cfg, seed)
-        d = res.params["derived"]  # dict
-        dist.append(_line_dist(res.tip_x, res.tip_y, d["axis_base_mid_x"], d["axis_base_mid_y"],
-                               d["axis_apex_x"], d["axis_apex_y"]))
+        (ax, ay), (mx, my), _bdir = res.tip_axis  # floats, image px
+        dist.append(_line_dist(res.tip_x, res.tip_y, ax, ay, mx, my))
+        along = ((res.tip_x - ax) * (mx - ax) + (res.tip_y - ay) * (my - ay)) / math.hypot(mx - ax, my - ay)
+        assert -1e-9 <= along <= math.hypot(mx - ax, my - ay) + 1e-9, seed  # between A' and M'
+        ts.append(along)
     dist = np.array(dist)  # (200,) float64
-    print("axis (geometry) dist: mean %.4f p95 %.4f max %.4f"
-          % (dist.mean(), np.percentile(dist, 95), dist.max()))
-    assert dist.max() < 0.05, dist.max()
+    print("axis (geometry) dist: max %.2e; tip_t mean %.2f max %.2f"
+          % (dist.max(), np.mean(ts), np.max(ts)))
+    assert dist.max() < 1e-6, dist.max()
 
 
 def _stretched_centres(res):

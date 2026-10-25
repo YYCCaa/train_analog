@@ -176,6 +176,9 @@ _REMOVED = {
     ("reflections", "threshold_pct_range"), ("glares", "threshold_pct_range"),
     ("reflections", "patch_size_range"), ("glares", "patch_size_range"),
     ("shadows", "gray_range"), ("shadows", "opacity_range"), ("shadows", "rim_opacity_range"),
+    # blur-aware tip label keys, replaced by the pixel-count rule tip_label.min_pixels
+    ("tip_label", "contrast_frac"), ("tip_label", "base_blur"),
+    ("tip_label", "patch_size"), ("tip_label", "min_ratio"),
 }
 
 
