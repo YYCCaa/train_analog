@@ -68,7 +68,7 @@ pointer:
   edge_thickness_range: {type: int_range, min: 0, max: 8, step: 1, help: "Pointer edge band width (px); 0 = no edge band."}
   edge_max_frac: {type: float, min: 0, max: 1, step: 0.01, help: "Max pointer edge band width as a fraction of the triangle's cross-section width at each height (1 = no clamp)."}
   edge_noise_amplitude: {type: int, min: 0, max: 32, step: 1, help: "Per-pixel noise amplitude on the pointer edge (+/-)."}
-  min_bg_contrast: {type: int, min: 0, max: 255, step: 1, help: "Minimum |pointer gray − face gray|, for the bare face and the darkest shadowed face (the pointer gray is drawn after bg and shadow); 0 = off. Images with no allowed gray get an endpoint of the range; a warning shows when that is more than 0.5% of images."}
+  min_bg_contrast: {type: int, min: 0, max: 255, step: 1, help: "Minimum |pointer gray − face gray| against the bare face and against the darkest shadowed face (two windows of ±c; grays between the two faces are allowed); the pointer gray is drawn after bg and shadow; 0 = off. Warns when it leaves no allowed gray."}
 
 background:
   lowfreq_size: {type: int, min: 2, max: 32, step: 1, help: "Low-frequency background tile resolution (NxN)."}
