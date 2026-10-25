@@ -489,22 +489,74 @@ def _shadow_strengths(S, srng):
 
 # ── pointer ─────────────────────────────────────────────────────────────
 
+def pointer_along_max(hub_radius, tip_dist):
+    """Largest |along_norm| (float) a pointer body pixel can reach in this image.
+
+    along_norm = along / max(tip_dist, 1) is +1 at the ideal apex and
+    -hub_radius / tip_dist at the back of the hub.  Rasterised pixels can sit
+    up to ~1 px beyond the ideal outline (PIL fills the floored polygon /
+    ellipse), so 2 px of slack are added: (max(tip, hub) + 2) / max(tip, 1).
+    Uses only the geometry stream's draws (hub_radius, tip_dist; float px).
+    """
+    return (max(tip_dist, hub_radius) + 2.0) / max(tip_dist, 1.0)
+
+
+def pointer_headroom(gradient_range, along_max, noise_amp):
+    """Config-level headroom H (float, gray levels) the body gray keeps from 0 / 255:
+
+        H = max(|gradient_range[0]|, |gradient_range[1]|) * along_max + noise_amp
+
+    It bounds |grad_shift| + |noise| for ANY gradient the pointer stream may
+    still draw (grad_strength is drawn after the gray, so it is not used).
+    """
+    g_abs = max(abs(float(gradient_range[0])), abs(float(gradient_range[1])))  # float
+    return g_abs * float(along_max) + float(noise_amp)
+
+
 def _pointer_variation(img, mask, cx, cy, angle_deg, tip_dist, grad_strength,
-                       noise_amp, nrng):
+                       noise_amp, nrng, info=None):
     """Lengthwise brightness gradient + per-pixel noise on the pointer body.
 
-    img: "L" canvas; mask: "L" pointer mask; nrng: "pointer" np Generator.
+    img: "L" canvas, the body drawn flat at the pointer gray g; mask: "L"
+    pointer mask; nrng: "pointer" np Generator; info: optional dict, filled
+    with info["amp_scale"] = k (float).
+
+    Continuous amplitude scale, so the body never leaves 0..255:
+
+        H_img = max|grad_shift| + noise_amp          (this image's actual gradient)
+        k     = min(1, min(g, 255 - g) / H_img)      (1 when H_img = 0)
+        px    = g + rint(k * (grad_shift + noise))   (k = 1: bit-identical to the old sum)
+
+           0 ─────── g-kH ═════ g ═════ g+kH ─────── 255
+                      └── body spread, never touches 0 / 255 ──┘
+
+    The noise array is drawn exactly as before (same size and dtype) and only
+    multiplied, so the pointer stream's draw count is unchanged.  The np.clip
+    stays as a safety net; it never changes a value.
     """
     arr = np.array(img).astype(np.int16)  # (C, C) int16
     ys, xs = np.where(np.array(mask) > 0)
     if len(ys) == 0:
+        if info is not None:
+            info["amp_scale"] = 1.0
         return img
     a = math.radians(angle_deg - 90)
     along = ((xs - cx) * math.cos(a) + (ys - cy) * math.sin(a)).astype(np.float32)
-    along_norm = along / max(tip_dist, 1)  # (N,) float32, -1 hub .. +1 tip
+    along_norm = along / max(tip_dist, 1)  # (N,) float32, -hub/tip at the hub back .. +1 tip
     grad_shift = (along_norm * grad_strength).astype(np.int16)  # (N,) int16
-    noise = nrng.integers(-noise_amp, noise_amp + 1, size=len(ys), dtype=np.int16)
-    arr[ys, xs] = np.clip(arr[ys, xs] + grad_shift + noise, 0, 255)
+    noise = nrng.integers(-noise_amp, noise_amp + 1, size=len(ys), dtype=np.int16)  # (N,) int16
+    base = arr[ys, xs]  # (N,) int16, the flat body gray before variation
+    # int, levels from the body gray to the nearer of 0 / 255 (the body is flat
+    # g, so this is min(g, 255 - g))
+    room = int(min(base.min(), 255 - base.max()))
+    h_img = int(np.abs(grad_shift).max()) + int(noise_amp)  # int, this image's max |shift + noise|
+    k = 1.0 if h_img <= room else room / h_img  # float in [0, 1], amplitude scale
+    var = grad_shift + noise  # (N,) int16, unscaled variation
+    if k < 1.0:
+        var = np.rint(var.astype(np.float64) * k).astype(np.int16)  # (N,) int16, |var| <= room
+    if info is not None:
+        info["amp_scale"] = k
+    arr[ys, xs] = np.clip(base + var, 0, 255)  # safety net only: never changes a value
     return Image.fromarray(arr.astype(np.uint8))
 
 
@@ -605,8 +657,15 @@ def _draw_pointer_edge(img, mask, edge_gray, bg_arr, thickness, noise_amp, nrng,
         ys, xs, noise, ring, t_eff = ys[keep], xs[keep], noise[keep], ring[keep], t_eff[keep]
         blend = (ring / np.maximum(t_eff - 1, 1)).astype(np.float32)  # (N',) float32
     bg = bg_arr[ys, xs].astype(np.int16)  # (N,) int16
-    blended = (bg + blend * (edge_gray - bg) + noise).astype(np.int16)
-    arr[ys, xs] = np.clip(blended, 0, 255).astype(np.uint8)
+    v = bg + blend * (edge_gray - bg)  # (N,) float, noiseless band value in [0, 255]
+    if noise_amp > 0:
+        # per-pixel noise scale k_e = min(1, min(v, 255 - v) / amp), (N,) float:
+        # v + k_e * noise stays in [0, 255]; k_e = 1 leaves the old sum bit for bit
+        k_e = np.minimum(1.0, np.minimum(v, 255.0 - v) / float(noise_amp))
+        blended = (v + np.where(k_e < 1.0, k_e * noise, noise)).astype(np.int16)  # (N,) int16
+    else:
+        blended = (v + noise).astype(np.int16)  # (N,) int16, noise is all 0
+    arr[ys, xs] = np.clip(blended, 0, 255).astype(np.uint8)  # safety net: never changes a value
     bg_painted[ys[blend == 0], xs[blend == 0]] = True
     return Image.fromarray(arr), bg_painted
 
@@ -625,9 +684,11 @@ def pointer_forbidden_interval(bg_gray, min_contrast, s_max=0.0):
     return bg_gray * (1.0 - s_max) - min_contrast, float(bg_gray + min_contrast)
 
 
-def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0, info=None):
+def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0, info=None,
+                       headroom=0.0):
     """Draw the pointer body gray (int) with at least `min_contrast` levels of
-    separation from the bare face gray AND from the darkest shadowed face.
+    separation from the bare face gray AND from the darkest shadowed face, and
+    `headroom` levels of room from 0 / 255 for the gradient + noise.
 
     rng          : the "pointer" random.Random; exactly ONE randint call is made
     lo, hi       : int, inclusive pointer.gray_range
@@ -635,7 +696,17 @@ def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0, info=None)
     min_contrast : int >= 0, pointer.min_bg_contrast; 0 = off
     s_max        : float 0-1, max(s_p, s_r) with a shadow, 0 without one
     info         : optional dict; info["fallback"] (bool) is set True when the
-                   allowed set was empty (farthest-endpoint fallback), else False
+                   allowed set was empty (farthest-endpoint fallback), else
+                   False; info["headroom_ok"] (bool) True when I is restricted
+    headroom     : float >= 0, H (pointer_headroom); 0 = no restriction
+
+    Base interval (headroom-restricted draw, nothing piles up at 0 / 255):
+
+        0 ── H ──[ I = [lo, hi] ∩ [ceil(H), floor(255 - H)] ]── H ── 255
+        (I empty, e.g. gray_range [255, 255]: I = [lo, hi]; the amplitude
+         scale in _pointer_variation then keeps the body in range)
+
+    Everything below (forbidden interval, index map, fallback) works on I.
 
     The pointer gray is drawn after the bg and the shadow strengths (they live
     on the palette / shadows streams, drawn earlier).  The faces it may sit on
@@ -648,13 +719,23 @@ def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0, info=None)
         lo ...... floor(f_lo) | forbidden: bare + shadowed face +- c | bg+c ...... hi
         [ index 0 .. n_low-1 ]                                         [ n_low .. n-1 ]
 
-    With c = 0 the set is all of [lo, hi] (whatever s_max) and
-    randint(0, n-1) + lo equals randint(lo, hi) bit for bit (both are
-    lo + randbelow(n)).  With s_max = 0 this is the plain |g - bg| >= c rule.
-    If the set is empty, one randint(lo, hi) draw is still consumed and the
-    endpoint of [lo, hi] farthest from the forbidden interval is returned (the
+    With c = 0 the set is all of I = [I_lo, I_hi] (whatever s_max) and
+    randint(0, n-1) + I_lo equals randint(I_lo, I_hi) bit for bit (both are
+    I_lo + randbelow(n)).  With s_max = 0 this is the plain |g - bg| >= c rule.
+    If the set is empty, one randint(I_lo, I_hi) draw is still consumed and
+    the endpoint of I farthest from the forbidden interval is returned (the
     lower one on a tie).
     """
+    # base interval I = [lo, hi] ∩ [ceil(H), floor(255 - H)] when non-empty
+    # (headroom for the gradient + noise), else [lo, hi]; ints
+    i_lo = max(lo, int(math.ceil(headroom - 1e-9)))  # int, bottom of I
+    i_hi = min(hi, int(math.floor(255 - headroom + 1e-9)))  # int, top of I
+    headroom_ok = i_lo <= i_hi  # bool, I is the restricted interval
+    if not headroom_ok:
+        i_lo, i_hi = lo, hi
+    if info is not None:
+        info["headroom_ok"] = headroom_ok
+    lo, hi = i_lo, i_hi  # everything below works on I
     f_lo, f_hi = pointer_forbidden_interval(bg_gray, min_contrast, s_max)  # float bounds
     low_hi = min(hi, int(math.floor(f_lo + 1e-9)))  # int, top of the lower interval
     high_lo = max(lo, bg_gray + min_contrast)  # int, bottom of the upper interval
@@ -666,8 +747,8 @@ def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0, info=None)
         info["fallback"] = n_low + n_high == 0
     if n_low + n_high == 0:
         rng.randint(lo, hi)  # keep the stream's draw count fixed
-        # distance of each endpoint from the forbidden interval (float): hi above
-        # f_hi, lo below f_lo; c cancels, so compare hi - bg with bg (1 - s) - lo
+        # distance of each endpoint of I from the forbidden interval (float): hi
+        # above f_hi, lo below f_lo; c cancels, so compare hi - bg with bg (1 - s) - lo
         return hi if hi - bg_gray > bg_gray * (1.0 - s_max) - lo else lo
     idx = rng.randint(0, n_low + n_high - 1)  # int, index into the allowed set
     return lo + idx if idx < n_low else high_lo + (idx - n_low)
@@ -675,9 +756,11 @@ def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0, info=None)
 
 def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
                  chord_dist, ptr_gray, edge_gray, grad_strength, pcfg, nrng,
-                 edge_thickness, cut_tip_radius):
+                 edge_thickness, cut_tip_radius, info=None):
     """Draw the pointer on the "L" canvas.  pcfg = cfg["pointer"] (its
     edge_max_frac clamps the edge band on the triangle, see _draw_pointer_edge).
+    info: optional dict, filled with info["amp_scale"] (float, the body's
+    gradient + noise scale k of _pointer_variation).
 
     Returns (img, apex, base_left, base_right, mask, ptr_pix): apex / base_left
     / base_right are the ideal (float) triangle vertices, (x, y) float px; mask
@@ -709,7 +792,7 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
     draw.ellipse(hub_box, fill=ptr_gray, outline=ptr_gray)
 
     img = _pointer_variation(img, mask, cx, cy, angle_deg, tip_dist,
-                             grad_strength, pcfg["noise_amplitude"], nrng)
+                             grad_strength, pcfg["noise_amplitude"], nrng, info)
     # drawn triangle for the edge clamp: floored vertices (ImageDraw floors
     # them) + its polygon pixels, (C, C) bool
     tri_img = Image.new("L", img.size, 0)  # "L" (C, C), triangle-only polygon
@@ -1270,9 +1353,15 @@ def render_image(cfg, image_seed):
     # (palette / shadows streams), so the pointer stream's order is unchanged
     s_max = max(s_p, s_r) if has_shadow else 0.0  # float 0-1, strongest shadow
     f_lo, f_hi = pointer_forbidden_interval(bg_gray, PT["min_bg_contrast"], s_max)  # float bounds
-    gray_info = {}  # dict, {"fallback": bool} from _pick_pointer_gray
+    # headroom H (float, gray levels) the body gray keeps from 0 / 255: the
+    # largest |gradient| the config allows times this image's largest
+    # |along_norm| (geometry, drawn already) + the noise amplitude
+    headroom = pointer_headroom(PT["gradient_range"], pointer_along_max(hub_radius, tip_dist),
+                                PT["noise_amplitude"])
+    gray_info = {}  # dict, {"fallback": bool, "headroom_ok": bool} from _pick_pointer_gray
     ptr_gray = _pick_pointer_gray(ptr_rng, *PT["gray_range"], bg_gray,
-                                  PT["min_bg_contrast"], s_max, gray_info)  # int body gray
+                                  PT["min_bg_contrast"], s_max, gray_info,
+                                  headroom)  # int body gray
     hole_gray = int(ptr_gray * ptr_rng.uniform(*PT["darker_frac_range"]))  # int
     edge_gray = int(ptr_gray * ptr_rng.uniform(*PT["darker_frac_range"]))  # int
     grad_strength = ptr_rng.uniform(*PT["gradient_range"])  # float
@@ -1282,7 +1371,8 @@ def render_image(cfg, image_seed):
     rec["pointer"] = {"gray": ptr_gray, "hole_gray": hole_gray, "edge_gray": edge_gray,
                       "gradient": grad_strength, "edge_thickness": edge_thickness,
                       "forbidden_lo": f_lo, "forbidden_hi": f_hi,
-                      "gray_fallback": gray_info["fallback"]}
+                      "gray_fallback": gray_info["fallback"],
+                      "headroom": headroom, "headroom_ok": gray_info["headroom_ok"]}
 
     # hole drawn BEFORE the pre-pointer snapshot so it survives the cut-tip restore
     ImageDraw.Draw(img).ellipse([hole_cx - hole_r, hole_cy - hole_r,
@@ -1295,7 +1385,7 @@ def render_image(cfg, image_seed):
     img, apex, base_l, base_r, ptr_mask, ptr_pix = draw_pointer(
         img, ptr_cx, ptr_cy, angle_deg, hub_radius, tip_dist, chord_half,
         chord_dist, ptr_gray, edge_gray, grad_strength, PT, ptr_np,
-        edge_thickness, cut_r if C["enabled"] else None)
+        edge_thickness, cut_r if C["enabled"] else None, rec["pointer"])
     if bg_pre_ptr is not None:
         img.paste(bg_pre_ptr, mask=Image.fromarray(255 - np.array(ptr_mask)))
     # label inputs; the label itself is found after step 10 (it must see the rim)

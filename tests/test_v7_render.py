@@ -277,6 +277,119 @@ def test_pick_pointer_gray():
     g7._pick_pointer_gray(c1, 100, 200, 150, 200)
     c2.randint(100, 200)
     assert c1.random() == c2.random(), "infeasible case must consume one draw"
+    # headroom H: c = 0 is randint(I_lo, I_hi) bit for bit, I = [lo, hi] ∩ [ceil H, floor(255 - H)]
+    # (lo, hi, H) -> (I_lo, I_hi, headroom_ok): I empty falls back to [lo, hi]
+    cases = {(0, 255, 50.56): (51, 204, True), (100, 230, 50.56): (100, 204, True),
+             (0, 255, 0.0): (0, 255, True), (40, 41, 60.0): (40, 41, False),
+             (250, 255, 50.0): (250, 255, False)}  # dict[tuple, tuple]
+    for (lo, hi, h), (i_lo, i_hi, ok) in cases.items():
+        for s in range(300):
+            info = {}  # dict, fallback / headroom_ok flags out
+            want = random.Random(s).randint(i_lo, i_hi)  # int, randint over I
+            got = g7._pick_pointer_gray(random.Random(s), lo, hi, 160, 0, 0.0, info, h)
+            assert got == want, (lo, hi, h, s)
+            assert info == {"fallback": False, "headroom_ok": ok}, (lo, hi, h)
+    # c > 0 on I: the forbidden interval is removed from I, the fallback endpoint is I's
+    vals = {g7._pick_pointer_gray(rng, 0, 255, 160, 60, 0.0, None, 50.56) for _ in range(3000)}
+    assert vals == set(range(51, 101))  # [51, 100]; the upper part [220, 204] is empty
+    assert g7._pick_pointer_gray(random.Random(0), 0, 255, 150, 120, 0.0, None, 50.56) == 51
+
+
+# ── A: pointer body / edge never clip (headroom gray + amplitude scale) ────
+
+# "section.key" -> value pins (dict): the brief's stressed pointer config
+_PTR_STRESS = {"pointer.gray_range": [0, 255], "pointer.gradient_range": [-100.0, 100.0],
+               "pointer.noise_amplitude": 64, "pointer.edge_noise_amplitude": 32}
+
+
+def _clip_counter(monkeypatch):
+    """Wrap np.clip so calls from the two pointer functions count changed values.
+
+    Returns a dict[str, int] {"_pointer_variation": n, "_draw_pointer_edge": n}
+    of elements the clip changed, updated live while renders run.
+    """
+    import sys
+    counts = {"_pointer_variation": 0, "_draw_pointer_edge": 0}  # dict[str, int]
+    orig = np.clip  # the real numpy clip
+
+    def clip(a, lo, hi, *args, **kw):
+        out = orig(a, lo, hi, *args, **kw)
+        name = sys._getframe(1).f_code.co_name  # str, the calling function
+        if name in counts:
+            counts[name] += int(np.count_nonzero(np.asarray(out) != np.asarray(a)))
+        return out
+    monkeypatch.setattr(np, "clip", clip)
+    return counts
+
+
+@pytest.mark.parametrize("pins", [{}, _PTR_STRESS], ids=["default", "stressed"])
+def test_pointer_clip_never_changes_a_value(monkeypatch, pins):
+    counts = _clip_counter(monkeypatch)  # dict[str, int], live
+    cfg = _cfg(**pins)
+    scaled = 0  # int, renders whose amplitude scale k < 1
+    for seed in range(300):
+        p = g7.render_image(cfg, seed).params["pointer"]
+        assert 0.0 <= p["amp_scale"] <= 1.0
+        scaled += p["amp_scale"] < 1.0
+    assert counts == {"_pointer_variation": 0, "_draw_pointer_edge": 0}, counts
+    if pins:
+        assert scaled > 0, "the stressed config never exercised the amplitude scale"
+
+
+def test_pointer_gray_and_body_have_no_point_mass(monkeypatch):
+    # body pixel values after gradient + noise, pooled over renders (list of (N,) uint8)
+    body = []
+    orig = g7._pointer_variation
+
+    def wrapped(img, mask, *args, **kw):
+        out = orig(img, mask, *args, **kw)
+        body.append(np.asarray(out)[np.asarray(mask) > 0])
+        return out
+    monkeypatch.setattr(g7, "_pointer_variation", wrapped)
+    cfg = v7_config.default_config()
+    grays = []  # list[int], drawn body grays
+    for seed in range(300):
+        p = g7.render_image(cfg, seed).params["pointer"]
+        grays.append(p["gray"])
+        assert p["headroom_ok"] is True and p["headroom"] == pytest.approx(51.0, abs=1.0)
+    lo_g, hi_g = min(grays), max(grays)  # int, the gray draw stays inside I
+    assert lo_g >= 50 and hi_g <= 205, (lo_g, hi_g)
+    px = np.concatenate(body)  # (M,) uint8, every body pixel
+    freq = np.bincount(px, minlength=256) / px.size  # (256,) float64, value frequencies
+    assert freq.max() <= 3.0 / 256, (int(freq.argmax()), float(freq.max()) * 256)
+    # the gray draw itself: one randint over I (c = 0), so uniform; check on many draws
+    import random
+    rng = random.Random(5)  # random.Random, a stand-in pointer stream
+    vals = np.array([g7._pick_pointer_gray(rng, 0, 255, 160, 0, 0.0, None, 50.56)
+                     for _ in range(20000)])  # (20000,) int
+    counts = np.bincount(vals, minlength=256)  # (256,) int
+    n_support = 204 - 51 + 1  # int, |I|
+    assert counts[:51].sum() == 0 and counts[205:].sum() == 0
+    assert counts.max() <= 3 * 20000 / n_support
+
+
+def test_edge_noise_scaled_near_extremes():
+    # unit: band pixels whose noiseless value sits at 0 / 255 get no noise
+    import random
+    m = np.zeros((32, 32), np.uint8)  # (32, 32) uint8 mask
+    m[8:24, 8:24] = 255
+    from PIL import Image
+    for edge_gray, bgv in ((0, 0), (255, 255), (3, 250)):
+        img = Image.fromarray(np.full((32, 32), 128, np.uint8))  # "L" canvas
+        bg = np.full((32, 32), bgv, np.uint8)  # (32, 32) uint8 pre-pointer canvas
+        out, _ = g7._draw_pointer_edge(img, Image.fromarray(m), edge_gray, bg, 3, 32,
+                                       np.random.default_rng(0))
+        a = np.asarray(out)
+        band = (m > 0) & (a != 128)  # (32, 32) bool, painted band pixels
+        assert band.any()
+        if edge_gray == bgv:
+            assert (a[band] == bgv).all(), np.unique(a[band])  # k_e = 0: exact value
+    # draw count unchanged: same stream state after, with and without noise scaling
+    r1, r2 = np.random.default_rng(1), np.random.default_rng(1)
+    img = Image.fromarray(np.full((32, 32), 128, np.uint8))
+    g7._draw_pointer_edge(img, Image.fromarray(m), 0, np.zeros((32, 32), np.uint8), 3, 32, r1)
+    g7._draw_pointer_edge(img, Image.fromarray(m), 128, np.full((32, 32), 128, np.uint8), 3, 32, r2)
+    assert r1.integers(0, 1 << 30) == r2.integers(0, 1 << 30)
 
 
 # sha256 hex (str) of default-config renders with digits hidden (so the
@@ -1462,17 +1575,21 @@ def test_pointer_forbidden_interval_unit():
     assert c1.random() == c2.random(), "infeasible case must consume one draw"
     info = {}  # dict, fallback flag out
     g7._pick_pointer_gray(random.Random(1), 0, 200, 150, 80, 0.6, info)
-    assert info == {"fallback": True}
+    assert info == {"fallback": True, "headroom_ok": True}  # headroom 0: I = [lo, hi]
     g7._pick_pointer_gray(random.Random(1), 0, 255, 150, 0, 0.6, info)  # c = 0: never
-    assert info == {"fallback": False}
+    assert info == {"fallback": False, "headroom_ok": True}
     # bg 100, s 0.1 -> faces [90, 100], c 200: hi is 140 above, lo 90 below -> hi
     assert g7._pick_pointer_gray(random.Random(0), 0, 240, 100, 200, 0.1) == 240
 
 
 def test_render_records_forbidden_interval():
+    # no gradient / noise: headroom H = 0, so the base interval I is the whole
+    # gray range and the contrast rule alone decides (H > 0 would leave
+    # I = [51, 204] inside the forbidden (14, 210): the endpoint fallback)
     pins = {"shadows.prob": 1.0, "shadows.strength_range": [0.6, 0.6],
             "shadows.strength_jitter": 0.0, "palette.bg_gray_range": [160, 160],
-            "pointer.min_bg_contrast": 50}
+            "pointer.min_bg_contrast": 50, "pointer.gradient_range": [0.0, 0.0],
+            "pointer.noise_amplitude": 0}
     for seed in range(6):
         p = g7.render_image(_cfg(**pins), seed).params  # dict, sampled values
         pt = p["pointer"]  # dict
