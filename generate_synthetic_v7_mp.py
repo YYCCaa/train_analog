@@ -60,11 +60,21 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
 
 The pointer: a hub circle + an isosceles triangle whose base is a chord
 of the hub, apex pointing outward.  Pixel coordinates: pixel i's centre at i.
+The triangle is our own hard raster (raster_pointer_triangle), not Pillow's
+polygon, so a thin tip never forms a "ball":
+
+          A ●            per scan line (rows, or columns for a near-
+           ╱·╲             horizontal pointer): w = exact width (float),
+          ╱ ▓ ╲  w 1.2      n = floor(w + 0.5) px, run centred on the
+         ╱ ▓▓  ╲ w 1.9      true midline (start = floor(c - (n-1)/2 + 0.5))
+        ╱  ▓▓   ╲ w 2.3   -> n never shrinks going away from A, |n - w| <= 0.5,
+       ╱  ▓▓▓    ╲ w 2.7     no pixel where w < 0.5
 
 Tip label (tip_count_label): a pixel count on the triangle actually DRAWN.
 
-    1  drawn triangle: ImageDraw floors float polygon vertices, so the drawn
-       apex A = floor(apex) and base corners B_l, B_r = floor(base_left / _right);
+    1  triangle: the EXACT float apex A and base corners B_l, B_r (the
+       pointer raster, raster_pointer_triangle, draws from them unrounded:
+       per scan line round(width) px centred on the true midline);
        M = (B_l + B_r) / 2 is the base midpoint, A -> M the isosceles height
     2  stretch: the same affine as the image.  Image.AFFINE works in pixel-corner
        coords, so with pixel centres at integer coords the stretch is about
@@ -73,8 +83,8 @@ Tip label (tip_count_label): a pixel count on the triangle actually DRAWN.
        the height, not the stretched triangle's perpendicular altitude
     3  pointer pixels, on the stretched canvas, geometry only (before noise,
        blur and effects): the pre-stretch set (cut mask, minus the edge-ring
-       pixels painted pure background, plus the outline sliver with the cut
-       off) stretched BICUBIC like the image and thresholded >= 128, minus the
+       pixels painted pure background; the body is painted through the mask,
+       so nothing else) stretched BICUBIC like the image and thresholded >= 128, minus the
        rim band / outer fill (`covered`).  Hub-disc pixels count too.
     4  scan t on a 0.05 px grid in [0, |M' - A'|]:
 
@@ -106,7 +116,7 @@ Edge clamp (pointer.edge_max_frac = f, edge_thickness_map): the edge band of
 thickness t (ring 0 blends to the background, inner rings to edge gray) is
 narrowed on the triangle so a thin end is not eaten by its own band:
 
-          A ●   W(h) = |B_r - B_l| h / |M - A|, h = projection on the drawn height
+          A ●   W(h) = |B_r - B_l| h / |M - A|, h = projection on the height
            ╱█╲       t_eff = min(t, floor(f W(h)))
           ╱███╲      ring k painted iff k < t_eff, blend k / max(t_eff - 1, 1)
          ╱░███░╲     (█ body, ░ band; near A, f W < 1: no band, body to the edge)
@@ -308,7 +318,7 @@ def section_rngs(image_seed):
 class RenderResult:
     """One rendered dial and its label."""
     image: np.ndarray  # gray dial image, (img_size, img_size) uint8
-    tip_x: float  # tip label x, image px (float): on the drawn triangle's height (tip_count_label)
+    tip_x: float  # tip label x, image px (float): on the triangle's height (tip_count_label)
     tip_y: float  # tip label y, image px (float)
     angle_deg: int  # pointer angle, whole degrees (0 = up, clockwise)
     # sampled per-image values, dict[str, dict]: section name -> key -> JSON-plain
@@ -316,7 +326,7 @@ class RenderResult:
     # in the module docstring.  Recorded only, never drawn for.
     params: dict = field(default_factory=dict)
     # label geometry, unrounded floats in image px: (A' (x, y), M' (x, y), unit
-    # base direction (x, y)) of the stretched drawn triangle; the label is
+    # base direction (x, y)) of the stretched triangle; the label is
     # A' + tip_t (M' - A') / |M' - A'|.  Recorded only.
     tip_axis: tuple = None
 
@@ -483,7 +493,8 @@ def draw_shadow(mask, apex, base_left, base_right,
     """Draw the offset pointer shadow and the circle shadow shape into a mask.
 
     mask : "L" image (C, C), 0 = no shadow.  The triangle + hub are drawn at
-    255 (shape 1.0), the offset dial-circle arc at SHADOW_ARC_LEVEL (~0.5).
+    255 (shape 1.0; the triangle via raster_pointer_triangle, like the
+    pointer), the offset dial-circle arc at SHADOW_ARC_LEVEL (~0.5).
     The arc goes first, so the pointer shape wins where they overlap.  The
     mask is blurred later, so the tip naturally loses its sharpness.
     """
@@ -494,7 +505,11 @@ def draw_shadow(mask, apex, base_left, base_right,
     bbox = [scx - dial_radius, scy - dial_radius, scx + dial_radius, scy + dial_radius]
     _arc_or_circle(mdraw, bbox, gap_start_deg, gap_span_deg, SHADOW_ARC_LEVEL, 2)
     hub_box = [scx - hub_radius, scy - hub_radius, scx + hub_radius, scy + hub_radius]
-    mdraw.polygon(tri, fill=255)
+    # the triangle: the same hard raster as the pointer itself (exact float
+    # vertices, round(width) px per scan line), pasted at 255 over the arc
+    m_arr = np.array(mask)  # (C, C) uint8, mask so far (the arc)
+    m_arr[raster_pointer_triangle(tri[0], tri[1], tri[2], mask.size)] = 255
+    mask.paste(Image.fromarray(m_arr))
     mdraw.ellipse(hub_box, fill=255)
 
 
@@ -547,13 +562,94 @@ def _shadow_strengths(S, srng):
 
 # ── pointer ─────────────────────────────────────────────────────────────
 
+def _round_half_up(x):
+    """Nearest int to float x, ties (x.5) rounded UP: floor(x + 0.5) (int).
+    The one deterministic tie rule of the pointer raster."""
+    return int(math.floor(x + 0.5))
+
+
+def raster_pointer_triangle(apex, base_left, base_right, size):
+    """Hard raster of the pointer triangle from its EXACT float vertices.
+
+    apex, base_left, base_right : (x, y) float px each (pixel i's centre at i)
+    size : int C (square canvas) or (width, height) tuple of int
+    Returns (H, W) bool, True = triangle pixel.
+
+    ImageDraw.polygon rounds every edge separately and fills boundary pixels,
+    so on a slender triangle the per-row width wobbles (3 3 2 3 ... on a
+    1.5 .. 2.7 px wide tip): a "ball" on a neck.  Here every scan line gets
+    round(width) pixels centred on the true midline, so the width grows
+    steadily away from the apex:
+
+        scan lines: pixel rows when the height A -> M is closer to vertical
+        (|dy| >= |dx|), else pixel columns (the same rule, transposed)
+
+                 A                 line s (integer pixel-centre coordinate):
+                 ●                   [lo, hi] = exact line ∩ triangle (float)
+        s=1 ── ·[▓]· ──  w = 0.4     w = hi - lo,  c = (lo + hi) / 2
+        s=2 ── ·[▓]· ──  w = 0.8 ->  n = round_half_up(w)   pixels to fill
+        s=3 ── [▓▓]·  ──  w = 1.6    start = round_half_up(c - (n - 1) / 2)
+        s=4 ── [▓▓]·  ──  w = 2.0    fill start .. start + n - 1
+        s=5 ─ [▓▓▓]   ──  w = 2.4
+               ╱  M  ╲             -> |n - w| <= 0.5, run centre within 0.5 px
+          B_l ●───────● B_r           of c, n non-decreasing wherever w is,
+                                      and no pixel where w < 0.5 (the tip end)
+
+    (the s=1 row above has w < 0.5, so it is empty; drawn for the rule only)
+
+    Ties go up (round_half_up = floor(x + 0.5)), so the raster is
+    deterministic.  A plain loop over the ~100 scan lines (well under 1 ms).
+    """
+    if isinstance(size, int):
+        width, height = size, size  # int px, canvas width / height
+    else:
+        width, height = int(size[0]), int(size[1])
+    out = np.zeros((height, width), dtype=bool)  # (H, W) bool, the raster
+    pts = [(float(apex[0]), float(apex[1])), (float(base_left[0]), float(base_left[1])),
+           (float(base_right[0]), float(base_right[1]))]  # 3 (x, y) float vertices
+    mx = (pts[1][0] + pts[2][0]) / 2.0  # float px, base midpoint M x
+    my = (pts[1][1] + pts[2][1]) / 2.0  # float px, base midpoint M y
+    rows = abs(my - pts[0][1]) >= abs(mx - pts[0][0])  # bool, scan pixel rows (else columns)
+    # (s, u) per vertex: s = scan coordinate (row y or column x), u = position
+    # along the scan line; 3 (float, float) tuples
+    su = [(p[1], p[0]) if rows else (p[0], p[1]) for p in pts]
+    n_s, n_u = (height, width) if rows else (width, height)  # int, scan-line count / line length
+    s_lo = max(int(math.ceil(min(p[0] for p in su) - 1e-9)), 0)  # int, first scan line
+    s_hi = min(int(math.floor(max(p[0] for p in su) + 1e-9)), n_s - 1)  # int, last scan line
+    edges = [(su[0], su[1]), (su[1], su[2]), (su[2], su[0])]  # 3 vertex pairs
+    for s in range(s_lo, s_hi + 1):
+        us = []  # list[float], where the line meets the triangle's edges
+        for (s0, u0), (s1, u1) in edges:
+            if min(s0, s1) - 1e-9 <= s <= max(s0, s1) + 1e-9:
+                if abs(s1 - s0) < 1e-12:  # edge along the line: both ends
+                    us.extend((u0, u1))
+                else:
+                    us.append(u0 + (u1 - u0) * (s - s0) / (s1 - s0))
+        if not us:
+            continue
+        lo, hi = min(us), max(us)  # float px, exact intersection [lo, hi]
+        n = _round_half_up(hi - lo)  # int, pixels on this line
+        if n <= 0:
+            continue
+        start = _round_half_up((lo + hi) / 2.0 - (n - 1) / 2.0)  # int, first pixel
+        a, b = max(start, 0), min(start + n, n_u)  # int, clipped run [a, b)
+        if a >= b:
+            continue
+        if rows:
+            out[s, a:b] = True
+        else:
+            out[a:b, s] = True
+    return out
+
+
 def pointer_along_max(hub_radius, tip_dist):
     """Largest |along_norm| (float) a pointer body pixel can reach in this image.
 
     along_norm = along / max(tip_dist, 1) is +1 at the ideal apex and
     -hub_radius / tip_dist at the back of the hub.  Rasterised pixels can sit
-    up to ~1 px beyond the ideal outline (PIL fills the floored polygon /
-    ellipse), so 2 px of slack are added: (max(tip, hub) + 2) / max(tip, 1).
+    up to ~1 px beyond the ideal outline (raster_pointer_triangle rounds each
+    scan line's run, PIL fills the hub ellipse), so 2 px of slack are added:
+    (max(tip, hub) + 2) / max(tip, 1).
     Uses only the geometry stream's draws (hub_radius, tip_dist; float px).
     """
     return (max(tip_dist, hub_radius) + 2.0) / max(tip_dist, 1.0)
@@ -644,9 +740,10 @@ def edge_thickness_map(ys, xs, thickness, tri, edge_max_frac):
 
     ys, xs        : (N,) int, band pixel coords (pre-stretch canvas)
     thickness     : int >= 0, t (pointer edge_thickness draw)
-    tri           : None, or a 4-tuple (A, B_l, B_r, in_tri): the DRAWN triangle
-                    vertices, (x, y) float px each (floored, as ImageDraw draws
-                    them), and in_tri, (C, C) bool, the triangle polygon's pixels
+    tri           : None, or a 4-tuple (A, B_l, B_r, in_tri): the triangle's
+                    exact float vertices, (x, y) float px each (the ones
+                    raster_pointer_triangle draws from), and in_tri, (C, C)
+                    bool, the triangle's raster pixels
     edge_max_frac : float, pointer.edge_max_frac; >= 1 = no clamp
 
         A ●            h  = (p - A) . (M - A) / |M - A|   (projection on the height)
@@ -826,8 +923,13 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
     not None; ptr_pix, (C, C) bool, is the set of POINTER pixels the tip label
     counts (pre-stretch): inside that (cut) mask and not an edge pixel painted
     pure background (bg_painted of _draw_pointer_edge, rings of the uncut
-    mask), plus, with the cut off, the outline-only pixels the img draw adds
-    (they keep ptr_gray).
+    mask).
+
+    The triangle is raster_pointer_triangle's hard raster of the exact float
+    vertices (per scan line round(width) px, centred: the width grows steadily
+    from the apex, no "ball" at a thin tip); the hub disc is Pillow's filled
+    ellipse (no outline).  The body gray is painted through the mask, so the
+    painted pointer pixels are exactly the mask pixels.
     """
     a = math.radians(angle_deg - 90)
     apex = (cx + tip_dist * math.cos(a), cy + tip_dist * math.sin(a))
@@ -838,26 +940,28 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
     base_right = (base_mx - chord_half * perp[0], base_my - chord_half * perp[1])
     hub_box = [cx - hub_radius, cy - hub_radius, cx + hub_radius, cy + hub_radius]
 
-    # pointer shape mask, "L" (C, C)
+    # triangle pixels, (C, C) bool: our own hard raster of the exact float
+    # vertices (per scan line round(width) px, centred; raster_pointer_triangle),
+    # never Pillow's polygon (its per-edge rounding makes a ball at a thin tip)
+    in_tri = raster_pointer_triangle(apex, base_left, base_right, img.size)
+    # pointer shape mask, "L" (C, C): triangle raster + the hub disc (Pillow's
+    # filled ellipse, no outline)
     mask = Image.new("L", img.size, 0)
-    mdraw = ImageDraw.Draw(mask)
-    mdraw.polygon([apex, base_left, base_right], fill=255)
-    mdraw.ellipse(hub_box, fill=255)
+    ImageDraw.Draw(mask).ellipse(hub_box, fill=255)
+    m0 = np.array(mask)  # (C, C) uint8, hub disc
+    m0[in_tri] = 255
+    mask = Image.fromarray(m0)
 
     bg_arr = np.array(img)  # pre-pointer canvas, (C, C) uint8
-    draw = ImageDraw.Draw(img)
-    draw.polygon([apex, base_left, base_right], fill=ptr_gray, outline=ptr_gray)
-    draw.ellipse(hub_box, fill=ptr_gray, outline=ptr_gray)
+    # the body is painted THROUGH the mask: painted pointer pixels == mask pixels
+    body = bg_arr.copy()  # (C, C) uint8, canvas with the flat body
+    body[m0 > 0] = ptr_gray
+    img = Image.fromarray(body)
 
     img = _pointer_variation(img, mask, cx, cy, angle_deg, tip_dist,
                              grad_strength, pcfg["noise_amplitude"], nrng, info)
-    # drawn triangle for the edge clamp: floored vertices (ImageDraw floors
-    # them) + its polygon pixels, (C, C) bool
-    tri_img = Image.new("L", img.size, 0)  # "L" (C, C), triangle-only polygon
-    ImageDraw.Draw(tri_img).polygon([apex, base_left, base_right], fill=255)
-    floored = [(float(math.floor(px)), float(math.floor(py)))
-               for px, py in (apex, base_left, base_right)]  # 3 x (x, y) float px
-    tri = (floored[0], floored[1], floored[2], np.array(tri_img) > 0)
+    # triangle for the edge clamp: the exact float vertices + their raster
+    tri = (apex, base_left, base_right, in_tri)
     # bg_painted: (C, C) bool, edge pixels repainted pure background (blend 0)
     img, bg_painted = _draw_pointer_edge(img, mask, edge_gray, bg_arr, edge_thickness,
                                          pcfg["edge_noise_amplitude"], nrng,
@@ -869,17 +973,9 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
         ys_t, xs_t = np.ogrid[:mask_arr.shape[0], :mask_arr.shape[1]]
         mask_arr[(xs_t - apex[0]) ** 2 + (ys_t - apex[1]) ** 2 <= cut_tip_radius ** 2] = 0
         mask = Image.fromarray(mask_arr)
-    ptr_pix = (np.array(mask) > 0) & ~bg_painted  # (C, C) bool, pointer pixels
-    if cut_tip_radius is None:
-        # the img polygon / ellipse are drawn WITH an outline, which can paint a
-        # sliver of pixels the fill-only mask lacks (thin apex); they keep the
-        # flat ptr_gray, so they are pointer pixels.  With the cut on,
-        # render_image restores everything outside the cut mask: they vanish.
-        drawn = Image.new("L", img.size, 0)  # "L" (C, C), pixels the img draw painted
-        ddraw = ImageDraw.Draw(drawn)
-        ddraw.polygon([apex, base_left, base_right], fill=255, outline=255)
-        ddraw.ellipse(hub_box, fill=255, outline=255)
-        ptr_pix |= (np.array(drawn) > 0) & (m_uncut == 0)
+    # (C, C) bool, pointer pixels: the body is painted through the mask, so
+    # nothing outside it is pointer (no outline sliver to add)
+    ptr_pix = (np.array(mask) > 0) & ~bg_painted
     return img, apex, base_left, base_right, mask, ptr_pix
 
 
@@ -976,11 +1072,11 @@ TIP_T_STEP = 0.05  # float px, grid of the scan along the triangle height
 
 
 def tip_count_label(pix, apex, base_left, base_right, n):
-    """Tip label on the (stretched, drawn) pointer triangle by pixel count.
+    """Tip label on the (stretched) pointer triangle by pixel count.
 
     pix        : (H, W) bool, pointer pixels; pixel centres at integer coords
-    apex       : (x, y) float px, A' (drawn apex, stretched)
-    base_left, base_right : (x, y) float px, B_l' and B_r' (drawn base corners, stretched)
+    apex       : (x, y) float px, A' (exact apex, stretched)
+    base_left, base_right : (x, y) float px, B_l' and B_r' (exact base corners, stretched)
     n          : int >= 0, tip_label.min_pixels
 
         A' ●   P(t) = A' + t h,  h = (M' - A') / |M' - A'|,  M' = (B_l' + B_r') / 2
@@ -1537,13 +1633,12 @@ def render_image(cfg, image_seed):
     # label inputs; the label itself is found after step 10 (it must see the rim)
     ideal_apex = apex  # (x, y) float px, ideal triangle apex (canvas, pre-stretch)
     # the label axis is the pointer triangle's HEIGHT (apex -> base-chord
-    # midpoint) as drawn: ImageDraw floors float polygon vertices, so the drawn
-    # triangle's apex is floor(apex) and its base corners floor(base_l / _r);
+    # midpoint) of the EXACT float vertices: raster_pointer_triangle draws from
+    # them unrounded and centres every scan line's run on the true midline;
     # (x, y) float px, canvas, pre-stretch
-    apex_drawn = (float(math.floor(apex[0])), float(math.floor(apex[1])))
-    bl_drawn = (float(math.floor(base_l[0])), float(math.floor(base_l[1])))  # drawn B_l
-    br_drawn = (float(math.floor(base_r[0])), float(math.floor(base_r[1])))  # drawn B_r
-    base_mid_drawn = ((bl_drawn[0] + br_drawn[0]) / 2.0, (bl_drawn[1] + br_drawn[1]) / 2.0)
+    tri_apex = apex  # (x, y) float px, exact apex A
+    tri_bl, tri_br = base_l, base_r  # (x, y) float px each, exact B_l / B_r
+    tri_base_mid = ((tri_bl[0] + tri_br[0]) / 2.0, (tri_bl[1] + tri_br[1]) / 2.0)  # M
 
     # --- 8 horizontal / vertical stretch inside dial ---
     # inverse affine (output -> input) coefficients, 6-tuple of float: stretch about (cx, cy)
@@ -1597,9 +1692,8 @@ def render_image(cfg, image_seed):
 
     # --- tip label (geometry only: before noise, blur and effects) ---
     # pointer pixels on the stretched canvas: the pre-stretch pointer pixels
-    # (cut mask minus the edge ring painted pure background, + outline sliver
-    # with the cut off; see draw_pointer) stretched with the image's affine and
-    # BICUBIC resample, thresholded at >= 128 (more pointer than background, the
+    # (cut mask minus the edge ring painted pure background; see
+    # draw_pointer) stretched with the image's affine and BICUBIC resample, thresholded at >= 128 (more pointer than background, the
     # same resample as the image, so a black-on-face pointer pixel counts iff it
     # renders darker than the face/pointer midpoint), minus `covered` (rim band
     # and outer fill paint over them)
@@ -1613,13 +1707,13 @@ def render_image(cfg, image_seed):
         """Canvas point (x, y) float px -> where the stretch puts it, (x, y) float px."""
         return (cx - 0.5 + (x - cx + 0.5) * stretch_h, cy - 0.5 + (y - cy + 0.5) * stretch_v)
     ideal_apex = sxy(*ideal_apex)  # (x, y) float px, stretched ideal apex (reference)
-    axis_apex = sxy(*apex_drawn)  # (x, y) float px, A': stretched drawn apex
-    axis_bl, axis_br = sxy(*bl_drawn), sxy(*br_drawn)  # (x, y) float px, B_l', B_r'
+    axis_apex = sxy(*tri_apex)  # (x, y) float px, A': stretched exact apex
+    axis_bl, axis_br = sxy(*tri_bl), sxy(*tri_br)  # (x, y) float px, B_l', B_r'
     # stretched base-chord midpoint M', (x, y) float px.  The stretch is affine,
-    # so A'M' is the image of the drawn height and lines parallel to the base
+    # so A'M' is the image of the height and lines parallel to the base
     # stay parallel; after a non-uniform stretch the triangle is no longer
     # isosceles and A'M' differs slightly from its perpendicular altitude
-    axis_base_mid = sxy(*base_mid_drawn)
+    axis_base_mid = sxy(*tri_base_mid)
     TL = cfg["tip_label"]
     # label (x, y) float px, t* float px along A'M', count(t*) int, fallback bool
     apex, tip_t, tip_count, tip_fallback = tip_count_label(
@@ -1627,8 +1721,8 @@ def render_image(cfg, image_seed):
     bdx, bdy = axis_br[0] - axis_bl[0], axis_br[1] - axis_bl[1]  # float, stretched base vector
     b_n = math.hypot(bdx, bdy) or 1.0  # float px, its length
     base_dir = (bdx / b_n, bdy / b_n)  # (x, y) float, unit B_l' -> B_r'
-    h_pre = math.hypot(apex_drawn[0] - base_mid_drawn[0],
-                       apex_drawn[1] - base_mid_drawn[1])  # float px, drawn height pre-stretch
+    h_pre = math.hypot(tri_apex[0] - tri_base_mid[0],
+                       tri_apex[1] - tri_base_mid[1])  # float px, height pre-stretch
     h_post = math.hypot(axis_apex[0] - axis_base_mid[0],
                         axis_apex[1] - axis_base_mid[1])  # float px, |M' - A'|
     # tip_t measured before the stretch (float px): the affine scales the height

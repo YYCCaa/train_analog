@@ -549,21 +549,25 @@ def test_edge_noise_scaled_near_extremes():
 # Re-pinned for the no-clamping change (headroom pointer gray, amplitude
 # scale, capped exposure jitter, triangle centres drawn from the valid region:
 # the gray draw, the jitter factors and the tri stream all moved; expected).
+# Re-pinned for the pointer triangle's own hard raster (per-line round(width),
+# centred, replacing Pillow's polygon in the pointer, its mask and its shadow;
+# expected).  Previous values: 0 31d62628..., 1 e8ea7675..., 2 4ecdc0d1...
 _PRE_CONTRAST_HASHES = {
-    0: "31d6262873cae415e544e020d8e614afc82d53e186c59ddc5a3989b8af4ed950",
-    1: "e8ea76755d57519b442b3f3c0dca65f00fa81f253d2a619bc0e6ca1854fb76b5",
-    2: "4ecdc0d11b5f86556bf38cc843fb6929593a43b552d44a6d21bb294132f82823",
+    0: "296bcacea0929c338125d89bc0c198064d771054954f0786aca56d525a4b0709",
+    1: "03b29b4969a846e369f1b01069184b7c7f927300c1976298432784ef810cd0ed",
+    2: "2b07c73df1ccd6ab3dcadc64a07e6dead8df1971e46758bbaf9bc42608f4b725",
 }
 
 
 # sha256 hex (str) of the same renders with the DEFAULT pointer.edge_max_frac
 # 0.25 (re-pinned when the edge clamp arrived: seeds 0 and 2 change near the
 # apex; seed 1's apex sits under the rim band, so it is unchanged); re-pinned
-# for the no-clamping change, like _PRE_CONTRAST_HASHES
+# for the no-clamping change and the pointer raster, like _PRE_CONTRAST_HASHES
+# (previous values: 0 64d4f5a3..., 1 e8ea7675..., 2 ab349759...)
 _DEFAULT_HASHES = {
-    0: "64d4f5a3a472aa1eca2c37a9bb1ae7006373e2a6cf37a3780774e18b14c880d5",
-    1: "e8ea76755d57519b442b3f3c0dca65f00fa81f253d2a619bc0e6ca1854fb76b5",
-    2: "ab3497599601abd7237d3091d1bcea96dd2e3a5f983708989f80e9be23d82065",
+    0: "0842334bc121d696838fda4fe8c50245a999645ce6fb98fa051a04c373c67cc1",
+    1: "03b29b4969a846e369f1b01069184b7c7f927300c1976298432784ef810cd0ed",
+    2: "6325e541743e2848c4948f6dc70f9115ad00c6f5d904a3d7ce4d79587fcf98c3",
 }
 
 
@@ -855,11 +859,11 @@ def _ideal(res):
 
 
 def _axis(res):
-    """Label axis recorded with a render (the drawn triangle's height, base-chord
+    """Label axis recorded with a render (the triangle's exact height, base-chord
     midpoint -> apex, stretched, image px) -> ((ax, ay) apex floats, (ux, uy)
     unit direction floats)."""
     d = res.params["derived"]
-    ax, ay = d["axis_apex_x"], d["axis_apex_y"]  # floats, drawn apex
+    ax, ay = d["axis_apex_x"], d["axis_apex_y"]  # floats, exact apex (stretched)
     vx, vy = ax - d["axis_base_mid_x"], ay - d["axis_base_mid_y"]  # floats, base mid -> apex
     n = math.hypot(vx, vy)
     return (ax, ay), (vx / n, vy / n)
@@ -871,8 +875,8 @@ def test_tip_label_is_visible_tip():
         assert a.angle_deg == b.angle_deg
         assert _ideal(a) == _ideal(b)  # the cut does not move the triangle
         for res in (a, b):
-            (ix, iy), (ux, uy) = _axis(res)  # drawn apex, unit axis (floats)
-            dx, dy = res.tip_x - ix, res.tip_y - iy  # float px, label - drawn apex
+            (ix, iy), (ux, uy) = _axis(res)  # exact apex, unit axis (floats)
+            dx, dy = res.tip_x - ix, res.tip_y - iy  # float px, label - apex
             # the label sits ON the pointer axis, behind the ideal apex (along -u)
             # (params are rounded to 4 decimals, hence the 1e-3 tolerances)
             assert abs(-dx * uy + dy * ux) < 1e-3, (seed, dx, dy)
@@ -891,8 +895,8 @@ def test_tip_label_stretched():
     for seed in range(4):
         a, b = _cut_pair(seed, **stretch)
         for res in (a, b):
-            (ix, iy), (ux, uy) = _axis(res)  # drawn apex, unit stretched axis (floats)
-            dx, dy = res.tip_x - ix, res.tip_y - iy  # float px, label - drawn apex
+            (ix, iy), (ux, uy) = _axis(res)  # exact apex, unit stretched axis (floats)
+            dx, dy = res.tip_x - ix, res.tip_y - iy  # float px, label - apex
             # on the stretched axis, behind the apex
             assert abs(-dx * uy + dy * ux) < 1e-3, seed
             assert dx * ux + dy * uy <= 1e-3, seed
@@ -1442,7 +1446,7 @@ def _dark_on_line(res, back, dark=100, reach=12.0):
     """Dark pixels a person counts on a base-parallel line of the final image (int).
 
     The line runs through the label moved `back` px (float) along the height
-    toward the apex (A'), parallel to the stretched drawn base
+    toward the apex (A'), parallel to the stretched base
     (RenderResult.tip_axis); a pixel counts when its gray < dark (int), its
     centre lies in the 1-px band -0.5 < signed distance <= 0.5 (distance along
     the base normal, + toward the base) and within `reach` px of the line point
@@ -1501,23 +1505,22 @@ def _edge_case(frac, thickness=3):
     (W grows 12 / 80 = 0.15 px per px of height), hub disc r 9 at the base
     midpoint; body gray 50, background 200, edge gray 0, no noise.
     Returns (arr (128, 128) uint8 after the band, dist (128, 128) float32 ring
-    index, mask (128, 128) bool, (A, B_l, B_r) floored vertices).
+    index, mask (128, 128) bool, (A, B_l, B_r) exact float vertices).
+    The triangle is drawn like draw_pointer draws it: raster_pointer_triangle.
     """
     from PIL import Image, ImageDraw
     apex, bl, br = (20.3, 64.6), (100.4, 58.6), (100.4, 70.6)  # (x, y) float px each
+    in_tri = g7.raster_pointer_triangle(apex, bl, br, 128)  # (128, 128) bool, triangle raster
     mask = Image.new("L", (128, 128), 0)  # "L" pointer mask
-    d = ImageDraw.Draw(mask)
-    d.polygon([apex, bl, br], fill=255)
-    d.ellipse([100.4 - 9, 64.6 - 9, 100.4 + 9, 64.6 + 9], fill=255)
-    tri_img = Image.new("L", (128, 128), 0)  # "L" triangle only
-    ImageDraw.Draw(tri_img).polygon([apex, bl, br], fill=255)
-    fl = [(float(math.floor(x)), float(math.floor(y))) for x, y in (apex, bl, br)]
-    img = Image.fromarray(np.where(np.array(mask) > 0, 50, 200).astype(np.uint8))
+    ImageDraw.Draw(mask).ellipse([100.4 - 9, 64.6 - 9, 100.4 + 9, 64.6 + 9], fill=255)
+    m = np.array(mask)  # (128, 128) uint8
+    m[in_tri] = 255
+    mask = Image.fromarray(m)
+    img = Image.fromarray(np.where(m > 0, 50, 200).astype(np.uint8))
     bg = np.full((128, 128), 200, dtype=np.uint8)  # (128, 128) uint8 pre-pointer canvas
     out, painted = g7._draw_pointer_edge(img, mask, 0, bg, thickness, 0, np.random.default_rng(0),
-                                         (fl[0], fl[1], fl[2], np.array(tri_img) > 0), frac)
-    m = np.array(mask)  # (128, 128) uint8
-    return np.array(out), g7._erosion_dist(m, thickness), m > 0, fl
+                                         (apex, bl, br, in_tri), frac)
+    return np.array(out), g7._erosion_dist(m, thickness), m > 0, (apex, bl, br)
 
 
 def test_edge_clamp_unit_slender_apex():
@@ -1530,11 +1533,13 @@ def test_edge_clamp_unit_slender_apex():
     w = math.hypot(br[0] - bl[0], br[1] - bl[1]) * h / hl  # (N,) float64, W(h)
     near = h < 3 * 4  # (N,) bool, within the first 12 px of the apex
     k = dist[ys, xs]  # (N,) float32 ring index
-    assert (k[near] < np.floor(frac * w[near])).all(), (k[near], w[near])
+    # floor with the + 1e-9 of edge_thickness_map: with the exact vertices W
+    # can land on 4.0 up to float error (cap 1, not 0)
+    assert (k[near] < np.floor(frac * w[near] + 1e-9)).all(), (k[near], w[near])
     # and along the whole triangle: a repainted ring index is always < floor(frac W)
     tri = (h >= 0) & (h <= hl) & (xs < 92)  # (N,) bool, triangle part, clear of the hub disc
     assert tri.sum() > 20, tri.sum()
-    assert (k[tri] < np.floor(frac * w[tri])).all()
+    assert (k[tri] < np.floor(frac * w[tri] + 1e-9)).all()
     # within 12 px W < 1.8, so floor(0.25 W) = 0: no band at all there, body only
     ys_n, xs_n = np.nonzero(mask)
     h_all = ((xs_n - a[0]) * (mx - a[0]) + (ys_n - a[1]) * (my - a[1])) / hl
@@ -1607,7 +1612,7 @@ def _line_dist(px, py, ax, ay, bx, by):
 
 def test_tip_on_principal_axis_geometry():
     # 200 seeds at the schema-max stretch / displacements: the label lies on the
-    # stretched drawn height A' -> M' (unrounded RenderResult.tip_axis)
+    # stretched height A' -> M' (unrounded RenderResult.tip_axis)
     cfg = _cfg(**_AXIS_EXTREMES)
     dist, ts = [], []  # list[float] px, label distance from A'M', and tip_t
     for seed in range(200):
@@ -1645,8 +1650,8 @@ def _stretched_centres(res):
 # triangle well, so there the label must be within 0.6 px.  The default
 # pointer's triangle left after the hub disc is short and fat (length ~ 1.2 x
 # width), so its principal direction swings with a 1-px raster asymmetry and
-# the fitted line misses even the drawn apex by ~1.3 px p95; there (None) the
-# label must merely be no farther from it than the drawn apex is, + 0.1 px p95
+# the fitted line misses even the axis apex by ~1.3 px p95; there (None) the
+# label must merely be no farther from it than the axis apex is, + 0.1 px p95
 _PCA_CASES = {
     "slender": ({**_SLENDER, "geometry.stretch_h_range": [0.8, 1.1],
                  "geometry.stretch_v_range": [0.8, 1.1]}, 0.6),
@@ -1664,7 +1669,7 @@ def test_tip_on_principal_axis_pixels(case):
                   "palette.outer_gray_range": [220, 220], "palette.rim_gray_range": [220, 220],
                   **pins})
     ys, xs = np.mgrid[:IMG, :IMG]  # (256, 256) int pixel grids
-    dist, d_apex = [], []  # list[float] px, label / drawn apex distance from the fitted axis
+    dist, d_apex = [], []  # list[float] px, label / axis apex distance from the fitted axis
     for seed in range(100):
         res = g7.render_image(cfg, seed)
         d, g = res.params["derived"], res.params["geometry"]  # dicts
@@ -1684,7 +1689,7 @@ def test_tip_on_principal_axis_pixels(case):
         d_apex.append(_line_dist(d["axis_apex_x"], d["axis_apex_y"], mean[0], mean[1],
                                  mean[0] + ax_dir[0], mean[1] + ax_dir[1]))
     dist, d_apex = np.array(dist), np.array(d_apex)  # (100,) float64 each
-    print("%s axis (pixels) dist: mean %.3f p50 %.3f p95 %.3f max %.3f; drawn apex p95 %.3f"
+    print("%s axis (pixels) dist: mean %.3f p50 %.3f p95 %.3f max %.3f; axis apex p95 %.3f"
           % (case, dist.mean(), np.median(dist), np.percentile(dist, 95), dist.max(),
              np.percentile(d_apex, 95)))
     if bound is None:
@@ -1813,3 +1818,219 @@ def test_min_bg_contrast_keeps_pointer_visible_over_shadow():
     assert len(on) >= 30 and len(off) >= 30
     assert on.min(axis=0)[0] >= c - tol and on.min(axis=0)[1] >= c - tol, on.min(axis=0)
     assert (off.min(axis=1) < c - tol).any(), "the measurement cannot tell c = 0 from c = 80"
+
+
+# ── pointer triangle: own hard raster (per-line round(width), centred) ──────
+
+# path (str) of the user's seed-8 sample config (copied from the studio Save zip
+# inspect_tip_location/v7_seed8.zip: edge thickness [0, 0], cut on, slender pointer)
+_SEED8_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data",
+                           "v7_seed8_config.yaml")
+
+
+def _line_interval(tri, s, rows):
+    """Exact [lo, hi] (floats) of scan line s (row y = s when rows, else column
+    x = s) inside triangle tri (3 (x, y) float vertices), by half-plane clipping
+    (independent of the generator's edge-intersection code); None if empty."""
+    (x0, y0), (x1, y1), (x2, y2) = tri
+    area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)  # float, signed 2x area
+    lo, hi = -math.inf, math.inf  # floats, running interval of u
+    for (px, py), (qx, qy) in (((x0, y0), (x1, y1)), ((x1, y1), (x2, y2)), ((x2, y2), (x0, y0))):
+        # inside iff sign(area) * cross(q - p, r - p) >= 0, linear in u: a u + b >= 0
+        ex, ey = qx - px, qy - py  # float, edge vector
+        if rows:   # r = (u, s): cross = ex (s - py) - ey (u - px)
+            a, b = -ey, ex * (s - py) + ey * px
+        else:      # r = (s, u): cross = ex (u - py) - ey (s - px)
+            a, b = ex, -ex * py - ey * (s - px)
+        sg = math.copysign(1.0, area)  # float, orientation sign
+        a, b = a * sg, b * sg
+        if abs(a) < 1e-12:
+            if b < -1e-9:
+                return None
+            continue
+        if a > 0:
+            lo = max(lo, -b / a)
+        else:
+            hi = min(hi, -b / a)
+    return (lo, hi) if lo <= hi + 1e-9 else None
+
+
+def _random_pointer_triangles(n, seed=0):
+    """n random isosceles triangles (apex, B_l, B_r), (x, y) float vertices, at
+    many angles (incl. exact / near horizontal, vertical, 45 deg), half-angles
+    2..60 deg (slender .. wide), heights 10..90 px, inside a 400 px canvas."""
+    rng = np.random.default_rng(seed)  # np Generator
+    fixed = [0.0, 90.0, 180.0, 270.0, 44.9, 45.0, 45.1, 134.9, 135.1, 1.0, 179.0, 359.0]
+    out = []  # list of 3-tuples of (x, y) floats
+    for i in range(n):
+        ang = math.radians(fixed[i] if i < len(fixed) else rng.uniform(0, 360))  # height dir
+        half_a = math.radians(rng.uniform(2, 8) if i % 2 == 0 else rng.uniform(8, 60))  # half-angle
+        h = rng.uniform(10, 90)  # float px, height
+        ax, ay = rng.uniform(195, 205, 2)  # float px, apex
+        mx, my = ax + h * math.cos(ang), ay + h * math.sin(ang)  # base midpoint
+        hb = h * math.tan(half_a)  # float px, half base
+        px, py = -math.sin(ang), math.cos(ang)  # unit across
+        out.append(((ax, ay), (mx + hb * px, my + hb * py), (mx - hb * px, my - hb * py)))
+    return out
+
+
+def test_raster_pointer_triangle_rule():
+    # every scan line: one contiguous run of n = round(w) pixels (|n - w| <= 0.5),
+    # centred on the true midline within 0.5 px, nothing where w < 0.5; n is
+    # non-decreasing from the apex to the nearer base corner (no ball / neck);
+    # nothing outside the triangle's bounding box dilated by 1
+    import time
+    C = 400  # int px, canvas side (every test triangle fits)
+    checked = 0  # int, monotone segments checked
+    ms = []  # list[float], raster time per triangle (ms)
+    for tri in _random_pointer_triangles(400):
+        (ax, ay), bl, br = tri
+        mx, my = (bl[0] + br[0]) / 2, (bl[1] + br[1]) / 2
+        rows = abs(my - ay) >= abs(mx - ax)  # bool, scan rows (else columns)
+        t0 = time.perf_counter()
+        r = g7.raster_pointer_triangle(*tri, C)  # (C, C) bool
+        ms.append(1000 * (time.perf_counter() - t0))
+        assert r.shape == (C, C) and r.dtype == bool
+        xs_v, ys_v = [p[0] for p in tri], [p[1] for p in tri]  # vertex x / y floats
+        yy, xx = np.nonzero(r)
+        if xx.size:
+            assert xx.min() >= min(xs_v) - 1 and xx.max() <= max(xs_v) + 1, tri
+            assert yy.min() >= min(ys_v) - 1 and yy.max() <= max(ys_v) + 1, tri
+        sv = [p[1] if rows else p[0] for p in tri]  # vertex scan coords (floats)
+        ns = {}  # scan line (int) -> pixel count n (int)
+        for s in range(C):
+            line = r[s, :] if rows else r[:, s]  # (C,) bool
+            idx = np.flatnonzero(line)  # (n,) int64 filled pixels
+            iv = _line_interval(tri, s, rows)
+            if iv is None:
+                assert idx.size == 0, (tri, s)
+                continue
+            w, c = iv[1] - iv[0], (iv[0] + iv[1]) / 2  # float px width / midpoint
+            ns[s] = idx.size
+            assert abs(idx.size - w) <= 0.5 + 1e-6, (tri, s, idx.size, w)
+            if w < 0.5 - 1e-6:
+                assert idx.size == 0, (tri, s, w)
+            if idx.size:
+                assert idx[-1] - idx[0] + 1 == idx.size, (tri, s)  # contiguous
+                assert abs((idx[0] + idx[-1]) / 2 - c) <= 0.5 + 1e-6, (tri, s, idx, c)
+        # apex -> nearer base corner along the scan (where the apex is the
+        # extreme vertex along the scan, w grows linearly over that stretch)
+        a_s, b_s = sv[0], sv[1:]
+        if all(b > a_s for b in b_s) or all(b < a_s for b in b_s):
+            near = min(b_s, key=lambda b: abs(b - a_s))  # float, nearer base corner's scan coord
+            seg = [s for s in sorted(ns) if min(a_s, near) <= s <= max(a_s, near)]  # list[int]
+            if a_s > near:
+                seg = seg[::-1]  # walk away from the apex
+            counts = [ns[s] for s in seg]  # list[int]
+            assert all(b >= a for a, b in zip(counts, counts[1:])), (tri, counts)
+            checked += 1
+    print("raster: %d monotone segments; %.3f ms mean, %.3f ms max per triangle"
+          % (checked, np.mean(ms), np.max(ms)))
+    assert checked >= 300, checked
+
+
+def test_raster_pointer_triangle_fixes_seed8_ball():
+    # the user's seed-8 tip (pre-stretch canvas, apex ~(144.68, 40.18), 14 deg,
+    # slender, cut r 7): Pillow filled rows 48..54 with 3 3 2 3 3 3 4 px (a ball
+    # on a neck); now, from the cut boundary down 12 rows, the count never drops
+    cfg = v7_config.load_config(_SEED8_YAML)
+    cap = {}  # dict, the draw_pointer outputs (spy)
+    orig = g7.draw_pointer
+
+    def spy(*a, **k):
+        out = orig(*a, **k)
+        cap["tri"], cap["pix"] = (out[1], out[2], out[3]), out[5]
+        return out
+    g7.draw_pointer = spy
+    try:
+        g7.render_image(cfg, 8)
+    finally:
+        g7.draw_pointer = orig
+    tri, pix = cap["tri"], cap["pix"]  # 3 (x, y) floats; (C, C) bool pre-stretch pointer pixels
+    ax, ay = tri[0]
+    win = slice(int(ax) - 15, int(ax) + 15)  # columns around the tip
+    first = next(r for r in range(int(ay), int(ay) + 40) if pix[r, win].any())  # int, cut boundary row
+    rr = range(first, first + 13)  # the cut boundary row + 12
+    counts = [int(pix[r, win].sum()) for r in rr]  # list[int]
+    widths = [_line_interval(tri, r, True) for r in rr]  # list[(lo, hi)]
+    print("seed 8 rows %d..%d counts %s widths %s" % (
+        first, first + 12, counts, [round(w[1] - w[0], 2) for w in widths]))
+    assert all(b >= a for a, b in zip(counts, counts[1:])), counts
+    # past the boundary row (the cut arc may trim it) every row holds round(w)
+    for r, n, (lo, hi) in list(zip(rr, counts, widths))[1:]:
+        assert abs(n - (hi - lo)) <= 0.5 + 1e-6, (r, n, hi - lo)
+
+
+# "section.key" -> value pins (dict): flat face 200, black pointer 0, rim /
+# outer 220, no noise / blur / effects / shadows / stretch, and NO edge band
+# (the band repaints the outline, which would hide the raster under test)
+_RASTER_CLEAN = {**_CLEAN_TIP, **_NO_STRETCH, "palette.outer_gray_range": [220, 220],
+                 "palette.rim_gray_range": [220, 220],
+                 "pointer.edge_thickness_range": [0, 0]}
+
+
+def _dark_counts_along(res, frac=0.6, dark=100):
+    """Dark-pixel count (list[int]) on each scan line along the pointer, from the
+    apex toward the base, down to `frac` (float) of the height; stops early at
+    the first line the hub disc / mounting hole could reach.  Lines touching the
+    rim band / outer fill (an apex under the rim) are skipped until the pointer
+    comes out on the dial face.
+
+    Scan lines are image rows when the height A' -> M' (RenderResult.tip_axis)
+    is closer to vertical, else columns, the way a person would count them; a
+    pixel counts when its gray < dark (int) and it lies within a window of
+    1.5 x the triangle's half width + 3 px about the height line."""
+    (ax, ay), (mx, my), _ = res.tip_axis  # floats, image px
+    g, d = res.params["geometry"], res.params["derived"]  # dicts
+    rows = abs(my - ay) >= abs(mx - ax)  # bool, scan rows
+    (pcx, pcy), (hcx, hcy) = _stretched_centres(res)  # floats, hub / hole centres
+    ys, xs = np.mgrid[:IMG, :IMG]  # (256, 256) int grids
+    excl = ((np.hypot(xs - pcx, ys - pcy) <= g["hub_radius"] + 1.5)
+            | (np.hypot(xs - hcx, ys - hcy) <= g["hole_radius"] + 1.5))  # (256, 256) bool
+    c = g["canvas_size"] // 2  # int px, canvas centre = dial centre (canvas coords)
+    dcx, dcy = c + d["canvas_offset_x"], c + d["canvas_offset_y"]  # int px, dial centre (image)
+    rim = v7_config.default_config()["outer"]["rim_width"] + 1.5  # float px, rim band + margin
+    face = (((xs - dcx) / (d["dial_rx"] - rim)) ** 2
+            + ((ys - dcy) / (d["dial_ry"] - rim)) ** 2) <= 1  # (256, 256) bool, bare dial face
+    s0, s1 = (ay, my) if rows else (ax, mx)  # float, apex / base midpoint scan coords
+    u0, u1 = (ax, mx) if rows else (ay, my)  # float, their along-line coords
+    step = 1 if s1 > s0 else -1  # int, scan direction (apex -> base)
+    s = math.ceil(s0) if step > 0 else math.floor(s0)  # int, first line past the apex
+    s_end = s0 + frac * (s1 - s0)  # float, last scan coordinate
+    dark_img = res.image < dark  # (256, 256) bool
+    counts = []  # list[int]
+    while (s - s_end) * step <= 0:
+        f = (s - s0) / (s1 - s0)  # float in [0, frac], fraction of the height
+        uc = u0 + f * (u1 - u0)  # float, height line on this line
+        reach = 1.5 * g["chord_half"] * f + 3.0  # float px, half window along the line
+        lo = max(int(math.ceil(uc - reach)), 0)  # int, window start
+        hi = min(int(math.floor(uc + reach)), IMG - 1)  # int, window end (incl.)
+        line = dark_img[s, lo:hi + 1] if rows else dark_img[lo:hi + 1, s]  # (k,) bool
+        ex = excl[s, lo:hi + 1] if rows else excl[lo:hi + 1, s]  # (k,) bool
+        on_face = face[s, lo:hi + 1] if rows else face[lo:hi + 1, s]  # (k,) bool
+        if ex.any() or (counts and not on_face.all()):
+            break
+        if on_face.all():
+            counts.append(int(line.sum()))
+        s += step
+    return counts
+
+
+@pytest.mark.parametrize("geom", ["default", "slender"])
+@pytest.mark.parametrize("cut", [False, True], ids=["cut_off", "cut_on"])
+def test_pointer_width_never_shrinks_toward_base(cut, geom):
+    # a person counts the dark pixels on every row (or column) of a clean
+    # render, walking from the tip toward the hub: the count never drops (no
+    # ball at the tip, no neck behind it), for 100 seeds
+    cfg = _cfg(**{**_RASTER_CLEAN, **(_SLENDER if geom == "slender" else {}),
+                  "cut_tip.enabled": cut})
+    bad, lines = [], 0  # list[(seed, counts)], int lines checked
+    for seed in range(100):
+        counts = _dark_counts_along(g7.render_image(cfg, seed))  # list[int]
+        lines += len(counts)
+        if any(b < a for a, b in zip(counts, counts[1:])):
+            bad.append((seed, counts))
+    print("%s %s: %d lines, %d seeds with a drop %s" % (
+        geom, "cut" if cut else "no cut", lines, len(bad), bad[:2]))
+    assert lines >= 100 * 5, lines
+    assert not bad, bad[:5]

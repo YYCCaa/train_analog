@@ -977,3 +977,90 @@ def test_saved_tile_has_capped_jitter_and_placed_triangles(page, tmp_path):
     tri = params["sampled"]["tri_artifacts"]  # dict
     assert tri["n"] == 6 and len(tri["items"]) == 6, tri
     assert all(it["placed"] is True and it["pixels"] >= 1 for it in tri["items"]), tri
+
+
+# ── pointer raster: no "ball" at a thin, cut tip ────────────────────────────
+
+# path of the user's seed-8 sample config (Path; from the studio Save zip
+# inspect_tip_location/v7_seed8.zip: slender pointer, edge thickness [0, 0], cut on)
+_SEED8_YAML = REPO_ROOT / "tests" / "data" / "v7_seed8_config.yaml"
+
+
+def _clean_seed8_yaml(dest):
+    """Write the user's seed-8 YAML with a clean look (flat face 200, black flat
+    pointer, rim / outer / circle 220, light ticks, no noise / shadows /
+    effects / jitter / digits / triangles) to dest (Path); the geometry, stretch,
+    edge thickness [0, 0] and cut-tip settings stay the user's.  Returns dest."""
+    cfg = yaml.safe_load(_SEED8_YAML.read_text(encoding="utf-8"))  # dict, user config
+    pins = {"palette": {"bg_gray_range": [200, 200], "circle_gray_range": [220, 220],
+                        "outer_gray_range": [220, 220], "rim_gray_range": [220, 220]},
+            "pointer": {"gray_range": [0, 0], "gradient_range": [0, 0], "noise_amplitude": 0,
+                        "edge_noise_amplitude": 0, "min_bg_contrast": 0},
+            "background": {"noise_intensity": 0, "variation": 0, "dial_circle_blur": False},
+            "hier_noise": {"block_variance": 0, "pixel_variance": 0},
+            "jitter": {"brightness_range": [1, 1], "contrast_range": [1, 1],
+                       "sharpness_range": [1, 1]},
+            "shadows": {"prob": 0}, "reflections": {"prob": 0}, "glares": {"prob": 0},
+            "digits": {"show_prob": 0}, "ticks": {"gray_range": [215, 215]},
+            "tri_artifacts": {"enabled": False}}  # section -> key -> value overrides (dict)
+    for sec, kv in pins.items():
+        cfg[sec].update(kv)
+    assert cfg["pointer"]["edge_thickness_range"] == [0, 0] and cfg["cut_tip"]["enabled"]
+    dest.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    return dest
+
+
+def _tip_coverage(png, params, n_lines=12, face=200):
+    """Effective pointer width (list[float], px) on the scan lines from the saved
+    label toward the base, from a saved tile PNG (bytes) and its params (dict).
+
+    Scan lines are rows when the label axis (axis_apex -> axis_base_mid) is
+    closer to vertical, else columns; on each line the pointer coverage of a
+    pixel is clip((face - gray) / face, 0, 1) (black pointer on a face-gray
+    dial), summed over a window of 4 px + the triangle's width about the axis."""
+    import io
+    import numpy as np
+    from PIL import Image
+    im = np.asarray(Image.open(io.BytesIO(png)), dtype=np.float64)  # (256, 256) float64
+    cov = np.clip((face - im) / face, 0.0, 1.0)  # (256, 256) float64, pointer coverage
+    d = params["sampled"]["derived"]  # dict
+    ax, ay = d["axis_apex_x"], d["axis_apex_y"]  # float px, A'
+    mx, my = d["axis_base_mid_x"], d["axis_base_mid_y"]  # float px, M'
+    g = params["sampled"]["geometry"]  # dict
+    rows = abs(my - ay) >= abs(mx - ax)  # bool, scan rows
+    s0, s1 = (ay, my) if rows else (ax, mx)  # float, apex / base scan coords
+    u0, u1 = (ax, mx) if rows else (ay, my)  # float, along-line coords
+    step = 1 if s1 > s0 else -1  # int, apex -> base
+    lab = params["tip_y"] if rows else params["tip_x"]  # float, label scan coord
+    s = int(math.floor(lab + 0.5))  # int, the label's line
+    widths = []  # list[float]
+    for _ in range(n_lines + 1):
+        f = (s - s0) / (s1 - s0)  # float, fraction of the height
+        uc = u0 + f * (u1 - u0)  # float, axis on this line
+        reach = 4.0 + 2.0 * g["chord_half"] * f  # float px, half window
+        lo, hi = int(math.ceil(uc - reach)), int(math.floor(uc + reach))  # int window
+        widths.append(float(cov[s, lo:hi + 1].sum() if rows else cov[lo:hi + 1, s].sum()))
+        s += step
+    return widths
+
+
+def test_saved_tile_tip_has_no_ball(page, tmp_path):
+    # a person loads the seed-8 sample YAML (slender pointer, no edge band, cut
+    # tip) with a clean look, saves three tiles and measures the pointer width
+    # row by row from the saved label toward the hub: it never shrinks by more
+    # than half a pixel (the old Pillow fill made a 3-px "ball" on a 2-px neck)
+    old = _applied_seq(page)
+    page.get_by_test_id("load-yaml").set_input_files(str(_clean_seed8_yaml(tmp_path / "s8.yaml")))
+    _wait_applied_after(page, old)
+    _wait_settled(page)
+    assert _num(page, "pointer.edge_thickness_range", "hi").input_value() == "0"
+    assert _num(page, "cut_tip.radius_range", "lo").input_value() == "7"
+    for i in range(3):
+        _, png, params, _ = _save_tile(page, i, tmp_path / f"tip{i}")  # bytes, dict
+        assert params["config"]["pointer"]["edge_thickness_range"] == [0, 0]
+        assert params["config"]["cut_tip"]["enabled"] is True
+        assert params["sampled"]["derived"]["tip_fallback"] is False
+        w = _tip_coverage(png, params)  # list[float] px
+        print("tile %d widths from the label: %s" % (i, [round(v, 2) for v in w]))
+        assert all(b >= a - 0.5 for a, b in zip(w, w[1:])), (i, w)
+        assert w[-1] > w[0], (i, w)
