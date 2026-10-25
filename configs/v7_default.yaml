@@ -71,7 +71,7 @@ pointer:
   edge_thickness_range: [1, 3]  # [lo, hi] int; edge band width (px), 0 = no band
   edge_max_frac: 0.25  # float scalar; edge band width <= floor(frac * triangle cross-section width) at each height (1 = no clamp)
   edge_noise_amplitude: 5  # int scalar; per-pixel noise amplitude on edge (+/-)
-  min_bg_contrast: 0  # int scalar; min |pointer gray - face gray| for the bare face and the darkest shadowed face bg*(1 - max(s_p, s_r)); the pointer gray is drawn after bg and shadow; 0 = off
+  min_bg_contrast: 0  # int scalar; min |pointer gray - face gray| for the bare face and the darkest shadowed face bg*(1 - max(s_p, s_r)) (two +-c windows; grays between the two faces allowed); the pointer gray is drawn after bg and shadow; 0 = off
 
 background:
   lowfreq_size: 8  # int scalar; low-frequency gradient tile resolution (NxN)

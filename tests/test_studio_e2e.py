@@ -924,13 +924,17 @@ def test_tile_save_bundles_image_and_params(page, tmp_path):
 
 
 def test_min_bg_contrast_avoids_shadowed_face(page, tmp_path):
-    # a person turns shadows on for every tile, then asks for a pointer/face
-    # contrast: the pointer gray is redrawn outside the bare AND shadowed face
+    # a person turns strong shadows on for every tile, then asks for a
+    # pointer/face contrast: the pointer gray is redrawn at least c away from
+    # the bare face AND from the darkest shadowed face (two +-c windows; grays
+    # between the two faces are allowed)
     _commit_and_wait(page, _num(page, "shadows.prob"), "1")  # shadow on every tile
+    # strength 0.8 (+-0.05 jitter): the darkest face bg * (0.15-0.25) sits far
+    # enough below the bare face (154-179) that the two windows mostly split
+    _commit_and_wait(page, _num(page, "shadows.strength_range", "hi"), "0.8")
+    _commit_and_wait(page, _num(page, "shadows.strength_range", "lo"), "0.8")
     # and a flat pointer (no gradient, no noise): the gray draw then needs no
-    # headroom from 0 / 255, so the whole gray range is open to the contrast
-    # rule (with the default +-25 gradient and noise the headroom interval
-    # [51, 204] can lie inside the forbidden one -> the endpoint fallback)
+    # headroom from 0 / 255, so the whole gray range is open to the contrast rule
     _commit_and_wait(page, _num(page, "pointer.gradient_range", "lo"), "0")
     _commit_and_wait(page, _num(page, "pointer.gradient_range", "hi"), "0")
     _commit_and_wait(page, _num(page, "pointer.noise_amplitude"), "0")
@@ -938,19 +942,28 @@ def test_min_bg_contrast_avoids_shadowed_face(page, tmp_path):
     _commit_and_wait(page, _num(page, "pointer.min_bg_contrast"), "60")
     after_src = _tile_srcs(page)  # tile srcs with the contrast on, list[str] (9)
     assert any(a != b for a, b in zip(before_src, after_src)), "no tile changed"
-    # the saved parameters of each of three tiles show the gray outside the interval
+    # the saved parameters of each of three tiles show the gray outside every window
     for i in range(3):
         _, _, params, _ = _save_tile(page, i, tmp_path / f"save{i}")  # dict, params.json
         pt, sh = params["sampled"]["pointer"], params["sampled"]["shadows"]  # dicts
         bg = params["sampled"]["palette"]["bg_gray"]  # int, bare face gray
         assert sh["active"] is True and "d_max" not in sh, sh
-        # darkest shadowed face - c; s_p / s_r are recorded to 4 decimals, so
-        # the recomputed bound is good to bg * 5e-5 < 0.02 levels
-        f_lo = bg * (1 - max(sh["s_p"], sh["s_r"])) - 60  # float
-        assert abs(pt["forbidden_lo"] - f_lo) < 0.02, (pt, sh)
-        assert pt["forbidden_hi"] == bg + 60, (pt, bg)
+        assert params["config"]["shadows"]["strength_range"] == [0.8, 0.8]
+        # darkest shadowed face; s_p / s_r are recorded to 4 decimals, so the
+        # recomputed level is good to bg * 5e-5 < 0.02 levels
+        shd = bg * (1 - max(sh["s_p"], sh["s_r"]))  # float, darkest shadowed face gray
+        # the windows a person expects: shd +- 60 and bg +- 60, one when they overlap
+        want = ([[shd - 60, bg + 60]] if shd + 60 > bg - 60
+                else [[shd - 60, shd + 60], [bg - 60, bg + 60]])  # list of [lo, hi] floats
+        win = pt["forbidden"]  # list of [lo, hi] floats, recorded merged windows
+        if abs((shd + 60) - (bg - 60)) >= 0.02:  # merge decision clear at 4-decimal s
+            assert len(win) == len(want), (win, want)
+            assert all(abs(a - b) < 0.02 for w, v in zip(win, want)
+                       for a, b in zip(w, v)), (win, want)
         assert pt["headroom"] == 0 and pt["gray_fallback"] is False, pt
-        assert pt["gray"] <= pt["forbidden_lo"] or pt["gray"] >= pt["forbidden_hi"], pt
+        g = pt["gray"]  # int, pointer body gray
+        assert all(g <= lo or g >= hi for lo, hi in win), (g, win)
+        assert abs(g - bg) >= 60 and abs(g - shd) >= 60 - 0.02, (g, bg, shd)
 
 
 def test_edge_max_frac_slider_changes_tiles(page):
