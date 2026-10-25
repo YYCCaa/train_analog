@@ -890,3 +890,24 @@ def test_tile_save_bundles_image_and_params(page, tmp_path):
     _, png3, params3, _ = _save_tile(page, 1, tmp_path / "fresh")
     assert png3 == _tile_png(page, 1)
     assert params3["config"]["ticks"]["len_range"] == [6, 15]
+
+
+def test_min_bg_contrast_lightens_shadows(page, tmp_path):
+    # a person turns shadows fully on and makes the pointer dark
+    _commit_and_wait(page, _num(page, "shadows.prob"), "1")  # shadow on every tile
+    _commit_and_wait(page, _num(page, "shadows.strength_range", "hi"), "1")
+    _commit_and_wait(page, _num(page, "shadows.strength_range", "lo"), "1")
+    _commit_and_wait(page, _num(page, "pointer.gray_range", "hi"), "40")  # dark pointers only
+    before_src, before_mean = _tile_srcs(page), _tile_means(page)  # list[str] / list[float] (9)
+    # then asks for a high pointer/background contrast
+    _commit_and_wait(page, _num(page, "pointer.min_bg_contrast"), "100")
+    after_src, after_mean = _tile_srcs(page), _tile_means(page)  # list[str] / list[float] (9)
+    assert any(a != b for a, b in zip(before_src, after_src)), "no tile changed"
+    # shadows are lightened: the tiles get brighter on the whole, none darker
+    assert sum(after_mean) > sum(before_mean) + 5.0, (before_mean, after_mean)
+    assert all(a >= b - 0.5 for a, b in zip(after_mean, before_mean)), (before_mean, after_mean)
+    # the saved parameters of a tile show the cap
+    _, _, params, _ = _save_tile(page, 0, tmp_path / "save")  # dict, params.json
+    sh = params["sampled"]["shadows"]  # dict, shadow record
+    assert sh["s_p"] <= sh["d_max"] + 1e-3 and sh["s_r"] <= sh["d_max"] + 1e-3, sh
+    assert sh["s_p_drawn"] > sh["d_max"], sh
