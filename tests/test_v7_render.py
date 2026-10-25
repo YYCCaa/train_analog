@@ -288,6 +288,7 @@ def test_pick_pointer_gray():
 # the physical multiplicative shadow model (only seed 1 has a shadow; seeds
 # 0 and 2 are unchanged, so no other stream moved). Only the image is hashed,
 # so moving the tip label to the visible (cut) tip left these unchanged.
+# Since the edge clamp they are the pointer.edge_max_frac = 1 renders.
 _PRE_CONTRAST_HASHES = {
     0: "e0c38ede1599cf8d16dcaef4347406454bd2163df2c4866ffa86c1d96a1f6ad6",
     1: "e3545616c3cfe7f4dc5305faabbef780e3ea52d2cdd9cb068c6e684ae080b3a8",
@@ -295,13 +296,32 @@ _PRE_CONTRAST_HASHES = {
 }
 
 
+# sha256 hex (str) of the same renders with the DEFAULT pointer.edge_max_frac
+# 0.25 (re-pinned when the edge clamp arrived: seeds 0 and 2 change near the
+# apex; seed 1's apex sits under the rim band, so it is unchanged)
+_DEFAULT_HASHES = {
+    0: "5b6bc1295ee5619d6112e05c9ddb2a313eca17dd1d64db6a0a6ae495fe29ffce",
+    1: "e3545616c3cfe7f4dc5305faabbef780e3ea52d2cdd9cb068c6e684ae080b3a8",
+    2: "076ab6daadff4c318017f9e6987b3042f9ed6cdba77196fae151f25653394cb9",
+}
+
+
 def test_default_render_unchanged_by_contrast_key():
     import hashlib
     cfg = _cfg(**{"digits.show_prob": 0.0})
     assert cfg["pointer"]["min_bg_contrast"] == 0
-    for seed, want in _PRE_CONTRAST_HASHES.items():
+    for seed, want in _DEFAULT_HASHES.items():
         got = hashlib.sha256(g7.render_image(cfg, seed).image.tobytes()).hexdigest()
         assert got == want, f"seed {seed}: default render changed"
+
+
+def test_edge_max_frac_one_reproduces_old_pixels():
+    # edge_max_frac = 1 skips the clamp: the pre-clamp pins hold bit for bit
+    import hashlib
+    cfg = _cfg(**{"digits.show_prob": 0.0, "pointer.edge_max_frac": 1.0})
+    for seed, want in _PRE_CONTRAST_HASHES.items():
+        got = hashlib.sha256(g7.render_image(cfg, seed).image.tobytes()).hexdigest()
+        assert got == want, f"seed {seed}: frac-1 render changed"
 
 
 def _pointer_footprint(cfg, seed):
@@ -1179,11 +1199,12 @@ def _dark_on_line(res, back, dark=100, reach=12.0):
 
 # "section.key" -> value pins (dict): _CLEAN_TIP (flat face 200, black pointer,
 # no noise / blur / effects / shadows) with a light rim / outer fill, so the
-# only dark pixels near the tip are pointer pixels.  Edge band <= 2 px: a 3-px
-# band blends ring 1 halfway (gray 100 on this face), a pointer pixel by the
-# rule that a "< 100" reader never calls dark
+# only dark pixels near the tip are pointer pixels.  Default edge band [1, 3]
+# and edge_max_frac 0.25: near the label the band is clamped away, so no
+# half-blended ring (gray 100 on this face: a pointer pixel by the rule that a
+# "< 100" reader never calls dark) sits on the counted line
 _COUNT_CLEAN = {**_CLEAN_TIP, "palette.outer_gray_range": [220, 220],
-                "palette.rim_gray_range": [220, 220], "pointer.edge_thickness_range": [1, 2]}
+                "palette.rim_gray_range": [220, 220]}
 
 
 @pytest.mark.parametrize("cut", [False, True], ids=["cut_off", "cut_on"])
@@ -1205,6 +1226,103 @@ def test_tip_label_counts_dark_pixels(cut):
              np.bincount(closer).tolist(), 100 * (closer <= n).mean()))
     assert (at > n).all(), at
     assert (closer <= n).mean() >= 0.9, closer
+
+
+# ── edge clamp: pointer.edge_max_frac ──────────────────────────────────────
+
+def _edge_case(frac, thickness=3):
+    """Draw a slender pointer's edge band on a synthetic canvas.
+
+    Triangle apex (20.3, 64.6) pointing -x, base x = 100.4, half base 6
+    (W grows 12 / 80 = 0.15 px per px of height), hub disc r 9 at the base
+    midpoint; body gray 50, background 200, edge gray 0, no noise.
+    Returns (arr (128, 128) uint8 after the band, dist (128, 128) float32 ring
+    index, mask (128, 128) bool, (A, B_l, B_r) floored vertices).
+    """
+    from PIL import Image, ImageDraw
+    apex, bl, br = (20.3, 64.6), (100.4, 58.6), (100.4, 70.6)  # (x, y) float px each
+    mask = Image.new("L", (128, 128), 0)  # "L" pointer mask
+    d = ImageDraw.Draw(mask)
+    d.polygon([apex, bl, br], fill=255)
+    d.ellipse([100.4 - 9, 64.6 - 9, 100.4 + 9, 64.6 + 9], fill=255)
+    tri_img = Image.new("L", (128, 128), 0)  # "L" triangle only
+    ImageDraw.Draw(tri_img).polygon([apex, bl, br], fill=255)
+    fl = [(float(math.floor(x)), float(math.floor(y))) for x, y in (apex, bl, br)]
+    img = Image.fromarray(np.where(np.array(mask) > 0, 50, 200).astype(np.uint8))
+    bg = np.full((128, 128), 200, dtype=np.uint8)  # (128, 128) uint8 pre-pointer canvas
+    out, painted = g7._draw_pointer_edge(img, mask, 0, bg, thickness, 0, np.random.default_rng(0),
+                                         (fl[0], fl[1], fl[2], np.array(tri_img) > 0), frac)
+    m = np.array(mask)  # (128, 128) uint8
+    return np.array(out), g7._erosion_dist(m, thickness), m > 0, fl
+
+
+def test_edge_clamp_unit_slender_apex():
+    t, frac = 3, 0.25  # int band, float clamp
+    arr, dist, mask, (a, bl, br) = _edge_case(frac, t)
+    mx, my = (bl[0] + br[0]) / 2, (bl[1] + br[1]) / 2
+    hl = math.hypot(mx - a[0], my - a[1])  # float px, |M - A|
+    ys, xs = np.nonzero(mask & (arr != 50))  # (N,) int, pixels the band repainted
+    h = ((xs - a[0]) * (mx - a[0]) + (ys - a[1]) * (my - a[1])) / hl  # (N,) float64
+    w = math.hypot(br[0] - bl[0], br[1] - bl[1]) * h / hl  # (N,) float64, W(h)
+    near = h < 3 * 4  # (N,) bool, within the first 12 px of the apex
+    k = dist[ys, xs]  # (N,) float32 ring index
+    assert (k[near] < np.floor(frac * w[near])).all(), (k[near], w[near])
+    # and along the whole triangle: a repainted ring index is always < floor(frac W)
+    tri = (h >= 0) & (h <= hl) & (xs < 92)  # (N,) bool, triangle part, clear of the hub disc
+    assert tri.sum() > 20, tri.sum()
+    assert (k[tri] < np.floor(frac * w[tri])).all()
+    # within 12 px W < 1.8, so floor(0.25 W) = 0: no band at all there, body only
+    ys_n, xs_n = np.nonzero(mask)
+    h_all = ((xs_n - a[0]) * (mx - a[0]) + (ys_n - a[1]) * (my - a[1])) / hl
+    assert (arr[ys_n[h_all < 12], xs_n[h_all < 12]] == 50).all()
+    # frac 1: no clamp, the full 3-ring band (ring 0 = background 200) everywhere
+    arr1, dist1, mask1, _ = _edge_case(1.0, t)
+    band = mask1 & (dist1 < t)  # (128, 128) bool
+    assert (arr1[band & (dist1 == 0)] == 200).all() and (arr1[mask1 & ~band] == 50).all()
+    # thickness 0: no band at all, nothing repainted
+    arr0, _, mask0, _ = _edge_case(frac, 0)
+    assert (arr0[mask0] == 50).all()
+
+
+def test_edge_clamp_keeps_draw_count():
+    # the edge noise is drawn for the unclamped band: the pointer stream ends in
+    # the same state whatever edge_max_frac is (nothing else moves)
+    for seed in range(4):
+        a = g7.render_image(_cfg(**{"pointer.edge_max_frac": 1.0}), seed)
+        b = g7.render_image(_cfg(**{"pointer.edge_max_frac": 0.0}), seed)
+        assert a.params["pointer"] == b.params["pointer"]
+        assert a.params["tri_artifacts"] == b.params["tri_artifacts"]
+
+
+@pytest.mark.parametrize("frac", [0.25, 1.0])
+def test_edge_clamp_apex_shows_body(frac):
+    # a person looks at the apex of a black pointer (edge band 2-3 px) on a
+    # flat face 200: with the clamp, the pixel on the height where the triangle
+    # is 1.5 .. 3.5 px wide shows the body (dark), not the background; without
+    # it (frac 1) the background ring eats that thin end
+    # no rim band, no tip jitter or pointer shift: the apex is never covered
+    cfg = _cfg(**{**_COUNT_CLEAN, **_NO_STRETCH, "cut_tip.enabled": False,
+                  "outer.rim_width": 0, "geometry.tip_variation": 0.0,
+                  "geometry.ptr_displacement_range": [0.0, 0.0],
+                  "pointer.edge_thickness_range": [2, 3], "pointer.edge_max_frac": frac})
+    dark_frac = []  # list[float], share of the sampled apex points that are dark, per seed
+    for seed in range(30):
+        res = g7.render_image(cfg, seed)
+        g = res.params["geometry"]  # dict
+        (ax, ay), (mx, my), _ = res.tip_axis  # floats, image px
+        hl = math.hypot(mx - ax, my - ay)
+        per_px = 2 * g["chord_half"] / (g["tip_dist"] + g["chord_dist"])  # float, dW / dh
+        hits = []  # list[bool], dark at each sampled width
+        for wid in (1.5, 2.5, 3.5):
+            h = wid / per_px  # float px along the height
+            x, y = ax + h * (mx - ax) / hl, ay + h * (my - ay) / hl
+            hits.append(int(res.image[int(round(y)), int(round(x))]) < 100)
+        dark_frac.append(float(np.mean(hits)))
+    print("frac %.2f: apex dark share mean %.3f min %.3f" % (frac, np.mean(dark_frac), min(dark_frac)))
+    if frac < 1:
+        assert min(dark_frac) == 1.0, dark_frac
+    else:
+        assert np.mean(dark_frac) < 0.8, dark_frac  # the check tells the two apart
 
 
 # ── the label sits on the principal axis (after stretch, displacements, offset) ──
@@ -1342,6 +1460,11 @@ def test_pointer_forbidden_interval_unit():
     assert g7._pick_pointer_gray(c1, 0, 200, 150, 80, 0.6) == 0
     c2.randint(0, 200)
     assert c1.random() == c2.random(), "infeasible case must consume one draw"
+    info = {}  # dict, fallback flag out
+    g7._pick_pointer_gray(random.Random(1), 0, 200, 150, 80, 0.6, info)
+    assert info == {"fallback": True}
+    g7._pick_pointer_gray(random.Random(1), 0, 255, 150, 0, 0.6, info)  # c = 0: never
+    assert info == {"fallback": False}
     # bg 100, s 0.1 -> faces [90, 100], c 200: hi is 140 above, lo 90 below -> hi
     assert g7._pick_pointer_gray(random.Random(0), 0, 240, 100, 200, 0.1) == 240
 
@@ -1356,6 +1479,7 @@ def test_render_records_forbidden_interval():
         assert pt["forbidden_lo"] == pytest.approx(160 * 0.4 - 50, abs=1e-3)
         assert pt["forbidden_hi"] == pytest.approx(210.0)
         assert pt["gray"] <= pt["forbidden_lo"] or pt["gray"] >= pt["forbidden_hi"], pt
+        assert pt["gray_fallback"] is False
         assert p["shadows"]["s_p"] == pytest.approx(0.6) and "d_max" not in p["shadows"]
     # no shadow: the interval is bg +- c
     pt = g7.render_image(_cfg(**{**pins, "shadows.prob": 0.0}), 0).params["pointer"]

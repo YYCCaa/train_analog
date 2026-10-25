@@ -65,7 +65,8 @@ pointer:
   darker_frac_range: {type: float_range, min: 0.0, max: 1.0, step: 0.01, help: "Hole/edge gray as a fraction of the pointer gray."}
   gradient_range: {type: float_range, min: -100.0, max: 100.0, step: 1, help: "Lengthwise brightness shift from hub to tip."}
   noise_amplitude: {type: int, min: 0, max: 64, step: 1, help: "Per-pixel noise amplitude on the pointer body (+/-)."}
-  edge_thickness_range: {type: int_range, min: 1, max: 8, step: 1, help: "Pointer edge band width (px)."}
+  edge_thickness_range: {type: int_range, min: 0, max: 8, step: 1, help: "Pointer edge band width (px); 0 = no edge band."}
+  edge_max_frac: {type: float, min: 0, max: 1, step: 0.01, help: "Max pointer edge band width as a fraction of the triangle's cross-section width at each height (1 = no clamp)."}
   edge_noise_amplitude: {type: int, min: 0, max: 32, step: 1, help: "Per-pixel noise amplitude on the pointer edge (+/-)."}
   min_bg_contrast: {type: int, min: 0, max: 255, step: 1, help: "Minimum |pointer gray − face gray|, for the bare face and the darkest shadowed face (the pointer gray is drawn after bg and shadow); 0 = off."}
 

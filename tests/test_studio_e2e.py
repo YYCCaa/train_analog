@@ -901,3 +901,24 @@ def test_min_bg_contrast_avoids_shadowed_face(page, tmp_path):
         assert abs(pt["forbidden_lo"] - f_lo) < 0.02, (pt, sh)
         assert pt["forbidden_hi"] == bg + 60, (pt, bg)
         assert pt["gray"] <= pt["forbidden_lo"] or pt["gray"] >= pt["forbidden_hi"], pt
+
+
+def test_edge_max_frac_slider_changes_tiles(page):
+    # a person sets the edge clamp to 1 (no clamp), then drags its slider all
+    # the way left to 0: the thin pointer ends lose their edge band, tiles change
+    box = _num(page, "pointer.edge_max_frac")  # number input (Locator)
+    box.scroll_into_view_if_needed()
+    assert box.input_value() == "0.25"
+    _commit_and_wait(page, box, "1")
+    before = _tile_srcs(page)  # tile srcs at frac 1, list[str] (9)
+    slider = page.locator('[data-param="pointer.edge_max_frac"] input[type=range]')  # (Locator)
+    slider.scroll_into_view_if_needed()
+    sb = slider.bounding_box()  # slider box in CSS px, dict x/y/width/height (floats)
+    y = sb["y"] + sb["height"] / 2  # slider centre line (float px)
+    old = _applied_seq(page)
+    _drag(page, sb["x"] + sb["width"] - 7, sb["x"] - 20, y)  # human drag to the far left
+    _wait_input(page, '[data-param="pointer.edge_max_frac"] input[type=number]', "v === 0")
+    _wait_applied_after(page, old)
+    assert float(box.input_value()) == 0.0
+    after = _tile_srcs(page)  # tile srcs at frac 0, list[str] (9)
+    assert any(a != b for a, b in zip(before, after)), "no tile changed"

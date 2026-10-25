@@ -100,6 +100,19 @@ tip_t (t*, px along A'M'), tip_count (count(t*)), tip_fallback, tip_recession
 (the ideal float apex, for reference); RenderResult.tip_axis holds A', M' and
 the base direction unrounded.
 
+Edge clamp (pointer.edge_max_frac = f, edge_thickness_map): the edge band of
+thickness t (ring 0 blends to the background, inner rings to edge gray) is
+narrowed on the triangle so a thin end is not eaten by its own band:
+
+          A ●   W(h) = |B_r - B_l| h / |M - A|, h = projection on the drawn height
+           ╱█╲       t_eff = min(t, floor(f W(h)))
+          ╱███╲      ring k painted iff k < t_eff, blend k / max(t_eff - 1, 1)
+         ╱░███░╲     (█ body, ░ band; near A, f W < 1: no band, body to the edge)
+        ╱░░███░░╲    hub-disc pixels keep t; f >= 1 skips the clamp (old pixels)
+    B_l ●───M────● B_r
+
+The edge noise is drawn for the unclamped band, so f never shifts a stream.
+
 Shadows are physical: a shadow blocks the direct light and keeps only the
 ambient light, so it scales the surface by an albedo-independent factor,
 out = in * (1 - d).  One shared strength s per image, jittered separately
@@ -163,7 +176,9 @@ bool, str, list); positions are image px unless named otherwise.
     shadows        active, light_angle, s_p, s_r, rim_offset_frac,
                    rim_cutout_frac, rim_blur, offset
     pointer        gray, hole_gray, edge_gray, gradient, edge_thickness,
-                   forbidden_lo, forbidden_hi (pointer gray interval it avoided)
+                   forbidden_lo, forbidden_hi (pointer gray interval it avoided;
+                   only enforced when min_bg_contrast > 0), gray_fallback (bool:
+                   the allowed set was empty, farthest endpoint used)
     cut_tip        enabled, cut_r, ideal_apex_x / _y, tip_recession
     jitter         brightness, contrast, sharpness
     hier_noise     block_min, block_max, block_std (of the block offsets)
@@ -514,7 +529,44 @@ def _erosion_dist(m, thickness):
     return dist
 
 
-def _draw_pointer_edge(img, mask, edge_gray, bg_arr, thickness, noise_amp, nrng):
+def edge_thickness_map(ys, xs, thickness, tri, edge_max_frac):
+    """Per-pixel effective edge thickness t_eff of the band pixels (ys, xs).
+
+    ys, xs        : (N,) int, band pixel coords (pre-stretch canvas)
+    thickness     : int >= 0, t (pointer edge_thickness draw)
+    tri           : None, or a 4-tuple (A, B_l, B_r, in_tri): the DRAWN triangle
+                    vertices, (x, y) float px each (floored, as ImageDraw draws
+                    them), and in_tri, (C, C) bool, the triangle polygon's pixels
+    edge_max_frac : float, pointer.edge_max_frac; >= 1 = no clamp
+
+        A ●            h  = (p - A) . (M - A) / |M - A|   (projection on the height)
+         ╱ ╲           W(h) = |B_r - B_l| h / |M - A|     (cross-section width)
+      h ╱ ▒ ╲  W(h)    t_eff = min(t, floor(frac W(h)))   in the triangle, 0 <= h <= |M - A|
+       ╱ ▒▒▒ ╲         t_eff = t                          hub disc (elsewhere)
+    B_l ●──M──● B_r    ring k painted iff k < t_eff, blend k / max(t_eff - 1, 1)
+
+    Returns (N,) int64 t_eff, or None when no clamp applies (frac >= 1 or no
+    triangle given): then every band pixel uses t, exactly as before the clamp.
+    """
+    if tri is None or edge_max_frac >= 1 or len(ys) == 0:
+        return None
+    (ax, ay), bl, br, in_tri = tri
+    mx, my = (bl[0] + br[0]) / 2.0, (bl[1] + br[1]) / 2.0  # float px, base midpoint M
+    h_len = math.hypot(mx - ax, my - ay)  # float px, |M - A|
+    t_eff = np.full(len(ys), int(thickness), dtype=np.int64)  # (N,) int64, hub default t
+    if h_len <= 0:
+        return t_eff
+    hx, hy = (mx - ax) / h_len, (my - ay) / h_len  # (float, float) unit height
+    h = (xs - ax) * hx + (ys - ay) * hy  # (N,) float64, projection on the height
+    w = math.hypot(br[0] - bl[0], br[1] - bl[1]) * h / h_len  # (N,) float64, W(h)
+    on_tri = in_tri[ys, xs] & (h >= 0) & (h <= h_len)  # (N,) bool, triangle part
+    cap = np.floor(edge_max_frac * w + 1e-9).astype(np.int64)  # (N,) int64, floor(frac W)
+    t_eff[on_tri] = np.minimum(int(thickness), np.maximum(cap[on_tri], 0))
+    return t_eff
+
+
+def _draw_pointer_edge(img, mask, edge_gray, bg_arr, thickness, noise_amp, nrng,
+                       tri=None, edge_max_frac=1.0):
     """Variable-thickness edge band on the pointer mask boundary.
 
     The outermost erosion ring blends toward the pre-pointer background
@@ -523,9 +575,16 @@ def _draw_pointer_edge(img, mask, edge_gray, bg_arr, thickness, noise_amp, nrng)
     background (blend = 0), the visible pointer is the mask minus ring 0.
     Thickness 0 draws no band (and no noise).
 
+    Edge clamp (tri, edge_max_frac, see edge_thickness_map): on the triangle
+    part each pixel uses t_eff = min(t, floor(frac W(h))); ring k is painted iff
+    k < t_eff, with blend k / max(t_eff - 1, 1); unpainted band pixels keep the
+    body.  The noise is drawn for the UNCLAMPED band (fixed draw count) and
+    indexed, so the clamp never shifts the stream.  frac >= 1 skips the clamp:
+    the pixels are bit-identical to the unclamped band.
+
     Returns (img "L" (C, C), bg_painted (C, C) bool): bg_painted marks the
-    band pixels painted pure background (blend 0, i.e. ring 0), which the tip
-    label does not count as pointer pixels.
+    band pixels painted pure background (blend 0), which the tip label does
+    not count as pointer pixels.
     """
     m = np.array(mask)  # (C, C) uint8
     arr = np.array(img)  # (C, C) uint8
@@ -533,11 +592,18 @@ def _draw_pointer_edge(img, mask, edge_gray, bg_arr, thickness, noise_amp, nrng)
     dist = _erosion_dist(m, thickness)
     bg_painted = np.zeros(m.shape, dtype=bool)  # (C, C) bool, ring pixels with blend 0
 
-    ys, xs = np.where((m > 0) & (dist < thickness))
+    ys, xs = np.where((m > 0) & (dist < thickness))  # (N,) int, unclamped band pixels
     if len(ys) == 0:
         return img, bg_painted
-    blend = dist[ys, xs] / max(thickness - 1, 1)  # (N,) 0 = bg .. 1 = edge
-    noise = nrng.integers(-noise_amp, noise_amp + 1, size=len(ys), dtype=np.int16)
+    noise = nrng.integers(-noise_amp, noise_amp + 1, size=len(ys), dtype=np.int16)  # (N,) int16
+    t_eff = edge_thickness_map(ys, xs, thickness, tri, edge_max_frac)  # (N,) int64 or None
+    ring = dist[ys, xs]  # (N,) float32, ring index k
+    if t_eff is None:
+        blend = ring / max(thickness - 1, 1)  # (N,) float32, 0 = bg .. 1 = edge
+    else:
+        keep = ring < t_eff  # (N,) bool, painted under the clamp
+        ys, xs, noise, ring, t_eff = ys[keep], xs[keep], noise[keep], ring[keep], t_eff[keep]
+        blend = (ring / np.maximum(t_eff - 1, 1)).astype(np.float32)  # (N',) float32
     bg = bg_arr[ys, xs].astype(np.int16)  # (N,) int16
     blended = (bg + blend * (edge_gray - bg) + noise).astype(np.int16)
     arr[ys, xs] = np.clip(blended, 0, 255).astype(np.uint8)
@@ -559,7 +625,7 @@ def pointer_forbidden_interval(bg_gray, min_contrast, s_max=0.0):
     return bg_gray * (1.0 - s_max) - min_contrast, float(bg_gray + min_contrast)
 
 
-def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0):
+def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0, info=None):
     """Draw the pointer body gray (int) with at least `min_contrast` levels of
     separation from the bare face gray AND from the darkest shadowed face.
 
@@ -568,6 +634,8 @@ def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0):
     bg_gray      : int, palette bg_gray_range draw (face background level)
     min_contrast : int >= 0, pointer.min_bg_contrast; 0 = off
     s_max        : float 0-1, max(s_p, s_r) with a shadow, 0 without one
+    info         : optional dict; info["fallback"] (bool) is set True when the
+                   allowed set was empty (farthest-endpoint fallback), else False
 
     The pointer gray is drawn after the bg and the shadow strengths (they live
     on the palette / shadows streams, drawn earlier).  The faces it may sit on
@@ -594,6 +662,8 @@ def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0):
         low_hi, high_lo = hi, hi + 1
     n_low = max(0, low_hi - lo + 1)  # int, size of [lo, low_hi]
     n_high = max(0, hi - high_lo + 1)  # int, size of [high_lo, hi]
+    if info is not None:
+        info["fallback"] = n_low + n_high == 0
     if n_low + n_high == 0:
         rng.randint(lo, hi)  # keep the stream's draw count fixed
         # distance of each endpoint from the forbidden interval (float): hi above
@@ -606,7 +676,8 @@ def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0):
 def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
                  chord_dist, ptr_gray, edge_gray, grad_strength, pcfg, nrng,
                  edge_thickness, cut_tip_radius):
-    """Draw the pointer on the "L" canvas.
+    """Draw the pointer on the "L" canvas.  pcfg = cfg["pointer"] (its
+    edge_max_frac clamps the edge band on the triangle, see _draw_pointer_edge).
 
     Returns (img, apex, base_left, base_right, mask, ptr_pix): apex / base_left
     / base_right are the ideal (float) triangle vertices, (x, y) float px; mask
@@ -639,9 +710,17 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
 
     img = _pointer_variation(img, mask, cx, cy, angle_deg, tip_dist,
                              grad_strength, pcfg["noise_amplitude"], nrng)
-    # bg_painted: (C, C) bool, edge pixels repainted pure background (ring 0)
+    # drawn triangle for the edge clamp: floored vertices (ImageDraw floors
+    # them) + its polygon pixels, (C, C) bool
+    tri_img = Image.new("L", img.size, 0)  # "L" (C, C), triangle-only polygon
+    ImageDraw.Draw(tri_img).polygon([apex, base_left, base_right], fill=255)
+    floored = [(float(math.floor(px)), float(math.floor(py)))
+               for px, py in (apex, base_left, base_right)]  # 3 x (x, y) float px
+    tri = (floored[0], floored[1], floored[2], np.array(tri_img) > 0)
+    # bg_painted: (C, C) bool, edge pixels repainted pure background (blend 0)
     img, bg_painted = _draw_pointer_edge(img, mask, edge_gray, bg_arr, edge_thickness,
-                                         pcfg["edge_noise_amplitude"], nrng)
+                                         pcfg["edge_noise_amplitude"], nrng,
+                                         tri, float(pcfg["edge_max_frac"]))
 
     m_uncut = np.array(mask)  # (C, C) uint8, uncut pointer mask (before the cut)
     if cut_tip_radius is not None:
@@ -1191,8 +1270,9 @@ def render_image(cfg, image_seed):
     # (palette / shadows streams), so the pointer stream's order is unchanged
     s_max = max(s_p, s_r) if has_shadow else 0.0  # float 0-1, strongest shadow
     f_lo, f_hi = pointer_forbidden_interval(bg_gray, PT["min_bg_contrast"], s_max)  # float bounds
+    gray_info = {}  # dict, {"fallback": bool} from _pick_pointer_gray
     ptr_gray = _pick_pointer_gray(ptr_rng, *PT["gray_range"], bg_gray,
-                                  PT["min_bg_contrast"], s_max)  # int body gray
+                                  PT["min_bg_contrast"], s_max, gray_info)  # int body gray
     hole_gray = int(ptr_gray * ptr_rng.uniform(*PT["darker_frac_range"]))  # int
     edge_gray = int(ptr_gray * ptr_rng.uniform(*PT["darker_frac_range"]))  # int
     grad_strength = ptr_rng.uniform(*PT["gradient_range"])  # float
@@ -1201,7 +1281,8 @@ def render_image(cfg, image_seed):
         shade = shadow_darkening(m_p, m_r, s_p, s_r)  # (C, C) float32
     rec["pointer"] = {"gray": ptr_gray, "hole_gray": hole_gray, "edge_gray": edge_gray,
                       "gradient": grad_strength, "edge_thickness": edge_thickness,
-                      "forbidden_lo": f_lo, "forbidden_hi": f_hi}
+                      "forbidden_lo": f_lo, "forbidden_hi": f_hi,
+                      "gray_fallback": gray_info["fallback"]}
 
     # hole drawn BEFORE the pre-pointer snapshot so it survives the cut-tip restore
     ImageDraw.Draw(img).ellipse([hole_cx - hole_r, hole_cy - hole_r,

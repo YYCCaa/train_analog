@@ -68,7 +68,8 @@ pointer:
   darker_frac_range: [0.4, 0.6]  # [lo, hi] float; hole/edge gray = fraction of pointer gray
   gradient_range: [-25.0, 25.0]  # [lo, hi] float; lengthwise brightness shift hub-to-tip
   noise_amplitude: 25  # int scalar; per-pixel noise amplitude on body (+/-)
-  edge_thickness_range: [1, 3]  # [lo, hi] int; edge band width (px)
+  edge_thickness_range: [1, 3]  # [lo, hi] int; edge band width (px), 0 = no band
+  edge_max_frac: 0.25  # float scalar; edge band width <= floor(frac * triangle cross-section width) at each height (1 = no clamp)
   edge_noise_amplitude: 5  # int scalar; per-pixel noise amplitude on edge (+/-)
   min_bg_contrast: 0  # int scalar; min |pointer gray - face gray| for the bare face and the darkest shadowed face bg*(1 - max(s_p, s_r)); the pointer gray is drawn after bg and shadow; 0 = off
 
