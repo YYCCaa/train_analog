@@ -68,9 +68,10 @@ pointer:
   darker_frac_range: [0.4, 0.6]  # [lo, hi] float; hole/edge gray = fraction of pointer gray
   gradient_range: [-25.0, 25.0]  # [lo, hi] float; lengthwise brightness shift hub-to-tip
   noise_amplitude: 25  # int scalar; per-pixel noise amplitude on body (+/-)
-  edge_thickness_range: [1, 3]  # [lo, hi] int; edge band width (px)
+  edge_thickness_range: [1, 3]  # [lo, hi] int; edge band width (px), 0 = no band
+  edge_max_frac: 0.25  # float scalar; edge band width <= floor(frac * triangle cross-section width) at each height (1 = no clamp)
   edge_noise_amplitude: 5  # int scalar; per-pixel noise amplitude on edge (+/-)
-  min_bg_contrast: 0  # int scalar; min |pointer gray - bg gray|, also for the shadowed background: shadows are lightened so they keep this contrast (bg_gray_range draw); 0 = off
+  min_bg_contrast: 0  # int scalar; min |pointer gray - face gray| for the bare face and the darkest shadowed face bg*(1 - max(s_p, s_r)); the pointer gray is drawn after bg and shadow; 0 = off
 
 background:
   lowfreq_size: 8  # int scalar; low-frequency gradient tile resolution (NxN)
@@ -80,17 +81,13 @@ background:
   dial_circle_blur_radius: 3  # int scalar; that blur radius (px)
 
 cut_tip:
-  enabled: true  # bool; erase pointer pixels near the apex; tip label = farthest point on the axis where the pointer is still wide enough to see after blur (edge ring, cut and rim aware)
+  enabled: true  # bool; erase pointer pixels near the apex; the tip label moves back to where the cut pointer still crosses more than tip_label.min_pixels pixels
   radius_range: [7, 10]  # [lo, hi] int; erased radius (px)
 
 tip_label:
-  # label = farthest axis point p where Cmap = G_sigma_eff * (visible pointer weight) has Cmap(p) >= c
-  # and >= min_ratio of the patch_size x patch_size square around p has Cmap >= c;
-  # sigma_eff = sqrt(sigma_blur^2 + base_blur^2), sigma_blur = dial_circle_blur_radius when the blur is on
-  contrast_frac: 0.5  # float scalar; c, per-pixel fraction of the pointer contrast left after the blur
-  base_blur: 1.0  # float scalar; observer blur sigma_0 (px) added in quadrature to the dial blur
-  patch_size: 9  # int scalar; side (px, odd) of the square patch centred on the tip that must support it
-  min_ratio: 0.2  # float scalar; min share of that patch with Cmap >= contrast_frac (0 = off)
+  # label = point on the drawn pointer triangle's height (apex -> base midpoint, stretched)
+  # nearest the apex where the line parallel to the base crosses more than min_pixels pointer pixels
+  min_pixels: 2  # int scalar; n, pointer pixels the base-parallel line must exceed
 
 shadows:
   # physical model: out = in x (1 - d), d = max(s_p x pointer shape, s_r x rim shape)

@@ -395,23 +395,30 @@ def test_glyph_shape_keys_and_defaults():
 
 
 def test_tip_label_keys_and_defaults():
-    # blur-aware tip label section: right after cut_tip, pinned defaults + bounds
+    # pixel-count tip label section: right after cut_tip, one key min_pixels
     cfg = vc.default_config()
     schema = vc.load_schema()
-    assert cfg["tip_label"] == {"contrast_frac": 0.5, "base_blur": 1.0,
-                                "patch_size": 9, "min_ratio": 0.2}
+    assert cfg["tip_label"] == {"min_pixels": 2}
     order = list(cfg)  # list[str], section order of the default YAML
     assert order.index("tip_label") == order.index("cut_tip") + 1
     assert list(schema).index("tip_label") == list(schema).index("cut_tip") + 1
-    bounds = {"contrast_frac": ("float", 0.05, 0.95, 0.01),
-              "base_blur": ("float", 0, 4, 0.1),
-              "patch_size": ("int", 3, 31, 2),
-              "min_ratio": ("float", 0, 0.9, 0.01)}  # key -> (type, min, max, step)
-    for key, (typ, lo, hi, step) in bounds.items():
-        leaf = schema["tip_label"][key]  # dict, schema leaf
-        assert (leaf["type"], leaf["min"], leaf["max"], leaf["step"]) == (typ, lo, hi, step), key
-        assert leaf.get("help"), key
-    assert "wide enough to see after blur" in schema["cut_tip"]["enabled"]["help"]
+    leaf = schema["tip_label"]["min_pixels"]  # dict, schema leaf
+    assert (leaf["type"], leaf["min"], leaf["max"], leaf["step"]) == ("int", 0, 30, 1)
+    assert leaf["help"] == ("Tip label = point on the pointer triangle's height nearest the "
+                            "apex where the line parallel to the base crosses more than this "
+                            "many pointer pixels.")
+    assert "min_pixels" in schema["cut_tip"]["enabled"]["help"]
+
+
+def test_old_tip_label_keys_removed_with_warning():
+    # a YAML from the blur-aware label era loads; its four keys are dropped
+    old = ("tip_label:\n  contrast_frac: 0.6\n  base_blur: 2.0\n  patch_size: 11\n"
+           "  min_ratio: 0.3\n")  # str, old tip_label section
+    cfg, warns = vc.parse_config_text_with_warnings(old)
+    assert cfg["tip_label"] == {"min_pixels": 2}
+    for key in ("contrast_frac", "base_blur", "patch_size", "min_ratio"):
+        w = _warned(warns, f"tip_label.{key}:")  # list[str]
+        assert w and "removed in a newer version" in w[0], (key, warns)
 
 
 def test_range_types_match_draw_kind():

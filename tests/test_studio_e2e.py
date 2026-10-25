@@ -663,62 +663,24 @@ def _centre_dists(marks):
     return out
 
 
-def test_blur_moves_tip_marker_back(page):
-    # a user turns the dial blur up and watches the tip markers retreat to where
-    # the blurred pointer is still visible; raising the observer blur floor
-    # (tip_label.base_blur) never pushes them forward again
+def test_min_pixels_moves_tip_marker_inward(page):
+    # a user shows the tip markers, sets tip_label.min_pixels to 0 (label at the
+    # first pointer pixel), then to 8 by typing into its number input: the
+    # markers retreat toward the hub or stay, never move outward
     page.get_by_test_id("overlay-toggle").check()
-    box = page.locator('[data-param="background.dial_circle_blur"] input[type=checkbox]')
-    if not box.is_checked():
-        old = _applied_seq(page)
-        box.check()
-        _wait_applied_after(page, old)
-    radius = _num(page, "background.dial_circle_blur_radius")  # number input (Locator)
-    radius.scroll_into_view_if_needed()
-    _commit_and_wait(page, radius, "1")
-    low = _marker_geometry(page)  # blur radius 1, list[dict] (9)
-    _commit_and_wait(page, radius, "12")
-    high = _marker_geometry(page)  # blur radius 12, list[dict] (9)
-    base = _num(page, "tip_label.base_blur")  # number input (Locator)
-    base.scroll_into_view_if_needed()
-    assert base.input_value() == "1"
-    _commit_and_wait(page, base, "4")
-    floor = _marker_geometry(page)  # radius 12 + base_blur 4, list[dict] (9)
-    assert [m["seed"] for m in low] == [m["seed"] for m in high] == [m["seed"] for m in floor]
-    assert all(m["cx"] is not None for m in low + high + floor)
-    moved = [math.hypot(a["cx"] - b["cx"], a["cy"] - b["cy"]) for a, b in zip(low, high)]
-    assert max(moved) > 2.0, moved  # the markers visibly move
-    d_low, d_high, d_floor = _centre_dists(low), _centre_dists(high), _centre_dists(floor)
-    assert sum(d_high) / 9 < sum(d_low) / 9 - 1.0, (d_low, d_high)
-    for a, b in zip(d_high, d_floor):
-        assert b <= a + 0.5, (d_high, d_floor)  # back further or put, never forward
-
-
-def test_min_ratio_moves_tip_marker_inward(page):
-    # a user blurs the dial (radius 4), then demands more patch support for the
-    # tip (tip_label.min_ratio 0 -> 0.4): markers retreat toward the hub or stay,
-    # never move outward
-    page.get_by_test_id("overlay-toggle").check()
-    box = page.locator('[data-param="background.dial_circle_blur"] input[type=checkbox]')
-    if not box.is_checked():
-        old = _applied_seq(page)
-        box.check()
-        _wait_applied_after(page, old)
-    radius = _num(page, "background.dial_circle_blur_radius")  # number input (Locator)
-    radius.scroll_into_view_if_needed()
-    _commit_and_wait(page, radius, "4")
-    ratio = _num(page, "tip_label.min_ratio")  # number input (Locator)
-    ratio.scroll_into_view_if_needed()
-    _commit_and_wait(page, ratio, "0")
-    low = _marker_geometry(page)  # min_ratio 0, list[dict] (9)
-    _commit_and_wait(page, ratio, "0.4")
-    high = _marker_geometry(page)  # min_ratio 0.4, list[dict] (9)
+    box = _num(page, "tip_label.min_pixels")  # number input (Locator)
+    box.scroll_into_view_if_needed()
+    assert box.input_value() == "2"
+    _commit_and_wait(page, box, "0")
+    low = _marker_geometry(page)  # min_pixels 0, list[dict] (9)
+    _commit_and_wait(page, box, "8")
+    high = _marker_geometry(page)  # min_pixels 8, list[dict] (9)
     assert [m["seed"] for m in low] == [m["seed"] for m in high]
     assert all(m["cx"] is not None for m in low + high)
     d_low, d_high = _centre_dists(low), _centre_dists(high)  # list[float] image px
     for a, b in zip(d_low, d_high):
         assert b <= a + 0.25, (d_low, d_high)  # never away from the centre
-    assert any(b < a - 0.25 for a, b in zip(d_low, d_high)), (d_low, d_high)
+    assert any(b < a - 1.0 for a, b in zip(d_low, d_high)), (d_low, d_high)
 
 
 def test_reset_after_yaml_load_uses_builtin_default(page, tmp_path):
@@ -919,22 +881,44 @@ def test_tile_save_bundles_image_and_params(page, tmp_path):
     assert params3["config"]["ticks"]["len_range"] == [6, 15]
 
 
-def test_min_bg_contrast_lightens_shadows(page, tmp_path):
-    # a person turns shadows fully on and makes the pointer dark
+def test_min_bg_contrast_avoids_shadowed_face(page, tmp_path):
+    # a person turns shadows on for every tile, then asks for a pointer/face
+    # contrast: the pointer gray is redrawn outside the bare AND shadowed face
     _commit_and_wait(page, _num(page, "shadows.prob"), "1")  # shadow on every tile
-    _commit_and_wait(page, _num(page, "shadows.strength_range", "hi"), "1")
-    _commit_and_wait(page, _num(page, "shadows.strength_range", "lo"), "1")
-    _commit_and_wait(page, _num(page, "pointer.gray_range", "hi"), "40")  # dark pointers only
-    before_src, before_mean = _tile_srcs(page), _tile_means(page)  # list[str] / list[float] (9)
-    # then asks for a high pointer/background contrast
-    _commit_and_wait(page, _num(page, "pointer.min_bg_contrast"), "100")
-    after_src, after_mean = _tile_srcs(page), _tile_means(page)  # list[str] / list[float] (9)
+    before_src = _tile_srcs(page)  # tile srcs with the contrast off, list[str] (9)
+    _commit_and_wait(page, _num(page, "pointer.min_bg_contrast"), "60")
+    after_src = _tile_srcs(page)  # tile srcs with the contrast on, list[str] (9)
     assert any(a != b for a, b in zip(before_src, after_src)), "no tile changed"
-    # shadows are lightened: the tiles get brighter on the whole, none darker
-    assert sum(after_mean) > sum(before_mean) + 5.0, (before_mean, after_mean)
-    assert all(a >= b - 0.5 for a, b in zip(after_mean, before_mean)), (before_mean, after_mean)
-    # the saved parameters of a tile show the cap
-    _, _, params, _ = _save_tile(page, 0, tmp_path / "save")  # dict, params.json
-    sh = params["sampled"]["shadows"]  # dict, shadow record
-    assert sh["s_p"] <= sh["d_max"] + 1e-3 and sh["s_r"] <= sh["d_max"] + 1e-3, sh
-    assert sh["s_p_drawn"] > sh["d_max"], sh
+    # the saved parameters of each of three tiles show the gray outside the interval
+    for i in range(3):
+        _, _, params, _ = _save_tile(page, i, tmp_path / f"save{i}")  # dict, params.json
+        pt, sh = params["sampled"]["pointer"], params["sampled"]["shadows"]  # dicts
+        bg = params["sampled"]["palette"]["bg_gray"]  # int, bare face gray
+        assert sh["active"] is True and "d_max" not in sh, sh
+        # darkest shadowed face - c; s_p / s_r are recorded to 4 decimals, so
+        # the recomputed bound is good to bg * 5e-5 < 0.02 levels
+        f_lo = bg * (1 - max(sh["s_p"], sh["s_r"])) - 60  # float
+        assert abs(pt["forbidden_lo"] - f_lo) < 0.02, (pt, sh)
+        assert pt["forbidden_hi"] == bg + 60, (pt, bg)
+        assert pt["gray"] <= pt["forbidden_lo"] or pt["gray"] >= pt["forbidden_hi"], pt
+
+
+def test_edge_max_frac_slider_changes_tiles(page):
+    # a person sets the edge clamp to 1 (no clamp), then drags its slider all
+    # the way left to 0: the thin pointer ends lose their edge band, tiles change
+    box = _num(page, "pointer.edge_max_frac")  # number input (Locator)
+    box.scroll_into_view_if_needed()
+    assert box.input_value() == "0.25"
+    _commit_and_wait(page, box, "1")
+    before = _tile_srcs(page)  # tile srcs at frac 1, list[str] (9)
+    slider = page.locator('[data-param="pointer.edge_max_frac"] input[type=range]')  # (Locator)
+    slider.scroll_into_view_if_needed()
+    sb = slider.bounding_box()  # slider box in CSS px, dict x/y/width/height (floats)
+    y = sb["y"] + sb["height"] / 2  # slider centre line (float px)
+    old = _applied_seq(page)
+    _drag(page, sb["x"] + sb["width"] - 7, sb["x"] - 20, y)  # human drag to the far left
+    _wait_input(page, '[data-param="pointer.edge_max_frac"] input[type=number]', "v === 0")
+    _wait_applied_after(page, old)
+    assert float(box.input_value()) == 0.0
+    after = _tile_srcs(page)  # tile srcs at frac 0, list[str] (9)
+    assert any(a != b for a, b in zip(before, after)), "no tile changed"
