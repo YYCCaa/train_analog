@@ -909,6 +909,166 @@ def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0, info=None,
     return lo + idx if idx < n_low else high_lo + (idx - n_low)
 
 
+# ── config-level pointer gray warnings (studio + CLI; no rendering) ─────
+
+GRAY_RANGE_MIN_LEVELS = 32  # int, fewer usable pointer grays than this -> warning (b)
+FALLBACK_WARN_SHARE = 0.005  # float, contrast-fallback share above this -> warning (c)
+
+
+def pointer_headroom_bound(cfg):
+    """Worst-case (largest) headroom H (float, gray levels) any image of cfg can get.
+
+    Mirrors render_image: dial_radius R = int(img_size // 3 * scale),
+    hub_radius = R * h, tip_dist = (R - 2) (1 + u), u in [-tip_variation,
+    +tip_variation].  pointer_along_max = (max(tip, hub) + 2) / max(tip, 1)
+    grows as tip shrinks and as hub grows (both branches), so for each
+    reachable int R the maximum sits at tip = (R - 2)(1 - tip_variation),
+    hub = R * hub_ratio_range[1]; every int R the scale_range allows is tried.
+    """
+    G, PT = cfg["geometry"], cfg["pointer"]  # dict sections
+    base = cfg["canvas"]["img_size"] // 3  # int, dial radius at scale 1
+    s_lo, s_hi = G["scale_range"]  # float, dial radius multiplier bounds
+    tv = float(G["tip_variation"])  # float, fractional tip jitter
+    h_hi = float(G["hub_ratio_range"][1])  # float, largest hub / dial radius
+    along = 0.0  # float, largest along_max over the reachable radii
+    for r in range(int(base * s_lo), int(base * s_hi) + 1):  # int R, every reachable dial radius
+        along = max(along, pointer_along_max(r * h_hi, (r - 2) * (1 - tv)))
+    return pointer_headroom(PT["gradient_range"], along, PT["noise_amplitude"])
+
+
+def _max_strength_cdf(t, s_lo, s_hi, j):
+    """P(s_max <= t) (float) for s_max = max(clip(s + jp), clip(s + jr)) as
+    _shadow_strengths draws it: s ~ U(s_lo, s_hi) SHARED, jp, jr ~ U(-j, j)
+    independent, clip to [0, 1].  clip is monotone, so s_max = clip(s + M),
+    M = max(jp, jr) with CDF F_M(m) = ((m + j) / 2j)^2 on [-j, j].  Then
+
+        P(s + M <= t) = (1 / (s_hi - s_lo)) * integral_{s_lo}^{s_hi} F_M(t - s) ds
+                      = (G(t - s_lo) - G(t - s_hi)) / (s_hi - s_lo)
+
+    with G the antiderivative of F_M: 0 below -j, (m + j)^3 / 12 j^2 on
+    [-j, j], 2j/3 + (m - j) above j (exact, closed form; j = 0 or
+    s_lo = s_hi degenerate to a step / a point).  The clip makes
+    P = 1 for t >= 1 and 0 for t < 0.
+    """
+    if t >= 1.0:
+        return 1.0
+    if t < 0.0:
+        return 0.0
+
+    def f_m(m):  # float CDF of M at m
+        if j <= 0:
+            return 1.0 if m >= 0 else 0.0
+        return min(max((m + j) / (2 * j), 0.0), 1.0) ** 2
+
+    def g_m(m):  # float antiderivative of f_m (0 at -inf)
+        if j <= 0:
+            return max(m, 0.0)
+        if m <= -j:
+            return 0.0
+        if m <= j:
+            return (m + j) ** 3 / (12 * j * j)
+        return 2 * j / 3 + (m - j)
+
+    if s_hi <= s_lo:
+        return f_m(t - s_lo)
+    return (g_m(t - s_lo) - g_m(t - s_hi)) / (s_hi - s_lo)
+
+
+def pointer_fallback_share(cfg, headroom=None):
+    """Exact share (float 0-1) of images whose allowed pointer gray set is
+    empty, i.e. _pick_pointer_gray takes the endpoint fallback (gray_fallback).
+
+    Enumerated, not sampled: bg uniform over the ints of palette.bg_gray_range;
+    no shadow with probability 1 - shadows.prob (s_max = 0); with a shadow
+    s_max follows _max_strength_cdf.  I is built from `headroom` (float;
+    default pointer_headroom_bound, the worst case; an image with a smaller H
+    can have an I one level wider, see pointer_gray_warnings).  The upper part
+    [bg + c, I_hi] does not depend on s; the lower part [I_lo, floor(f_lo)] is
+    non-empty iff bg (1 - s_max) - c >= I_lo, i.e. s_max <= s* =
+    1 - (I_lo + c) / bg, so P(empty | bg, shadow) = 1 - P(s_max <= s*).
+    """
+    PT, S = cfg["pointer"], cfg["shadows"]  # dict sections
+    c = int(PT["min_bg_contrast"])  # int, contrast c
+    if c <= 0:
+        return 0.0
+    H = pointer_headroom_bound(cfg) if headroom is None else headroom  # float
+    lo, hi = PT["gray_range"]  # int, pointer.gray_range
+    i_lo = max(lo, int(math.ceil(H - 1e-9)))  # int, bottom of I (as _pick_pointer_gray)
+    i_hi = min(hi, int(math.floor(255 - H + 1e-9)))  # int, top of I
+    if i_lo > i_hi:
+        i_lo, i_hi = lo, hi
+    b_lo, b_hi = cfg["palette"]["bg_gray_range"]  # int, bg draw bounds
+    p = float(S["prob"])  # float, shadow probability
+    s_lo, s_hi = (float(v) for v in S["strength_range"])  # float, shared strength bounds
+    j = float(S["strength_jitter"])  # float, jitter amplitude
+    total = 0.0  # float, sum of P(empty | bg) over the bg ints
+    for bg in range(b_lo, b_hi + 1):  # int, every bg gray
+        if max(i_lo, bg + c) <= i_hi:  # upper part non-empty: never empty
+            continue
+        # without a shadow (s = 0): empty iff floor(bg - c + 1e-9) < I_lo (float 0 / 1)
+        e0 = 0.0 if math.floor(bg - c + 1e-9) >= i_lo else 1.0
+        if bg <= 0:
+            e1 = e0  # f_lo = -c whatever s
+        else:
+            s_star = 1.0 - (i_lo + c - 1e-9) / bg  # float, largest s with a lower part
+            e1 = 1.0 - _max_strength_cdf(s_star, s_lo, s_hi, j)  # float, P(empty | shadow)
+        total += (1.0 - p) * e0 + p * e1
+    return total / (b_hi - b_lo + 1)
+
+
+def pointer_gray_warnings(cfg):
+    """Config-level warnings (list[str], each "section.key: message") when the
+    pointer gray ranges are too tight; [] when fine.  Deterministic, no rendering.
+
+    Picture (gray axis, H = pointer_headroom_bound, the worst case over the
+    geometry ranges; F = forbidden interval of one image, c = min_bg_contrast):
+
+        0 ── H ──[════════ I = [lo, hi] ∩ [ceil H, floor(255 - H)] ════════]── H ── 255
+                        F = ( bg (1 - s_max) - c ,  bg + c )
+                 [ I_lo .. floor(F_lo) ] ░░░░░░ F ░░░░░░ [ bg + c .. I_hi ]
+                   allowed (lower)        forbidden        allowed (upper)
+
+      (a) I empty               -> grays from all of [lo, hi], texture scaled down
+      (b) 0 < |I| < 32 levels   -> narrow, few distinct pointer grays
+      (c) allowed set empty     -> endpoint fallback (point mass); share by
+          exact enumeration (pointer_fallback_share), warned above 0.5 %
+
+    (a) uses the worst-case H: all-or-nothing for the config.  An image with
+    a smaller H (larger dial / tip) may still have room, so near the edge
+    (a) can fire when only part of the images lose the headroom.
+    """
+    PT = cfg["pointer"]  # dict section
+    lo, hi = PT["gray_range"]  # int, pointer.gray_range
+    H = pointer_headroom_bound(cfg)  # float, worst-case headroom
+    h_lo = int(math.ceil(H - 1e-9))  # int, lowest gray with headroom
+    h_hi = int(math.floor(255 - H + 1e-9))  # int, highest gray with headroom
+    i_lo, i_hi = max(lo, h_lo), min(hi, h_hi)  # int, I bounds
+    warns = []  # list[str]
+    if i_lo > i_hi:
+        warns.append(
+            f"pointer.gray_range: [{lo}, {hi}] leaves no room for gradient+noise headroom "
+            f"H≈{H:.0f} (needs overlap with [{h_lo}, {h_hi}]); pointer grays are drawn from "
+            f"the full range and the texture is scaled down near 0/255 — lower "
+            f"pointer.gradient_range / noise_amplitude or widen gray_range")
+    elif i_hi - i_lo + 1 < GRAY_RANGE_MIN_LEVELS:
+        n = i_hi - i_lo + 1  # int, usable levels
+        warns.append(
+            f"pointer.gray_range: only {n} levels ([{i_lo}, {i_hi}]) remain after the "
+            f"gradient+noise headroom H≈{H:.0f} (band [{h_lo}, {h_hi}]); fewer than "
+            f"{GRAY_RANGE_MIN_LEVELS} distinct pointer grays — widen gray_range or lower "
+            f"pointer.gradient_range / noise_amplitude")
+    share = pointer_fallback_share(cfg, H)  # float 0-1
+    if share > FALLBACK_WARN_SHARE:
+        b_lo, b_hi = cfg["palette"]["bg_gray_range"]  # int, bg bounds
+        warns.append(
+            f"pointer.min_bg_contrast: {PT['min_bg_contrast']} leaves no allowed pointer "
+            f"gray for {share * 100:.1f}% of images (bg {b_lo}-{b_hi}, shadows.prob "
+            f"{cfg['shadows']['prob']}); those images get an endpoint gray of the range "
+            f"(a point mass) — lower min_bg_contrast or widen pointer.gray_range / "
+            f"palette.bg_gray_range")
+    return warns
+
+
 def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
                  chord_dist, ptr_gray, edge_gray, grad_strength, pcfg, nrng,
                  edge_thickness, cut_tip_radius, info=None):
@@ -2055,6 +2215,11 @@ def main():
         for err in e.errors:
             print(f"  {err}", file=sys.stderr)
         sys.exit(2)
+    # too-tight pointer gray ranges (list[str]); printed once, generation goes on
+    enc = getattr(sys.stderr, "encoding", None) or "utf-8"  # str, console codec
+    for w in pointer_gray_warnings(cfg):
+        line = f"[v7] warning: {w}"  # str, one stderr line
+        print(line.encode(enc, "replace").decode(enc), file=sys.stderr)
     try:
         res = generate_dataset(cfg, args.output_dir, args.num_images, seed=args.seed,
                                workers=args.workers, chunksize=args.chunksize,

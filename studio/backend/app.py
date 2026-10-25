@@ -141,12 +141,24 @@ def create_app(frontend_dist=None, allowed_hosts=None):
     @app.post("/api/config/parse")
     def config_parse(body: TextBody):
         """YAML text -> {"config": migrated, validated cfg, "warnings": list[str]
-        (adjustments made to an old YAML, [] when none)}; bad YAML syntax -> 422."""
+        (adjustments made to an old YAML, then the too-tight pointer gray range
+        warnings of gen.pointer_gray_warnings; [] when none)}; bad YAML syntax -> 422."""
         try:
             cfg, warns = v7_config.parse_config_text_with_warnings(body.text)
-            return {"config": cfg, "warnings": warns}
+            return {"config": cfg, "warnings": warns + gen.pointer_gray_warnings(cfg)}
         except v7_config.ConfigError as e:
             return _errors(e.errors)
+
+    @app.post("/api/config/check")
+    def config_check(body: ConfigBody):
+        """cfg -> {"warnings": list[str]} of gen.pointer_gray_warnings ("section.key:
+        message" when the pointer gray ranges are too tight, [] when fine); invalid
+        cfg -> 422."""
+        try:
+            v7_config.validate_config(body.config)
+        except v7_config.ConfigError as e:
+            return _errors(e.errors)
+        return {"warnings": gen.pointer_gray_warnings(body.config)}
 
     @app.post("/api/config/dump")
     def config_dump(body: ConfigBody):

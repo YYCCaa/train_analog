@@ -2067,3 +2067,78 @@ def test_pointer_width_never_shrinks_toward_base(cut, geom):
         geom, "cut" if cut else "no cut", lines, len(bad), bad[:2]))
     assert lines >= 100 * 5, lines
     assert not bad, bad[:5]
+
+
+# ── pointer gray range warnings (config-level, pointer_gray_warnings) ──
+
+def test_gray_warnings_default_config_is_clean():
+    assert g7.pointer_gray_warnings(v7_config.default_config()) == []
+
+
+def test_headroom_bound_is_worst_case_of_geometry():
+    cfg = v7_config.default_config()
+    # smallest dial R = int(85 * 0.9) = 76, tip = 74 * 0.98, hub = 76 * 0.45 < tip
+    tip = 74 * 0.98  # float px, shortest tip
+    want = 25.0 * (tip + 2) / tip + 25  # float, |gradient|max * along_max + noise
+    assert g7.pointer_headroom_bound(cfg) == pytest.approx(want)
+    assert 50 < want < 51  # H ≈ 51 -> I = [51, 204]
+
+
+def test_gray_warning_no_headroom():
+    w = g7.pointer_gray_warnings(_cfg(**{"pointer.gray_range": [230, 255]}))
+    assert len(w) == 1 and w[0].startswith("pointer.gray_range: [230, 255] leaves no room")
+    assert "[51, 204]" in w[0] and "H≈51" in w[0]
+
+
+def test_gray_warning_too_narrow_counts_levels():
+    w = g7.pointer_gray_warnings(_cfg(**{"pointer.gray_range": [100, 120]}))
+    assert len(w) == 1 and w[0].startswith("pointer.gray_range:")
+    assert "21 levels" in w[0]
+
+
+def test_gray_warning_contrast_fallback_share():
+    cfg = _cfg(**{"pointer.min_bg_contrast": 90, "palette.bg_gray_range": [100, 160],
+                  "shadows.prob": 0.5})
+    # hand enumeration, I = [51, 204], c = 90: the upper part bg + 90 <= 204 needs
+    # bg <= 114; the lower part needs bg (1 - s) - 90 >= 51.  No shadow: empty for
+    # bg 115..140 (26 of 61); shadow (s_max >= 0.45): empty for bg 115..160 (46)
+    want = 0.5 * 26 / 61 + 0.5 * 46 / 61  # float, 36 / 61
+    assert g7.pointer_fallback_share(cfg) == pytest.approx(want)
+    w = g7.pointer_gray_warnings(cfg)
+    assert len(w) == 1 and w[0].startswith("pointer.min_bg_contrast: 90")
+    assert f"{want * 100:.1f}%" in w[0] and "point mass" in w[0]
+
+
+def test_max_strength_cdf_matches_grid():
+    # P(clip(s + max(jp, jr)) <= t) by a fine midpoint grid over (s, jp, jr)
+    s_lo, s_hi, j = 0.5, 0.62, 0.05  # float, default shadow strengths
+    n = 120  # int, grid points per axis
+    s = s_lo + (np.arange(n) + 0.5) / n * (s_hi - s_lo)  # (n,) float64
+    jg = -j + (np.arange(n) + 0.5) / n * 2 * j  # (n,) float64
+    smax = np.clip(s[:, None, None] + np.maximum(jg[None, :, None], jg[None, None, :]), 0, 1)
+    for t in (0.47, 0.5, 0.55, 0.6, 0.66):
+        assert g7._max_strength_cdf(t, s_lo, s_hi, j) == pytest.approx(
+            float((smax <= t).mean()), abs=0.01)
+    assert g7._max_strength_cdf(0.4, s_lo, s_hi, j) == 0.0
+    assert g7._max_strength_cdf(0.7, s_lo, s_hi, j) == 1.0
+
+
+def test_gray_warnings_predict_render_rates():
+    """2000 seeds through render_image: the empirical headroom_ok == False and
+    gray_fallback rates agree with the predictions within sampling error.
+    (a) is all-or-nothing given the worst-case H (here every image's H rounds
+    to the same band, so 100 %); c = 40 puts s* inside the shadow strength
+    distribution, so the CDF part of the enumeration is exercised."""
+    n = 2000  # int, seeds per config
+    cfg_a = _cfg(**{"pointer.gray_range": [230, 255]})
+    no_room = sum(not g7.render_image(cfg_a, s).params["pointer"]["headroom_ok"]
+                  for s in range(n))  # int, images without headroom
+    print("no headroom: predicted 1.0, empirical %.4f" % (no_room / n))
+    assert no_room == n
+    cfg_c = _cfg(**{"pointer.min_bg_contrast": 40})
+    p = g7.pointer_fallback_share(cfg_c)  # float, predicted share
+    fb = sum(g7.render_image(cfg_c, s).params["pointer"]["gray_fallback"]
+             for s in range(n))  # int, fallback images
+    print("fallback: predicted %.4f, empirical %.4f" % (p, fb / n))
+    assert 0.1 < p < 0.9
+    assert abs(fb / n - p) < 4 * math.sqrt(p * (1 - p) / n)

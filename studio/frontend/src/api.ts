@@ -114,6 +114,13 @@ export const parseConfig = async (text: string): Promise<ParsedConfig> => {
   return { config: r.config, warnings: Array.isArray(r.warnings) ? r.warnings.map(String) : [] };
 };
 
+/** Config -> Promise<string[]>: one "section.key: message" per too-tight pointer gray
+ * range (no headroom, < 32 levels, contrast fallback share); [] when fine. */
+export const checkConfig = async (config: Config): Promise<string[]> => {
+  const r = await call<{ warnings?: string[] }>("POST", "/api/config/check", { config });
+  return Array.isArray(r.warnings) ? r.warnings.map(String) : [];
+};
+
 /** Config -> Promise<str> YAML text; invalid config -> ApiError. */
 export const dumpConfig = async (config: Config) =>
   (await call<{ text: string }>("POST", "/api/config/dump", { config })).text;

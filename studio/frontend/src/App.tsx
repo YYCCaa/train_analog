@@ -58,6 +58,10 @@ export default function App() {
   // adjustments the last YAML load made to an old file (list[str], "section.key: message");
   // non-blocking, shown until dismissed or the next load
   const [loadWarnings, setLoadWarnings] = useState<string[]>([]);
+  // live too-tight pointer gray range warnings of the current config (list[str],
+  // "section.key: message"); recomputed on every config change, [] when fine
+  const [rangeWarnings, setRangeWarnings] = useState<string[]>([]);
+  const checkSeqRef = useRef(0); // newest sent config-check request number (int)
   const [sentSeq, setSentSeq] = useState(0); // newest preview request number (int)
   const [appliedSeq, setAppliedSeq] = useState(0); // number of the response shown (int)
   const [busy, setBusy] = useState(true); // debounce pending or latest request in flight
@@ -107,6 +111,24 @@ export default function App() {
     }, DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [config, seeds]);
+
+  // debounced range check on every config change; only the newest response is applied
+  useEffect(() => {
+    if (!config) return;
+    const timer = setTimeout(() => { // debounce timer handle (number)
+      const seq = ++checkSeqRef.current; // this request's number (int)
+      api
+        .checkConfig(config)
+        .then((w) => {
+          if (seq === checkSeqRef.current) setRangeWarnings(w);
+        })
+        .catch(() => {
+          // an invalid config is reported by the preview; show no stale warnings
+          if (seq === checkSeqRef.current) setRangeWarnings([]);
+        });
+    }, DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [config]);
 
   // set one leaf: (section str, key str, v Value) => void; also drops stale file errors
   const setParam = useCallback((section: string, key: string, v: Value) => {
@@ -248,6 +270,18 @@ export default function App() {
             </div>
             <ul>
               {loadWarnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {rangeWarnings.length > 0 && (
+          <div data-testid="range-warnings" className="notice">
+            <div>
+              Pointer gray range{rangeWarnings.length === 1 ? " is" : "s are"} too tight:
+            </div>
+            <ul>
+              {rangeWarnings.map((w, i) => (
                 <li key={i}>{w}</li>
               ))}
             </ul>
