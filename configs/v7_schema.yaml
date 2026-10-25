@@ -61,7 +61,7 @@ palette:
   rim_gray_range: {type: int_range, min: 0, max: 255, step: 1, help: "Rim band gray level."}
 
 pointer:
-  gray_range: {type: int_range, min: 0, max: 255, step: 1, help: "Pointer body gray level (uniform draw)."}
+  gray_range: {type: int_range, min: 0, max: 255, step: 1, help: "Pointer body gray level (uniform draw). The draw keeps gradient + noise headroom from 0/255 (max|gradient| + noise levels); if the range has no room, the gradient + noise are scaled down instead."}
   darker_frac_range: {type: float_range, min: 0.0, max: 1.0, step: 0.01, help: "Hole/edge gray as a fraction of the pointer gray."}
   gradient_range: {type: float_range, min: -100.0, max: 100.0, step: 1, help: "Lengthwise brightness shift from hub to tip."}
   noise_amplitude: {type: int, min: 0, max: 64, step: 1, help: "Per-pixel noise amplitude on the pointer body (+/-)."}
@@ -122,9 +122,9 @@ glares:
   clear_distance: {type: float, min: 0, max: 80, step: 0.5, help: "No glare within this distance of the visible pointer tip (px)."}
 
 jitter:
-  brightness_range: {type: float_range, min: 0.5, max: 2.0, step: 0.01, help: "ImageEnhance.Brightness factor (1 = unchanged)."}
-  contrast_range: {type: float_range, min: 0.5, max: 1.5, step: 0.01, help: "ImageEnhance.Contrast factor (1 = unchanged)."}
-  sharpness_range: {type: float_range, min: 0.0, max: 3.0, step: 0.01, help: "ImageEnhance.Sharpness factor (1 = unchanged)."}
+  brightness_range: {type: float_range, min: 0.5, max: 2.0, step: 0.01, help: "ImageEnhance.Brightness factor (1 = unchanged). Capped per image so no dial-face pixel saturates (the range is shortened when needed)."}
+  contrast_range: {type: float_range, min: 0.5, max: 1.5, step: 0.01, help: "ImageEnhance.Contrast factor (1 = unchanged). Capped per image so no dial-face pixel saturates (the range is shortened when needed)."}
+  sharpness_range: {type: float_range, min: 0.0, max: 3.0, step: 0.01, help: "ImageEnhance.Sharpness factor (1 = unchanged). Capped per image so no dial-face pixel saturates (the range is shortened when needed)."}
 
 hier_noise:
   blocks: {type: int, min: 1, max: 16, step: 1, help: "Coarse noise grid size (NxN blocks)."}
@@ -133,7 +133,7 @@ hier_noise:
 
 tri_artifacts:
   enabled: {type: bool, min: 0, max: 1, step: 1, help: "Draw adversarial triangle artifacts."}
-  count_range: {type: int_range, min: 0, max: 20, step: 1, help: "Triangles per image."}
+  count_range: {type: int_range, min: 0, max: 20, step: 1, help: "Triangles per image. Every triangle is placed: its centre is drawn inside the boundary, off the pointer and hole."}
   size_range: {type: int_range, min: 3, max: 80, step: 1, help: "Triangle base length (px)."}
   gray_range: {type: int_range, min: 0, max: 255, step: 1, help: "Triangle mean gray level."}
   pixel_var: {type: int, min: 0, max: 32, step: 1, help: "Per-pixel noise around the triangle mean (+/-)."}

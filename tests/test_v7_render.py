@@ -162,8 +162,13 @@ def test_tri_change_isolated():
     off = _cfg(**flat, **{"tri_artifacts.enabled": False})
     # triangle footprint probes: same draws, extreme fills -> every pixel a
     # triangle touches (incl. blur spread) differs between the two
-    probe_lo = _cfg(**flat, **{"tri_artifacts.gray_range": [0, 0]})
-    probe_hi = _cfg(**flat, **{"tri_artifacts.gray_range": [255, 255]})
+    # same range width as the default [65, 184] (120 levels), shifted to the
+    # extremes: the tri stream makes the same draws (randint consumes a
+    # width-dependent number of random bits), so the probes and `base` place
+    # the same triangles
+    w = base["tri_artifacts"]["gray_range"][1] - base["tri_artifacts"]["gray_range"][0]  # int
+    probe_lo = _cfg(**flat, **{"tri_artifacts.gray_range": [0, w]})
+    probe_hi = _cfg(**flat, **{"tri_artifacts.gray_range": [255 - w, 255]})
     centre = _radius_grid() < 0.3 * DIAL  # (256, 256) bool, ~pointer hub region
     lo, hi = base["tri_artifacts"]["count_range"]
     # seeds whose tri_artifacts stream draws >= 1 triangle (count is its first draw)
@@ -183,8 +188,16 @@ def test_tri_change_isolated():
     assert any_diff, "disabling triangles had no visible effect"
 
 
+# "section.key" -> value pins (dict): exposure jitter off.  The jitter factors
+# are capped per image from the canvas the pointer is on (no saturation), so a
+# brighter / darker pointer can lower a cap and change the whole face; with
+# every range [1, 1] the factor is 1 whatever the cap (the cap is always > 1)
+_NO_JITTER = {"jitter.brightness_range": [1.0, 1.0], "jitter.contrast_range": [1.0, 1.0],
+              "jitter.sharpness_range": [1.0, 1.0]}
+
+
 def test_pointer_gray_change_moves_only_pointer():
-    flat = {"jitter.contrast_range": [1.0, 1.0]}
+    flat = _NO_JITTER
     white = _cfg(**flat, **{"pointer.gray_range": [255, 255]})
     black = _cfg(**flat, **{"pointer.gray_range": [0, 0]})
     r = _radius_grid()
@@ -277,6 +290,250 @@ def test_pick_pointer_gray():
     g7._pick_pointer_gray(c1, 100, 200, 150, 200)
     c2.randint(100, 200)
     assert c1.random() == c2.random(), "infeasible case must consume one draw"
+    # headroom H: c = 0 is randint(I_lo, I_hi) bit for bit, I = [lo, hi] ∩ [ceil H, floor(255 - H)]
+    # (lo, hi, H) -> (I_lo, I_hi, headroom_ok): I empty falls back to [lo, hi]
+    cases = {(0, 255, 50.56): (51, 204, True), (100, 230, 50.56): (100, 204, True),
+             (0, 255, 0.0): (0, 255, True), (40, 41, 60.0): (40, 41, False),
+             (250, 255, 50.0): (250, 255, False)}  # dict[tuple, tuple]
+    for (lo, hi, h), (i_lo, i_hi, ok) in cases.items():
+        for s in range(300):
+            info = {}  # dict, fallback / headroom_ok flags out
+            want = random.Random(s).randint(i_lo, i_hi)  # int, randint over I
+            got = g7._pick_pointer_gray(random.Random(s), lo, hi, 160, 0, 0.0, info, h)
+            assert got == want, (lo, hi, h, s)
+            assert info == {"fallback": False, "headroom_ok": ok}, (lo, hi, h)
+    # c > 0 on I: the forbidden interval is removed from I, the fallback endpoint is I's
+    vals = {g7._pick_pointer_gray(rng, 0, 255, 160, 60, 0.0, None, 50.56) for _ in range(3000)}
+    assert vals == set(range(51, 101))  # [51, 100]; the upper part [220, 204] is empty
+    assert g7._pick_pointer_gray(random.Random(0), 0, 255, 150, 120, 0.0, None, 50.56) == 51
+
+
+# ── C: triangle artifacts are always placed ─────────────────────────────────
+
+def test_triangles_always_placed():
+    cfg = _cfg(**{"tri_artifacts.count_range": [6, 6]})
+    cxs, cys, rs = [], [], []  # list[float]: centre offsets from the B centre, / B radius
+    for seed in range(500):
+        p = g7.render_image(cfg, seed).params
+        t = p["tri_artifacts"]
+        assert t["n"] == 6 and len(t["items"]) == 6
+        bx = p["derived"]["canvas_offset_x"] + p["geometry"]["canvas_size"] // 2 \
+            - p["geometry"]["displacement_x"]  # int px, B centre x (image)
+        by = p["derived"]["canvas_offset_y"] + p["geometry"]["canvas_size"] // 2 \
+            - p["geometry"]["displacement_y"]  # int px, B centre y (image)
+        orx, ory = p["derived"]["outer_rx"], p["derived"]["outer_ry"]  # float px, B radii
+        for it in t["items"]:
+            assert it["placed"] is True and it["pixels"] >= 1, (seed, it)
+            dx, dy = (it["center_x"] - bx) / orx, (it["center_y"] - by) / ory
+            assert dx * dx + dy * dy <= 1.0 + 1e-9, (seed, it)  # centre inside B
+            cxs.append(dx)
+            cys.append(dy)
+            rs.append(math.hypot(dx, dy))
+    cxs, cys, rs = np.array(cxs), np.array(cys), np.array(rs)  # (3000,) float64 each
+    # quadrant balance (loose): each quadrant of B gets 15-35% of the centres
+    quads = [((cxs >= 0) & (cys >= 0)).mean(), ((cxs < 0) & (cys >= 0)).mean(),
+             ((cxs >= 0) & (cys < 0)).mean(), ((cxs < 0) & (cys < 0)).mean()]
+    assert all(0.15 <= q <= 0.35 for q in quads), quads
+    # radial coverage: the outer annulus r > 0.7 holds 51% of B's area, the
+    # pointer only blocks part of the inner disc -> clearly more than a third
+    assert (rs > 0.7).mean() > 0.4, float((rs > 0.7).mean())
+
+
+def test_triangles_paint_off_pointer_inside_boundary():
+    # footprint = pixels that differ between tri gray 0 and 255.  Both ranges
+    # have width 1, so the tri stream makes the same draws in both (a range of
+    # another width consumes a different number of random bits per randint)
+    base = {"tri_artifacts.count_range": [6, 6], **_NO_JITTER,
+            "background.dial_circle_blur": False}
+    r = _radius_grid()
+    for seed in range(10):
+        lo_cfg = _cfg(**base, **{"tri_artifacts.gray_range": [0, 0]})  # dict
+        lo = g7.render_image(lo_cfg, seed)
+        hi = g7.render_image(_cfg(**base, **{"tri_artifacts.gray_range": [255, 255]}), seed)
+        foot = lo.image != hi.image  # (256, 256) bool, triangle pixels
+        assert foot.sum() >= 6, seed
+        assert not (foot & (r > IMG / 2)).any()  # inside B (well inside the image)
+        ptr = _pointer_footprint(lo_cfg, seed)  # (256, 256) bool, same triangles
+        assert not (foot & _erode(ptr, 2)).any(), seed  # never on the pointer body (2 px: bicubic stretch spread)
+
+
+# ── B: exposure jitter never saturates (capped factors) ────────────────────
+
+# "section.key" -> value pins (dict): the brief's stressed jitter config
+_JIT_STRESS = {"jitter.brightness_range": [1.5, 2.0], "jitter.contrast_range": [1.3, 1.5],
+               "jitter.sharpness_range": [0.0, 3.0]}
+
+
+@pytest.mark.parametrize("pins", [{}, _JIT_STRESS], ids=["default", "stressed"])
+def test_jitter_never_saturates(monkeypatch, pins):
+    from PIL import ImageFilter, ImageStat
+    orig = g7._jitter_enhance
+    # one record per enhance: (kind str, input float64 (C, C), region (C, C) bool,
+    # factor float, output uint8 (C, C)); reset per render
+    calls = []
+
+    def wrapped(img, kind, rng, lo, hi, region):
+        out, f, f_max, capped = orig(img, kind, rng, lo, hi, region)
+        calls.append((kind, img, region, f, np.asarray(out)))
+        assert f <= f_max + 1e-12 and (capped or lo <= f <= hi)
+        return out, f, f_max, capped
+    monkeypatch.setattr(g7, "_jitter_enhance", wrapped)
+    cfg = _cfg(**pins)
+    n_capped = 0  # int, renders with at least one capped factor
+    for seed in range(300):
+        calls.clear()
+        p = g7.render_image(cfg, seed).params["jitter"]
+        assert [c[0] for c in calls] == list(g7.JITTER_KINDS)
+        n_capped += any(p["capped"].values())
+        for kind, img, region, f, out in calls:
+            # PIL's exact degenerate, recomputed independently of the module
+            if kind == "brightness":
+                d = np.zeros(img.size[::-1])
+            elif kind == "contrast":
+                d = np.full(img.size[::-1], int(ImageStat.Stat(img).mean[0] + 0.5), float)
+            else:
+                d = np.asarray(img.filter(ImageFilter.SMOOTH), dtype=np.float64)
+            a = np.asarray(img, dtype=np.float64)  # (C, C) float64 input
+            v = (d + f * (a - d))[region]  # (N,) float64, unclipped enhance
+            assert v.max() <= 255 + 1 and v.min() >= 0 - 1, (seed, kind, f, v.min(), v.max())
+            # the real PIL output equals the unclipped value truncated: no saturation
+            assert np.array_equal(out[region].astype(np.int64),
+                                  np.clip(np.trunc(v), 0, 255).astype(np.int64)) or                 np.abs(out[region] - np.clip(np.trunc(v), 0, 255)).max() <= 1, (seed, kind)
+    if pins:
+        assert n_capped == 300, "the stressed config must cap every image"
+
+
+def test_jitter_stream_draw_count_unchanged(monkeypatch):
+    # the jitter stream state after step 9 equals 3 plain uniform draws (old code)
+    got = {}  # dict, the jitter random.Random of the last render
+    orig = g7.section_rngs
+
+    def capture(seed):
+        r = orig(seed)
+        got["jitter"] = r["jitter"][0]
+        return r
+    monkeypatch.setattr(g7, "section_rngs", capture)
+    for pins in ({}, _JIT_STRESS):
+        cfg = _cfg(**pins)
+        for seed in range(20):
+            p = g7.render_image(cfg, seed).params["jitter"]
+            old = orig(seed)["jitter"][0]  # random.Random, a fresh jitter stream
+            for kind in g7.JITTER_KINDS:
+                f_old = old.uniform(*cfg["jitter"][kind + "_range"])  # float, the old draw
+                if not p["capped"][kind]:
+                    assert p[kind] == pytest.approx(f_old, abs=1e-4)
+            assert got["jitter"].getstate() == old.getstate()
+
+
+def test_capped_uniform_unit():
+    import random
+    for lo, hi, f_max, want_lo, want_hi, capped in (
+            (0.95, 1.35, 9.0, 0.95, 1.35, False), (0.95, 1.35, 1.1, 0.95, 1.1, True),
+            (1.5, 2.0, 1.2, 1.2 * 1.5 / 2.0, 1.2, True), (0.0, 3.0, math.inf, 0.0, 3.0, False)):
+        for s in range(200):
+            r1, r2 = random.Random(s), random.Random(s)
+            f, c = g7.capped_uniform(r1, lo, hi, f_max)
+            assert c is capped and want_lo <= f <= want_hi
+            u = r2.random()  # float, the single draw it consumed
+            assert f == pytest.approx(want_lo + (want_hi - want_lo) * u)
+            assert r1.random() == r2.random()
+
+
+# ── A: pointer body / edge never clip (headroom gray + amplitude scale) ────
+
+# "section.key" -> value pins (dict): the brief's stressed pointer config
+_PTR_STRESS = {"pointer.gray_range": [0, 255], "pointer.gradient_range": [-100.0, 100.0],
+               "pointer.noise_amplitude": 64, "pointer.edge_noise_amplitude": 32}
+
+
+def _clip_counter(monkeypatch):
+    """Wrap np.clip so calls from the two pointer functions count changed values.
+
+    Returns a dict[str, int] {"_pointer_variation": n, "_draw_pointer_edge": n}
+    of elements the clip changed, updated live while renders run.
+    """
+    import sys
+    counts = {"_pointer_variation": 0, "_draw_pointer_edge": 0}  # dict[str, int]
+    orig = np.clip  # the real numpy clip
+
+    def clip(a, lo, hi, *args, **kw):
+        out = orig(a, lo, hi, *args, **kw)
+        name = sys._getframe(1).f_code.co_name  # str, the calling function
+        if name in counts:
+            counts[name] += int(np.count_nonzero(np.asarray(out) != np.asarray(a)))
+        return out
+    monkeypatch.setattr(np, "clip", clip)
+    return counts
+
+
+@pytest.mark.parametrize("pins", [{}, _PTR_STRESS], ids=["default", "stressed"])
+def test_pointer_clip_never_changes_a_value(monkeypatch, pins):
+    counts = _clip_counter(monkeypatch)  # dict[str, int], live
+    cfg = _cfg(**pins)
+    scaled = 0  # int, renders whose amplitude scale k < 1
+    for seed in range(300):
+        p = g7.render_image(cfg, seed).params["pointer"]
+        assert 0.0 <= p["amp_scale"] <= 1.0
+        scaled += p["amp_scale"] < 1.0
+    assert counts == {"_pointer_variation": 0, "_draw_pointer_edge": 0}, counts
+    if pins:
+        assert scaled > 0, "the stressed config never exercised the amplitude scale"
+
+
+def test_pointer_gray_and_body_have_no_point_mass(monkeypatch):
+    # body pixel values after gradient + noise, pooled over renders (list of (N,) uint8)
+    body = []
+    orig = g7._pointer_variation
+
+    def wrapped(img, mask, *args, **kw):
+        out = orig(img, mask, *args, **kw)
+        body.append(np.asarray(out)[np.asarray(mask) > 0])
+        return out
+    monkeypatch.setattr(g7, "_pointer_variation", wrapped)
+    cfg = v7_config.default_config()
+    grays = []  # list[int], drawn body grays
+    for seed in range(300):
+        p = g7.render_image(cfg, seed).params["pointer"]
+        grays.append(p["gray"])
+        assert p["headroom_ok"] is True and p["headroom"] == pytest.approx(51.0, abs=1.0)
+    lo_g, hi_g = min(grays), max(grays)  # int, the gray draw stays inside I
+    assert lo_g >= 50 and hi_g <= 205, (lo_g, hi_g)
+    px = np.concatenate(body)  # (M,) uint8, every body pixel
+    freq = np.bincount(px, minlength=256) / px.size  # (256,) float64, value frequencies
+    assert freq.max() <= 3.0 / 256, (int(freq.argmax()), float(freq.max()) * 256)
+    # the gray draw itself: one randint over I (c = 0), so uniform; check on many draws
+    import random
+    rng = random.Random(5)  # random.Random, a stand-in pointer stream
+    vals = np.array([g7._pick_pointer_gray(rng, 0, 255, 160, 0, 0.0, None, 50.56)
+                     for _ in range(20000)])  # (20000,) int
+    counts = np.bincount(vals, minlength=256)  # (256,) int
+    n_support = 204 - 51 + 1  # int, |I|
+    assert counts[:51].sum() == 0 and counts[205:].sum() == 0
+    assert counts.max() <= 3 * 20000 / n_support
+
+
+def test_edge_noise_scaled_near_extremes():
+    # unit: band pixels whose noiseless value sits at 0 / 255 get no noise
+    import random
+    m = np.zeros((32, 32), np.uint8)  # (32, 32) uint8 mask
+    m[8:24, 8:24] = 255
+    from PIL import Image
+    for edge_gray, bgv in ((0, 0), (255, 255), (3, 250)):
+        img = Image.fromarray(np.full((32, 32), 128, np.uint8))  # "L" canvas
+        bg = np.full((32, 32), bgv, np.uint8)  # (32, 32) uint8 pre-pointer canvas
+        out, _ = g7._draw_pointer_edge(img, Image.fromarray(m), edge_gray, bg, 3, 32,
+                                       np.random.default_rng(0))
+        a = np.asarray(out)
+        band = (m > 0) & (a != 128)  # (32, 32) bool, painted band pixels
+        assert band.any()
+        if edge_gray == bgv:
+            assert (a[band] == bgv).all(), np.unique(a[band])  # k_e = 0: exact value
+    # draw count unchanged: same stream state after, with and without noise scaling
+    r1, r2 = np.random.default_rng(1), np.random.default_rng(1)
+    img = Image.fromarray(np.full((32, 32), 128, np.uint8))
+    g7._draw_pointer_edge(img, Image.fromarray(m), 0, np.zeros((32, 32), np.uint8), 3, 32, r1)
+    g7._draw_pointer_edge(img, Image.fromarray(m), 128, np.full((32, 32), 128, np.uint8), 3, 32, r2)
+    assert r1.integers(0, 1 << 30) == r2.integers(0, 1 << 30)
 
 
 # sha256 hex (str) of default-config renders with digits hidden (so the
@@ -289,20 +546,24 @@ def test_pick_pointer_gray():
 # 0 and 2 are unchanged, so no other stream moved). Only the image is hashed,
 # so moving the tip label to the visible (cut) tip left these unchanged.
 # Since the edge clamp they are the pointer.edge_max_frac = 1 renders.
+# Re-pinned for the no-clamping change (headroom pointer gray, amplitude
+# scale, capped exposure jitter, triangle centres drawn from the valid region:
+# the gray draw, the jitter factors and the tri stream all moved; expected).
 _PRE_CONTRAST_HASHES = {
-    0: "e0c38ede1599cf8d16dcaef4347406454bd2163df2c4866ffa86c1d96a1f6ad6",
-    1: "e3545616c3cfe7f4dc5305faabbef780e3ea52d2cdd9cb068c6e684ae080b3a8",
-    2: "6da293f03654acd47597967cfd86bd8683143d6add586da6678e09cf2e401717",
+    0: "31d6262873cae415e544e020d8e614afc82d53e186c59ddc5a3989b8af4ed950",
+    1: "e8ea76755d57519b442b3f3c0dca65f00fa81f253d2a619bc0e6ca1854fb76b5",
+    2: "4ecdc0d11b5f86556bf38cc843fb6929593a43b552d44a6d21bb294132f82823",
 }
 
 
 # sha256 hex (str) of the same renders with the DEFAULT pointer.edge_max_frac
 # 0.25 (re-pinned when the edge clamp arrived: seeds 0 and 2 change near the
-# apex; seed 1's apex sits under the rim band, so it is unchanged)
+# apex; seed 1's apex sits under the rim band, so it is unchanged); re-pinned
+# for the no-clamping change, like _PRE_CONTRAST_HASHES
 _DEFAULT_HASHES = {
-    0: "5b6bc1295ee5619d6112e05c9ddb2a313eca17dd1d64db6a0a6ae495fe29ffce",
-    1: "e3545616c3cfe7f4dc5305faabbef780e3ea52d2cdd9cb068c6e684ae080b3a8",
-    2: "076ab6daadff4c318017f9e6987b3042f9ed6cdba77196fae151f25653394cb9",
+    0: "64d4f5a3a472aa1eca2c37a9bb1ae7006373e2a6cf37a3780774e18b14c880d5",
+    1: "e8ea76755d57519b442b3f3c0dca65f00fa81f253d2a619bc0e6ca1854fb76b5",
+    2: "ab3497599601abd7237d3091d1bcea96dd2e3a5f983708989f80e9be23d82065",
 }
 
 
@@ -335,7 +596,8 @@ def _pointer_footprint(cfg, seed):
 
 def test_min_bg_contrast_isolated():
     # shadows off: with a shadow the forbidden interval also covers the shadowed face
-    flat = {"jitter.contrast_range": [1.0, 1.0], "shadows.prob": 0.0}
+    # (jitter off: its per-image caps see the pointer gray, see _NO_JITTER)
+    flat = {**_NO_JITTER, "shadows.prob": 0.0}
     base = _cfg(**flat)
     strong = _cfg(**flat, **{"pointer.min_bg_contrast": 90})
     any_diff = False
@@ -399,10 +661,12 @@ def test_digit_jitter_direction():
 # "section.key" -> value pins (dict): fixed dial size (radius 85, outer
 # boundary radius 85 * 1.2 = 102), no stretch, shadows always on (they must
 # translate too).  outer 1.2 keeps ceil(102) + 1 = 103 below radius + margin,
-# so the canvas half is radius + margin + max|displacement|.
+# so the canvas half is radius + margin + max|displacement|.  Triangles off:
+# their centres are drawn from the part of the content inside B (every
+# triangle is placed), so they follow where B sits, not the content.
 _DISP_PINS = {"geometry.scale_range": [1.0, 1.0], "outer.scale_range": [1.2, 1.2],
               "geometry.stretch_h_range": [1.0, 1.0], "geometry.stretch_v_range": [1.0, 1.0],
-              "shadows.prob": 1.0}
+              "shadows.prob": 1.0, "tri_artifacts.enabled": False}
 _DISP_RB = 85 * 1.2  # float px, outer boundary radius under _DISP_PINS
 _DISP_M = 20  # int px, canvas_margin of the displaced config
 
@@ -1462,17 +1726,21 @@ def test_pointer_forbidden_interval_unit():
     assert c1.random() == c2.random(), "infeasible case must consume one draw"
     info = {}  # dict, fallback flag out
     g7._pick_pointer_gray(random.Random(1), 0, 200, 150, 80, 0.6, info)
-    assert info == {"fallback": True}
+    assert info == {"fallback": True, "headroom_ok": True}  # headroom 0: I = [lo, hi]
     g7._pick_pointer_gray(random.Random(1), 0, 255, 150, 0, 0.6, info)  # c = 0: never
-    assert info == {"fallback": False}
+    assert info == {"fallback": False, "headroom_ok": True}
     # bg 100, s 0.1 -> faces [90, 100], c 200: hi is 140 above, lo 90 below -> hi
     assert g7._pick_pointer_gray(random.Random(0), 0, 240, 100, 200, 0.1) == 240
 
 
 def test_render_records_forbidden_interval():
+    # no gradient / noise: headroom H = 0, so the base interval I is the whole
+    # gray range and the contrast rule alone decides (H > 0 would leave
+    # I = [51, 204] inside the forbidden (14, 210): the endpoint fallback)
     pins = {"shadows.prob": 1.0, "shadows.strength_range": [0.6, 0.6],
             "shadows.strength_jitter": 0.0, "palette.bg_gray_range": [160, 160],
-            "pointer.min_bg_contrast": 50}
+            "pointer.min_bg_contrast": 50, "pointer.gradient_range": [0.0, 0.0],
+            "pointer.noise_amplitude": 0}
     for seed in range(6):
         p = g7.render_image(_cfg(**pins), seed).params  # dict, sampled values
         pt = p["pointer"]  # dict
