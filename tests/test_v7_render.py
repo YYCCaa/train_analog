@@ -183,8 +183,16 @@ def test_tri_change_isolated():
     assert any_diff, "disabling triangles had no visible effect"
 
 
+# "section.key" -> value pins (dict): exposure jitter off.  The jitter factors
+# are capped per image from the canvas the pointer is on (no saturation), so a
+# brighter / darker pointer can lower a cap and change the whole face; with
+# every range [1, 1] the factor is 1 whatever the cap (the cap is always > 1)
+_NO_JITTER = {"jitter.brightness_range": [1.0, 1.0], "jitter.contrast_range": [1.0, 1.0],
+              "jitter.sharpness_range": [1.0, 1.0]}
+
+
 def test_pointer_gray_change_moves_only_pointer():
-    flat = {"jitter.contrast_range": [1.0, 1.0]}
+    flat = _NO_JITTER
     white = _cfg(**flat, **{"pointer.gray_range": [255, 255]})
     black = _cfg(**flat, **{"pointer.gray_range": [0, 0]})
     r = _radius_grid()
@@ -293,6 +301,88 @@ def test_pick_pointer_gray():
     vals = {g7._pick_pointer_gray(rng, 0, 255, 160, 60, 0.0, None, 50.56) for _ in range(3000)}
     assert vals == set(range(51, 101))  # [51, 100]; the upper part [220, 204] is empty
     assert g7._pick_pointer_gray(random.Random(0), 0, 255, 150, 120, 0.0, None, 50.56) == 51
+
+
+# ── B: exposure jitter never saturates (capped factors) ────────────────────
+
+# "section.key" -> value pins (dict): the brief's stressed jitter config
+_JIT_STRESS = {"jitter.brightness_range": [1.5, 2.0], "jitter.contrast_range": [1.3, 1.5],
+               "jitter.sharpness_range": [0.0, 3.0]}
+
+
+@pytest.mark.parametrize("pins", [{}, _JIT_STRESS], ids=["default", "stressed"])
+def test_jitter_never_saturates(monkeypatch, pins):
+    from PIL import ImageFilter, ImageStat
+    orig = g7._jitter_enhance
+    # one record per enhance: (kind str, input float64 (C, C), region (C, C) bool,
+    # factor float, output uint8 (C, C)); reset per render
+    calls = []
+
+    def wrapped(img, kind, rng, lo, hi, region):
+        out, f, f_max, capped = orig(img, kind, rng, lo, hi, region)
+        calls.append((kind, img, region, f, np.asarray(out)))
+        assert f <= f_max + 1e-12 and (capped or lo <= f <= hi)
+        return out, f, f_max, capped
+    monkeypatch.setattr(g7, "_jitter_enhance", wrapped)
+    cfg = _cfg(**pins)
+    n_capped = 0  # int, renders with at least one capped factor
+    for seed in range(300):
+        calls.clear()
+        p = g7.render_image(cfg, seed).params["jitter"]
+        assert [c[0] for c in calls] == list(g7.JITTER_KINDS)
+        n_capped += any(p["capped"].values())
+        for kind, img, region, f, out in calls:
+            # PIL's exact degenerate, recomputed independently of the module
+            if kind == "brightness":
+                d = np.zeros(img.size[::-1])
+            elif kind == "contrast":
+                d = np.full(img.size[::-1], int(ImageStat.Stat(img).mean[0] + 0.5), float)
+            else:
+                d = np.asarray(img.filter(ImageFilter.SMOOTH), dtype=np.float64)
+            a = np.asarray(img, dtype=np.float64)  # (C, C) float64 input
+            v = (d + f * (a - d))[region]  # (N,) float64, unclipped enhance
+            assert v.max() <= 255 + 1 and v.min() >= 0 - 1, (seed, kind, f, v.min(), v.max())
+            # the real PIL output equals the unclipped value truncated: no saturation
+            assert np.array_equal(out[region].astype(np.int64),
+                                  np.clip(np.trunc(v), 0, 255).astype(np.int64)) or                 np.abs(out[region] - np.clip(np.trunc(v), 0, 255)).max() <= 1, (seed, kind)
+    if pins:
+        assert n_capped == 300, "the stressed config must cap every image"
+
+
+def test_jitter_stream_draw_count_unchanged(monkeypatch):
+    # the jitter stream state after step 9 equals 3 plain uniform draws (old code)
+    got = {}  # dict, the jitter random.Random of the last render
+    orig = g7.section_rngs
+
+    def capture(seed):
+        r = orig(seed)
+        got["jitter"] = r["jitter"][0]
+        return r
+    monkeypatch.setattr(g7, "section_rngs", capture)
+    for pins in ({}, _JIT_STRESS):
+        cfg = _cfg(**pins)
+        for seed in range(20):
+            p = g7.render_image(cfg, seed).params["jitter"]
+            old = orig(seed)["jitter"][0]  # random.Random, a fresh jitter stream
+            for kind in g7.JITTER_KINDS:
+                f_old = old.uniform(*cfg["jitter"][kind + "_range"])  # float, the old draw
+                if not p["capped"][kind]:
+                    assert p[kind] == pytest.approx(f_old, abs=1e-4)
+            assert got["jitter"].getstate() == old.getstate()
+
+
+def test_capped_uniform_unit():
+    import random
+    for lo, hi, f_max, want_lo, want_hi, capped in (
+            (0.95, 1.35, 9.0, 0.95, 1.35, False), (0.95, 1.35, 1.1, 0.95, 1.1, True),
+            (1.5, 2.0, 1.2, 1.2 * 1.5 / 2.0, 1.2, True), (0.0, 3.0, math.inf, 0.0, 3.0, False)):
+        for s in range(200):
+            r1, r2 = random.Random(s), random.Random(s)
+            f, c = g7.capped_uniform(r1, lo, hi, f_max)
+            assert c is capped and want_lo <= f <= want_hi
+            u = r2.random()  # float, the single draw it consumed
+            assert f == pytest.approx(want_lo + (want_hi - want_lo) * u)
+            assert r1.random() == r2.random()
 
 
 # ── A: pointer body / edge never clip (headroom gray + amplitude scale) ────
@@ -448,7 +538,8 @@ def _pointer_footprint(cfg, seed):
 
 def test_min_bg_contrast_isolated():
     # shadows off: with a shadow the forbidden interval also covers the shadowed face
-    flat = {"jitter.contrast_range": [1.0, 1.0], "shadows.prob": 0.0}
+    # (jitter off: its per-image caps see the pointer gray, see _NO_JITTER)
+    flat = {**_NO_JITTER, "shadows.prob": 0.0}
     base = _cfg(**flat)
     strong = _cfg(**flat, **{"pointer.min_bg_contrast": 90})
     any_diff = False

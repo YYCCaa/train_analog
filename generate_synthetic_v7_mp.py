@@ -825,6 +825,94 @@ def draw_pointer(img, cx, cy, angle_deg, hub_radius, tip_dist, chord_half,
     return img, apex, base_left, base_right, mask, ptr_pix
 
 
+# ── exposure jitter: per-image capped factors (no saturation) ─────────────
+# float levels: PIL's Image.blend computes deg + f (img - deg) as a float and
+# truncates it to uint8, saturating only at >= 256 (-> 255) or <= 0 (-> 0); a
+# value in [-0.5, 255.5] truncates to what the unclipped value reads (1-level
+# rounding tolerance), so the factor caps keep every surviving pixel inside it
+JITTER_TOP = 255.5  # float, highest unclipped blend value allowed
+JITTER_BOTTOM = -0.5  # float, lowest unclipped blend value allowed
+JITTER_KINDS = ("brightness", "contrast", "sharpness")  # str names, the draw order
+
+
+def enhance_degenerate(img, kind):
+    """PIL ImageEnhance's degenerate image for `kind`, (C, C) float64.
+
+    img: "L" image; kind: "brightness" | "contrast" | "sharpness".
+        brightness  D = 0                                (ImageEnhance.Brightness)
+        contrast    D = int(mean(whole image) + 0.5)     (ImageEnhance.Contrast:
+                        ImageStat mean over EVERY pixel, int-rounded, not the region)
+        sharpness   D = img.filter(ImageFilter.SMOOTH)   (ImageEnhance.Sharpness)
+    enhance(f) = Image.blend(D, img, f) = trunc(D + f (img - D)), saturated.
+    """
+    if kind == "brightness":
+        return np.zeros(img.size[::-1], dtype=np.float64)
+    if kind == "contrast":
+        from PIL import ImageStat
+        mean = int(ImageStat.Stat(img).mean[0] + 0.5)  # int, PIL's own rounding
+        return np.full(img.size[::-1], float(mean), dtype=np.float64)
+    return np.asarray(img.filter(ImageFilter.SMOOTH), dtype=np.float64)
+
+
+def enhance_factor_max(img, deg, region):
+    """Largest factor f (float, inf if unbounded) with D + f (img - D) inside
+    [JITTER_BOTTOM, JITTER_TOP] on every `region` pixel.
+
+    img: "L" image (C, C); deg: (C, C) float64 degenerate D; region: (C, C) bool.
+
+        img > D:  f <= (255.5 - D) / (img - D)       img < D:  f <= (D + 0.5) / (D - img)
+
+    f = 1 gives img itself, so f_max > 1 always, and any f in [0, 1] blends
+    between img and D (both in 0..255): only the upper bound can saturate.
+    """
+    a = np.asarray(img, dtype=np.float64)[region]  # (N,) float64, region pixels
+    d = deg[region]  # (N,) float64, their degenerate values
+    diff = a - d  # (N,) float64
+    up, dn = diff > 0, diff < 0  # (N,) bool, pixels f pushes up / down
+    f_max = math.inf  # float
+    if up.any():
+        f_max = min(f_max, float(((JITTER_TOP - d[up]) / diff[up]).min()))
+    if dn.any():
+        f_max = min(f_max, float(((d[dn] - JITTER_BOTTOM) / -diff[dn]).min()))
+    return f_max
+
+
+def capped_uniform(rng, lo, hi, f_max):
+    """One uniform draw (exactly one rng.random()) of a factor capped at f_max.
+
+    rng: random.Random; lo, hi: float, the config range; f_max: float, the cap.
+        f_max >= lo:  f = U(lo, min(hi, f_max))            (restricted draw)
+        f_max <  lo:  f = U(f_max lo / hi, f_max)          (range shrunk in proportion)
+
+          lo ════════════ hi               lo ══════ f_max ┄┄┄┄ hi
+          └ f_max >= hi: the old draw ┘    └ capped ─┘
+    Returns (f float, capped bool: the range was shortened).
+    random.uniform(a, b) = a + (b - a) random(), one draw whatever the bounds.
+    """
+    if f_max >= hi:
+        return rng.uniform(lo, hi), False
+    if f_max >= lo:
+        return rng.uniform(lo, f_max), True
+    return rng.uniform(f_max * lo / hi, f_max), True
+
+
+def _jitter_enhance(img, kind, rng, lo, hi, region):
+    """Apply one capped exposure-jitter enhance to the "L" canvas.
+
+    kind: one of JITTER_KINDS; rng: the "jitter" random.Random (one draw);
+    lo, hi: float, cfg["jitter"][kind + "_range"]; region: (C, C) bool, the
+    pixels that survive to the output (inside the dial ellipse, off the rim).
+    The cap is computed on the CURRENT image, just before this enhance.
+    Returns (img "L", f float, f_max float, capped bool).
+    """
+    deg = enhance_degenerate(img, kind)  # (C, C) float64
+    f_max = enhance_factor_max(img, deg, region)  # float
+    f, capped = capped_uniform(rng, lo, hi, f_max)
+    enh = {"brightness": ImageEnhance.Brightness, "contrast": ImageEnhance.Contrast,
+           "sharpness": ImageEnhance.Sharpness}[kind]  # ImageEnhance class
+    return enh(img).enhance(f), f, f_max, capped
+
+
 # ── tip label: first base-parallel line with > n pointer pixels ──────────
 TIP_T_STEP = 0.05  # float px, grid of the scan along the triangle height
 
@@ -1416,20 +1504,8 @@ def render_image(cfg, image_seed):
             size2, Image.AFFINE, affine, resample=Image.BILINEAR), dtype=np.float32)
     dial_rx, dial_ry = dial_radius * stretch_h, dial_radius * stretch_v  # float px
 
-    # --- 9 exposure jitter ---
-    J, jrng = cfg["jitter"], rngs["jitter"][0]
-    # enhance factors (float), drawn in this order: brightness, contrast, sharpness
-    j_bright = jrng.uniform(*J["brightness_range"])
-    img = ImageEnhance.Brightness(img).enhance(j_bright)
-    j_contrast = jrng.uniform(*J["contrast_range"])
-    img = ImageEnhance.Contrast(img).enhance(j_contrast)
-    j_sharp = jrng.uniform(*J["sharpness_range"])
-    img = ImageEnhance.Sharpness(img).enhance(j_sharp)
-    rec["jitter"] = {"brightness": j_bright, "contrast": j_contrast, "sharpness": j_sharp}
-
-    # --- 10 outer annulus + rim band ---
+    # dial-ellipse / boundary geometry (no draws), needed from step 9 on
     outer_rx, outer_ry = dial_rx * outer_scale, dial_ry * outer_scale  # float px
-    arr = np.array(img)  # (C, C) uint8
     # open pixel grids: ys (C, 1) int, xs (1, C) int; they broadcast to (C, C)
     ys, xs = np.ogrid[:canvas_size, :canvas_size]
     # squared normalised radius vs the dial ellipse (about (cx, cy)) / the
@@ -1437,9 +1513,28 @@ def render_image(cfg, image_seed):
     inner_r2 = ((xs - cx) / max(dial_rx, 1)) ** 2 + ((ys - cy) / max(dial_ry, 1)) ** 2
     outer_r2 = ((xs - bcx) / max(outer_rx, 1)) ** 2 + ((ys - bcy) / max(outer_ry, 1)) ** 2
     inside_outer = outer_r2 <= 1  # (C, C) bool, inside B
-    arr[(inner_r2 > 1) & inside_outer] = outer_gray
     r_norm = np.sqrt(inner_r2)  # (C, C) float64, radius / dial ellipse radius
-    rim_half = O["rim_width"] / min(max(dial_rx, 1), max(dial_ry, 1))
+    rim_half = O["rim_width"] / min(max(dial_rx, 1), max(dial_ry, 1))  # float, rim half width / radius
+    # pixels of the jittered canvas that survive to the output, (C, C) bool:
+    # inside the dial ellipse and off the rim band (step 10 repaints the rest)
+    survive = r_norm <= 1 - rim_half
+
+    # --- 9 exposure jitter (factors capped per image: nothing saturates) ---
+    J, jrng = cfg["jitter"], rngs["jitter"][0]
+    rec["jitter"] = {}  # dict: factor, its cap (None = unbounded) and capped flag per kind
+    capped = {}  # dict[str, bool], per kind: the range was shortened
+    # enhance factors (float), drawn in this order: brightness, contrast, sharpness;
+    # each cap is computed on the current image, just before its enhance
+    for kind in JITTER_KINDS:
+        img, f, f_max, capped[kind] = _jitter_enhance(img, kind, jrng,
+                                                      *J[kind + "_range"], survive)
+        rec["jitter"][kind] = f
+        rec["jitter"][kind + "_max"] = f_max if math.isfinite(f_max) else None
+    rec["jitter"]["capped"] = capped
+
+    # --- 10 outer annulus + rim band ---
+    arr = np.array(img)  # (C, C) uint8
+    arr[(inner_r2 > 1) & inside_outer] = outer_gray
     arr[(r_norm > 1 - rim_half) & (r_norm < 1 + rim_half)] = rim_gray
 
     # --- tip label (geometry only: before noise, blur and effects) ---
