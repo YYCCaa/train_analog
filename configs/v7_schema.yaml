@@ -61,14 +61,14 @@ palette:
   rim_gray_range: {type: int_range, min: 0, max: 255, step: 1, help: "Rim band gray level."}
 
 pointer:
-  gray_range: {type: int_range, min: 0, max: 255, step: 1, help: "Pointer body gray level (uniform draw). The draw keeps gradient + noise headroom from 0/255 (max|gradient| + noise levels); if the range has no room, the gradient + noise are scaled down instead."}
+  gray_range: {type: int_range, min: 0, max: 255, step: 1, help: "Pointer body gray level (uniform draw). The draw keeps gradient + noise headroom from 0/255 (max|gradient| + noise levels); if the range has no room, the gradient + noise are scaled down instead. A warning shows when the range has no headroom room or fewer than 32 usable levels."}
   darker_frac_range: {type: float_range, min: 0.0, max: 1.0, step: 0.01, help: "Hole/edge gray as a fraction of the pointer gray."}
   gradient_range: {type: float_range, min: -100.0, max: 100.0, step: 1, help: "Lengthwise brightness shift from hub to tip."}
   noise_amplitude: {type: int, min: 0, max: 64, step: 1, help: "Per-pixel noise amplitude on the pointer body (+/-)."}
   edge_thickness_range: {type: int_range, min: 0, max: 8, step: 1, help: "Pointer edge band width (px); 0 = no edge band."}
   edge_max_frac: {type: float, min: 0, max: 1, step: 0.01, help: "Max pointer edge band width as a fraction of the triangle's cross-section width at each height (1 = no clamp)."}
   edge_noise_amplitude: {type: int, min: 0, max: 32, step: 1, help: "Per-pixel noise amplitude on the pointer edge (+/-)."}
-  min_bg_contrast: {type: int, min: 0, max: 255, step: 1, help: "Minimum |pointer gray − face gray|, for the bare face and the darkest shadowed face (the pointer gray is drawn after bg and shadow); 0 = off."}
+  min_bg_contrast: {type: int, min: 0, max: 255, step: 1, help: "Minimum |pointer gray − face gray|, for the bare face and the darkest shadowed face (the pointer gray is drawn after bg and shadow); 0 = off. Images with no allowed gray get an endpoint of the range; a warning shows when that is more than 0.5% of images."}
 
 background:
   lowfreq_size: {type: int, min: 2, max: 32, step: 1, help: "Low-frequency background tile resolution (NxN)."}

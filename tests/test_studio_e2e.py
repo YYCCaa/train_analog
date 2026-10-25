@@ -732,6 +732,27 @@ def test_min_bg_contrast_slider_changes_preview(page):
     assert _tile_srcs(page) == before
 
 
+def test_tight_gray_range_shows_live_warning(page):
+    notice = page.get_by_test_id("range-warnings")  # live range notice (Locator)
+    assert notice.count() == 0  # the default config is fine
+    # a person types a pointer range squeezed against white
+    _commit_and_wait(page, _num(page, "pointer.gray_range", "lo"), "230")
+    notice.wait_for(timeout=UI_TIMEOUT)
+    assert "pointer.gray_range" in notice.inner_text()
+    assert "no room" in notice.inner_text()
+    assert page.get_by_test_id("config-warnings").count() == 0  # separate from load notice
+    # ... and back to the full range: the notice goes away
+    _commit_and_wait(page, _num(page, "pointer.gray_range", "lo"), "0")
+    notice.wait_for(state="detached", timeout=UI_TIMEOUT)
+    # raising min_bg_contrast to 120 leaves most images no allowed gray
+    _commit_and_wait(page, _num(page, "pointer.min_bg_contrast"), "120")
+    notice.wait_for(timeout=UI_TIMEOUT)
+    assert "pointer.min_bg_contrast" in notice.inner_text()
+    assert "point mass" in notice.inner_text()
+    items = notice.locator("li").all_inner_texts()  # one warning per item, list[str]
+    assert [w.split(":")[0] for w in items] == ["pointer.min_bg_contrast"]
+
+
 def _tile_means(page):
     """list[float]: mean gray (0-255) of each decoded tile image, grid order.
 

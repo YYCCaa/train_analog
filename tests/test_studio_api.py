@@ -71,6 +71,29 @@ def test_config_parse_clean_yaml_has_empty_warnings(client):
     assert client.post("/api/config/parse", json={"text": text}).json()["warnings"] == []
 
 
+def test_config_check_range_warnings(client):
+    cfg = v7_config.default_config()  # default cfg (dict)
+    r = client.post("/api/config/check", json={"config": cfg})
+    assert r.status_code == 200 and r.json() == {"warnings": []}
+    tight = copy.deepcopy(cfg)  # cfg with a too-tight pointer gray range
+    tight["pointer"]["gray_range"] = [230, 255]
+    tight["pointer"]["min_bg_contrast"] = 120
+    warns = client.post("/api/config/check", json={"config": tight}).json()["warnings"]
+    assert warns == gen.pointer_gray_warnings(tight)
+    assert [w.split(":")[0] for w in warns] == ["pointer.gray_range", "pointer.min_bg_contrast"]
+    bad = copy.deepcopy(cfg)
+    bad["pointer"]["nope"] = 1
+    assert client.post("/api/config/check", json={"config": bad}).status_code == 422
+
+
+def test_config_parse_appends_range_warnings(client):
+    # old key (migration warning) + a too-tight range: migration first, then range
+    text = "reflections:\n  perspective: 0.4\npointer:\n  gray_range: [100, 120]\n"
+    warns = client.post("/api/config/parse", json={"text": text}).json()["warnings"]
+    assert warns[0].startswith("reflections.perspective:")
+    assert warns[-1].startswith("pointer.gray_range:") and "21 levels" in warns[-1]
+
+
 def test_preview_still_rejects_unknown_key(client):
     cfg = copy.deepcopy(v7_config.default_config())
     cfg["reflections"]["perspective"] = 0.4
