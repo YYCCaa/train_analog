@@ -1,0 +1,15 @@
+# Runtime
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
+pillow>=10.1
+numpy>=1.24
+ai-edge-litert>=1.0       # LiteRT TFLite interpreter (tensorflow>=2.15 also works as a fallback)
+
+# Development / tests (install separately):
+#   pip install pytest httpx playwright
+#   python -m playwright install chromium
+#   torch is optional: only the decode cross-check against train_v9_tip.py needs it
+# pytest>=8
+# httpx>=0.27
+# playwright>=1.40
