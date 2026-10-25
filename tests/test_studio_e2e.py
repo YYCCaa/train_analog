@@ -694,6 +694,33 @@ def test_blur_moves_tip_marker_back(page):
         assert b <= a + 0.5, (d_high, d_floor)  # back further or put, never forward
 
 
+def test_min_ratio_moves_tip_marker_inward(page):
+    # a user blurs the dial (radius 4), then demands more patch support for the
+    # tip (tip_label.min_ratio 0 -> 0.4): markers retreat toward the hub or stay,
+    # never move outward
+    page.get_by_test_id("overlay-toggle").check()
+    box = page.locator('[data-param="background.dial_circle_blur"] input[type=checkbox]')
+    if not box.is_checked():
+        old = _applied_seq(page)
+        box.check()
+        _wait_applied_after(page, old)
+    radius = _num(page, "background.dial_circle_blur_radius")  # number input (Locator)
+    radius.scroll_into_view_if_needed()
+    _commit_and_wait(page, radius, "4")
+    ratio = _num(page, "tip_label.min_ratio")  # number input (Locator)
+    ratio.scroll_into_view_if_needed()
+    _commit_and_wait(page, ratio, "0")
+    low = _marker_geometry(page)  # min_ratio 0, list[dict] (9)
+    _commit_and_wait(page, ratio, "0.4")
+    high = _marker_geometry(page)  # min_ratio 0.4, list[dict] (9)
+    assert [m["seed"] for m in low] == [m["seed"] for m in high]
+    assert all(m["cx"] is not None for m in low + high)
+    d_low, d_high = _centre_dists(low), _centre_dists(high)  # list[float] image px
+    for a, b in zip(d_low, d_high):
+        assert b <= a + 0.25, (d_low, d_high)  # never away from the centre
+    assert any(b < a - 0.25 for a, b in zip(d_low, d_high)), (d_low, d_high)
+
+
 def test_reset_after_yaml_load_uses_builtin_default(page, tmp_path):
     saved = tmp_path / "default.yaml"  # downloaded default YAML (Path)
     text = _save_yaml(page, saved)
