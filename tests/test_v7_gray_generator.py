@@ -92,11 +92,11 @@ def test_cli_partial_config(tmp_path):
 
 def test_cli_bad_config(tmp_path):
     cfgp = tmp_path / "c.yaml"
-    cfgp.write_text("ticks:\n  len_range: [9, 6]\n")
+    cfgp.write_text("ticks: [\n")  # YAML syntax error: the only thing load_config still rejects
     out = tmp_path / "o"
     r = run_cli("--config", cfgp, "--output-dir", out, "--num-images", 2)
     assert r.returncode == 2
-    assert "ticks.len_range" in r.stderr + r.stdout
+    assert "yaml" in r.stderr + r.stdout
 
 
 def test_overwrite_semantics(tmp_path):

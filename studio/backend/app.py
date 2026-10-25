@@ -140,9 +140,11 @@ def create_app(frontend_dist=None, allowed_hosts=None):
 
     @app.post("/api/config/parse")
     def config_parse(body: TextBody):
-        """YAML text -> {"config": defaults-merged, validated cfg}; invalid -> 422."""
+        """YAML text -> {"config": migrated, validated cfg, "warnings": list[str]
+        (adjustments made to an old YAML, [] when none)}; bad YAML syntax -> 422."""
         try:
-            return {"config": v7_config.parse_config_text(body.text)}
+            cfg, warns = v7_config.parse_config_text_with_warnings(body.text)
+            return {"config": cfg, "warnings": warns}
         except v7_config.ConfigError as e:
             return _errors(e.errors)
 

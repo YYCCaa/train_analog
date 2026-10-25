@@ -56,6 +56,29 @@ def test_preview_tiles(client):
         assert t["angle_deg"] == pytest.approx(ref.angle_deg)
 
 
+def test_config_parse_returns_warnings_for_old_yaml(client):
+    text = "reflections:\n  perspective: 0.4\n  warp_amplitude: 3\nfoo:\n  bar: 1\n"
+    r = client.post("/api/config/parse", json={"text": text})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["config"]["reflections"]["perspective_range"] == [0, 0.4]
+    assert any(w.startswith("reflections.perspective:") for w in body["warnings"])
+    assert any(w.startswith("foo") for w in body["warnings"])
+
+
+def test_config_parse_clean_yaml_has_empty_warnings(client):
+    text = client.post("/api/config/dump", json={"config": v7_config.default_config()}).json()["text"]
+    assert client.post("/api/config/parse", json={"text": text}).json()["warnings"] == []
+
+
+def test_preview_still_rejects_unknown_key(client):
+    cfg = copy.deepcopy(v7_config.default_config())
+    cfg["reflections"]["perspective"] = 0.4
+    r = client.post("/api/preview", json={"config": cfg, "seeds": [1]})
+    assert r.status_code == 422
+    assert any("reflections.perspective" in e for e in r.json()["errors"])
+
+
 def test_preview_invalid_config_422(client):
     cfg = copy.deepcopy(v7_config.default_config())
     cfg["ticks"]["len_range"] = [9, 6]
@@ -68,7 +91,7 @@ def test_parse_and_dump_roundtrip(client):
     cfg = v7_config.default_config()
     text = client.post("/api/config/dump", json={"config": cfg}).json()["text"]
     assert client.post("/api/config/parse", json={"text": text}).json()["config"] == cfg
-    bad = client.post("/api/config/parse", json={"text": "ticks:\n  len_range: [9, 6]\n"})
+    bad = client.post("/api/config/parse", json={"text": "ticks: [\n"})
     assert bad.status_code == 422 and bad.json()["errors"]
 
 

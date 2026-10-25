@@ -371,14 +371,34 @@ def test_range_slider_drag_firefox(firefox_page):
 
 
 def test_invalid_yaml_shows_error(page, tmp_path):
-    bad = tmp_path / "bad.yaml"  # YAML with lo > hi (Path)
-    bad.write_text("ticks:\n  len_range: [9, 6]\n", encoding="utf-8")
+    bad = tmp_path / "bad.yaml"  # YAML with a syntax error (Path)
+    bad.write_text("ticks: [\n", encoding="utf-8")
     page.get_by_test_id("load-yaml").set_input_files(str(bad))
     errs = page.get_by_test_id("config-errors")  # error box (Locator)
-    errs.get_by_text("ticks.len_range").first.wait_for(timeout=UI_TIMEOUT)
-    assert "ticks.len_range" in errs.inner_text()
+    errs.get_by_text("yaml").first.wait_for(timeout=UI_TIMEOUT)
+    assert "yaml" in errs.inner_text()
     page.wait_for_function(_TILES_LOADED_JS, timeout=UI_TIMEOUT)
     assert _num(page, "ticks.len_range", "hi").input_value() == "9"
+
+
+def test_load_old_yaml_shows_adjustments(page, tmp_path):
+    old = tmp_path / "old.yaml"  # old-format YAML (Path)
+    old.write_text("reflections:\n  perspective: 0.4\n  warp_grid: 4\n  warp_amplitude: 3\n"
+                   "foo:\n  bar: 1\n", encoding="utf-8")
+    seq = _applied_seq(page)  # applied seq before loading (int)
+    page.get_by_test_id("load-yaml").set_input_files(str(old))
+    note = page.get_by_test_id("config-warnings")  # adjustments notice (Locator)
+    note.get_by_text("perspective").first.wait_for(timeout=UI_TIMEOUT)
+    assert "Loaded with" in note.inner_text() and "adjustments" in note.inner_text()
+    assert "foo" in note.inner_text()
+    assert page.get_by_test_id("config-errors").inner_text().strip() == ""
+    _wait_applied_after(page, seq)
+    assert _num(page, "reflections.perspective_range", "lo").input_value() == "0"
+    assert _num(page, "reflections.perspective_range", "hi").input_value() == "0.4"
+    assert _num(page, "reflections.warp_grid_range", "lo").input_value() == "4"
+    page.wait_for_function(_TILES_LOADED_JS, timeout=UI_TIMEOUT)
+    note.get_by_role("button", name="Dismiss").click()
+    assert not note.is_visible()
 
 
 def test_save_load_roundtrip(page, tmp_path):

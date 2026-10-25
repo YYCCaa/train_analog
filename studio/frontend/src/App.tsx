@@ -55,6 +55,9 @@ export default function App() {
   // errors of the last YAML load / save / startup fetch (list[str]); a preview never
   // clears these, only a later successful load or a control change does
   const [fileErrors, setFileErrors] = useState<string[]>([]);
+  // adjustments the last YAML load made to an old file (list[str], "section.key: message");
+  // non-blocking, shown until dismissed or the next load
+  const [loadWarnings, setLoadWarnings] = useState<string[]>([]);
   const [sentSeq, setSentSeq] = useState(0); // newest preview request number (int)
   const [appliedSeq, setAppliedSeq] = useState(0); // number of the response shown (int)
   const [busy, setBusy] = useState(true); // debounce pending or latest request in flight
@@ -141,11 +144,14 @@ export default function App() {
   // (file: File) => Promise<void>
   const loadYaml = async (file: File) => {
     try {
-      const cfg = await api.parseConfig(await file.text()); // parsed config (Config)
-      setConfig(cfg);
+      // parsed config + adjustments made to an old YAML (ParsedConfig)
+      const parsed = await api.parseConfig(await file.text());
+      setConfig(parsed.config);
       setFileErrors([]);
+      setLoadWarnings(parsed.warnings);
     } catch (e) {
       setFileErrors(errorsOf(e));
+      setLoadWarnings([]);
     }
   };
 
@@ -233,6 +239,20 @@ export default function App() {
             <div key={i}>{e}</div>
           ))}
         </div>
+        {loadWarnings.length > 0 && (
+          <div data-testid="config-warnings" className="notice">
+            <button type="button" className="dismiss" aria-label="Dismiss"
+              onClick={() => setLoadWarnings([])}>Dismiss</button>
+            <div>
+              Loaded with {loadWarnings.length} adjustment{loadWarnings.length === 1 ? "" : "s"}:
+            </div>
+            <ul>
+              {loadWarnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          </div>
+        )}
         <PreviewGrid tiles={tiles} imgSize={imgSize} overlay={overlay}
           sentSeq={sentSeq} appliedSeq={appliedSeq} busy={busy} count={count}
           appliedConfig={appliedConfig} onSaveErrors={setSaveErrors} />

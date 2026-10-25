@@ -1,0 +1,22 @@
+# YAML written by an older studio: renamed / removed keys, a gone section.
+geometry:
+  displacement_range: [-10, 10]
+digits:
+  dist_jitter_range: [0, 6]
+pointer:
+  noise_range: 20
+  edge_noise_range: 4
+shadows:
+  opacity_range: [160, 180]
+  gray_range: [11, 60]
+reflections:
+  prob: 0.5
+  perspective: 0.4
+  warp_strength: 0.15
+  warp_grid: 4
+  warp_amplitude: 3
+  threshold_pct_range: [55.0, 80.0]
+foo:
+  bar: 1
+run:
+  num_images: 3
