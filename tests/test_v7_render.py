@@ -314,7 +314,7 @@ def _pointer_footprint(cfg, seed):
 
 
 def test_min_bg_contrast_isolated():
-    # shadows off: min_bg_contrast now also caps shadow strength (tested separately)
+    # shadows off: with a shadow the forbidden interval also covers the shadowed face
     flat = {"jitter.contrast_range": [1.0, 1.0], "shadows.prob": 0.0}
     base = _cfg(**flat)
     strong = _cfg(**flat, **{"pointer.min_bg_contrast": 90})
@@ -1494,40 +1494,63 @@ def test_tip_on_principal_axis_pixels(case):
 
 
 
-# ── min_bg_contrast also caps the shadow darkening ──────────────────────
+# ── min_bg_contrast restrains the pointer gray (drawn after bg + shadow) ─────
 
-def test_cap_shadow_strengths_unit():
-    # dark pointer (20) on bg 180, c 60: d_max = 1 - 80/180
-    d_max, s_p, s_r = g7.cap_shadow_strengths(0.9, 0.7, 20, 180, 60)  # floats
-    assert d_max == pytest.approx(1 - 80 / 180)
-    assert s_p == pytest.approx(d_max) and s_r == pytest.approx(d_max)
-    assert g7.cap_shadow_strengths(0.3, 0.2, 20, 180, 60)[1:] == (0.3, 0.2)  # below the cap
-    # light pointer (230) on bg 120: darkening only adds contrast, no cap
-    assert g7.cap_shadow_strengths(0.9, 0.7, 230, 120, 60) == (1.0, 0.9, 0.7)
-    # c = 0: never capped, even for a dark pointer
-    assert g7.cap_shadow_strengths(0.9, 0.7, 20, 180, 0) == (1.0, 0.9, 0.7)
-    # no room (ptr + c >= bg): shadow fully removed
-    assert g7.cap_shadow_strengths(0.9, 0.7, 100, 150, 80)[1:] == (0.0, 0.0)
-    # black background: nothing to darken
-    assert g7.cap_shadow_strengths(0.9, 0.7, 0, 0, 5) == (1.0, 0.9, 0.7)  # ptr >= bg: no cap
+def test_pointer_forbidden_interval_unit():
+    import random
+    # bare face 180, darkest shadowed face 180 * (1 - 0.5) = 90, c = 40
+    f_lo, f_hi = g7.pointer_forbidden_interval(180, 40, 0.5)  # floats
+    assert (f_lo, f_hi) == (50.0, 220.0)
+    assert g7.pointer_forbidden_interval(180, 40) == (140.0, 220.0)  # no shadow: bg +- c
+    rng = random.Random(3)  # shared stream (random.Random)
+    vals = {g7._pick_pointer_gray(rng, 0, 255, 180, 40, 0.5) for _ in range(3000)}  # set[int]
+    assert vals == set(range(0, 51)) | set(range(220, 256))  # endpoints allowed, both sides
+    # a fractional f_lo: 175 * (1 - 0.3) - 30 = 92.5 -> the lower interval ends at 92
+    vals = {g7._pick_pointer_gray(rng, 0, 255, 175, 30, 0.3) for _ in range(3000)}
+    assert max(v for v in vals if v < 175) == 92 and min(v for v in vals if v > 92) == 205
+    # c = 0: exactly the old randint(lo, hi) draw, whatever the shadow
+    for s_max in (0.0, 0.4, 1.0):
+        for seed in range(200):
+            want = random.Random(seed).randint(10, 240)  # int, old draw
+            assert g7._pick_pointer_gray(random.Random(seed), 10, 240, 160, 0, s_max) == want
+    # s_max = 0 reproduces the bare rule draw for draw
+    for seed in range(200):
+        a = g7._pick_pointer_gray(random.Random(seed), 0, 255, 160, 60, 0.0)  # int
+        assert abs(a - 160) >= 60
+    # empty set: one draw consumed, endpoint farthest from the forbidden interval
+    c1, c2 = random.Random(9), random.Random(9)  # two identical streams
+    # bg 150, s 0.6 -> faces [60, 150], c 80 -> forbidden (-20, 230); range [0, 200]:
+    # lo is 60 below the shadowed face, hi 50 above the bare face -> lo
+    assert g7._pick_pointer_gray(c1, 0, 200, 150, 80, 0.6) == 0
+    c2.randint(0, 200)
+    assert c1.random() == c2.random(), "infeasible case must consume one draw"
+    # bg 100, s 0.1 -> faces [90, 100], c 200: hi is 140 above, lo 90 below -> hi
+    assert g7._pick_pointer_gray(random.Random(0), 0, 240, 100, 200, 0.1) == 240
 
 
-def test_render_records_shadow_cap():
-    pins = {"shadows.prob": 1.0, "shadows.strength_range": [0.9, 0.9],
-            "shadows.strength_jitter": 0.0, "pointer.gray_range": [20, 20],
-            "palette.bg_gray_range": [180, 180], "pointer.min_bg_contrast": 60}
-    sh = g7.render_image(_cfg(**pins), 0).params["shadows"]
-    assert sh["s_p_drawn"] == pytest.approx(0.9) and sh["s_r_drawn"] == pytest.approx(0.9)
-    assert sh["d_max"] == pytest.approx(1 - 80 / 180, abs=1e-3)
-    assert sh["s_p"] == pytest.approx(sh["d_max"], abs=1e-3) and sh["s_r"] == pytest.approx(sh["d_max"], abs=1e-3)
+def test_render_records_forbidden_interval():
+    pins = {"shadows.prob": 1.0, "shadows.strength_range": [0.6, 0.6],
+            "shadows.strength_jitter": 0.0, "palette.bg_gray_range": [160, 160],
+            "pointer.min_bg_contrast": 50}
+    for seed in range(6):
+        p = g7.render_image(_cfg(**pins), seed).params  # dict, sampled values
+        pt = p["pointer"]  # dict
+        assert pt["forbidden_lo"] == pytest.approx(160 * 0.4 - 50, abs=1e-3)
+        assert pt["forbidden_hi"] == pytest.approx(210.0)
+        assert pt["gray"] <= pt["forbidden_lo"] or pt["gray"] >= pt["forbidden_hi"], pt
+        assert p["shadows"]["s_p"] == pytest.approx(0.6) and "d_max" not in p["shadows"]
+    # no shadow: the interval is bg +- c
+    pt = g7.render_image(_cfg(**{**pins, "shadows.prob": 0.0}), 0).params["pointer"]
+    assert (pt["forbidden_lo"], pt["forbidden_hi"]) == (110.0, 210.0)
 
 
-# "section.key" -> value pins (dict): strong shadows, dark pointer on a mid-light
-# face, nothing that perturbs gray levels (noise, blur, jitter, effects)
-_CAP_PINS = {"shadows.prob": 1.0, "shadows.strength_range": [0.9, 0.9],
+# "section.key" -> value pins (dict): strong shadows (strength 0.8 -> darkest face
+# bg * 0.2), any pointer gray, flat face 150-170, nothing that perturbs gray
+# levels (noise, blur, jitter, effects), so a person can read the levels off
+_GAP_PINS = {"shadows.prob": 1.0, "shadows.strength_range": [0.8, 0.8],
              "shadows.strength_jitter": 0.0, "shadows.blur_radius": 0.0,
              "shadows.rim_blur_range": [0.5, 0.5],
-             "pointer.gray_range": [0, 40], "palette.bg_gray_range": [150, 200],
+             "pointer.gray_range": [0, 255], "palette.bg_gray_range": [150, 170],
              "pointer.noise_amplitude": 0, "pointer.gradient_range": [0.0, 0.0],
              "pointer.edge_noise_amplitude": 0,
              "background.noise_intensity": 0, "background.variation": 0,
@@ -1538,36 +1561,45 @@ _CAP_PINS = {"shadows.prob": 1.0, "shadows.strength_range": [0.9, 0.9],
              "jitter.sharpness_range": [1.0, 1.0]}
 
 
-def _shadow_pointer_gap(c, seed):
-    """Visible gap (float, gray levels) between the shadowed face and the pointer body.
+def _pointer_face_levels(c, seed):
+    """Median grays a person reads off one render (float levels):
+    (pointer body, deep-shadow face, bare face), or None if a region is tiny.
 
-    Median gray of the deep-shadow face region minus median gray of the
-    pointer body, as a person would compare them.  The region is where a
-    strength-1 shadow blackens a bright face (c = 0 reference render).
-    Returns (gap, pointer median, face median) or None if a region is too small.
+    cfg = _GAP_PINS + pointer.min_bg_contrast c (int).  Pointer body = the
+    pointer footprint (gray 0 vs 255 probe renders) eroded 3 px (no edge band);
+    deep shadow = where a strength-1 shadow blackens the face (and the face is
+    lit without a shadow), off the pointer; bare face = central face pixels the
+    strength-1 shadow leaves unchanged, off the pointer.
     """
-    extra = {k: v for k, v in _CAP_PINS.items() if not k.startswith("shadows.strength")}
-    umbra, off = _umbra(extra, seed)  # (256, 256) bool, (256, 256) int32 (unshadowed)
-    img = g7.render_image(_cfg(**{**_CAP_PINS, "pointer.min_bg_contrast": c}), seed).image
-    body = _erode((off < 100) & (_radius_grid() < DIAL * 0.95), 2)  # (256, 256) bool, pointer body
-    if umbra.sum() < 50 or body.sum() < 20:
+    cfg = _cfg(**{**_GAP_PINS, "pointer.min_bg_contrast": c})
+    img = g7.render_image(cfg, seed).image.astype(np.int32)  # (256, 256) int32
+    full = g7.render_image(_cfg(**{**_GAP_PINS, "pointer.min_bg_contrast": c,
+                                   "shadows.strength_range": [1.0, 1.0]}), seed).image
+    none = g7.render_image(_cfg(**{**_GAP_PINS, "pointer.min_bg_contrast": c,
+                                   "shadows.prob": 0.0}), seed).image
+    foot = _pointer_footprint(cfg, seed)  # (256, 256) bool, pointer pixels
+    off_ptr = ~_dilate(foot, 4)  # (256, 256) bool, well away from the pointer
+    umbra = _erode((full == 0) & (none >= 60), 2) & off_ptr  # (256, 256) bool
+    bare = (full == none) & off_ptr & (_radius_grid() < 0.6 * DIAL)  # (256, 256) bool
+    body = _erode(foot, 3)  # (256, 256) bool
+    if umbra.sum() < 50 or bare.sum() < 50 or body.sum() < 20:
         return None
-    face = float(np.median(img[umbra]))  # float, shadowed face gray
-    ptr = float(np.median(off[body]))  # float, pointer body gray
-    return face - ptr, ptr, face
+    return (float(np.median(img[body])), float(np.median(img[umbra])),
+            float(np.median(img[bare])))
 
 
 def test_min_bg_contrast_keeps_pointer_visible_over_shadow():
-    c = 80  # int, pointer.min_bg_contrast under test
-    gaps_on, gaps_off = [], []  # list[float], per seed, c = 80 / c = 0
+    c, tol = 80, 3  # int, pointer.min_bg_contrast under test; int levels tolerance
+    gaps = {80: [], 0: []}  # c -> list of (shadow gap, bare gap) floats per seed
     for seed in range(40):
-        on, off = _shadow_pointer_gap(c, seed), _shadow_pointer_gap(0, seed)
-        if on is None or off is None:
-            continue
-        gaps_on.append(on[0])
-        gaps_off.append(off[0])
-    print("c=80 gaps", np.percentile(gaps_on, [0, 10, 50, 90, 100]),
-          "c=0 gaps", np.percentile(gaps_off, [0, 10, 50, 90, 100]), len(gaps_on))
-    assert len(gaps_on) >= 15
-    assert min(gaps_on) >= c - 3, sorted(gaps_on)[:5]
-    assert min(gaps_off) < c - 3, sorted(gaps_off)[:5]  # the test discriminates
+        for cc in gaps:
+            lv = _pointer_face_levels(cc, seed)
+            if lv is not None:
+                ptr, shd, bare = lv
+                gaps[cc].append((abs(ptr - shd), abs(ptr - bare)))
+    on, off = np.array(gaps[80]), np.array(gaps[0])  # (N, 2) float64
+    print("c=80 shadow / bare gaps p0 p10 p50:", np.percentile(on, [0, 10, 50], axis=0).T,
+          "c=0:", np.percentile(off, [0, 10, 50], axis=0).T, len(on), len(off))
+    assert len(on) >= 30 and len(off) >= 30
+    assert on.min(axis=0)[0] >= c - tol and on.min(axis=0)[1] >= c - tol, on.min(axis=0)
+    assert (off.min(axis=1) < c - tol).any(), "the measurement cannot tell c = 0 from c = 80"

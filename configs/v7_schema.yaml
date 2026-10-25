@@ -67,7 +67,7 @@ pointer:
   noise_amplitude: {type: int, min: 0, max: 64, step: 1, help: "Per-pixel noise amplitude on the pointer body (+/-)."}
   edge_thickness_range: {type: int_range, min: 1, max: 8, step: 1, help: "Pointer edge band width (px)."}
   edge_noise_amplitude: {type: int, min: 0, max: 32, step: 1, help: "Per-pixel noise amplitude on the pointer edge (+/-)."}
-  min_bg_contrast: {type: int, min: 0, max: 255, step: 1, help: "Minimum |pointer gray - background gray|, also for the shadowed background: shadows are lightened so they keep this contrast (bg_gray_range draw); 0 = off."}
+  min_bg_contrast: {type: int, min: 0, max: 255, step: 1, help: "Minimum |pointer gray − face gray|, for the bare face and the darkest shadowed face (the pointer gray is drawn after bg and shadow); 0 = off."}
 
 background:
   lowfreq_size: {type: int, min: 2, max: 32, step: 1, help: "Low-frequency background tile resolution (NxN)."}

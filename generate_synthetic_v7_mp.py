@@ -33,7 +33,7 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
   │ 4  rim crescent shadow mask m_r    ─┐ only if has_shadow;        │
   │ 5  pointer + circle shadow mask m_p ┘ masks only, img untouched; │
   │    d = max(s_p*m_p, s_r*m_r)  float32 darkening  [d layer]       │
-  │    (built after 7: s capped so a dark pointer keeps min contrast)│
+  │    (built at 7, s_p / s_r as drawn; the pointer gray avoids them)│
   │ 6  digits -> overlay                                  [td layer] │
   │ 7  mounting hole, pointer body (gradient + noise), pointer edge, │
   │    cut-tip (restore pre-pointer pixels near the apex)            │
@@ -107,11 +107,19 @@ ambient light, so it scales the surface by an albedo-independent factor,
 out = in * (1 - d).  One shared strength s per image, jittered separately
 for the pointer (s_p) and rim (s_r) shadows; overlapping shadows of the
 one light do not compound (max, not product).  Ticks, digits, noise and
-triangles under a shadow are darkened by the same factor.  pointer.min_bg_contrast
-(c) also covers the shadowed face: for a pointer darker than the background the
-strengths are clamped to d_max = 1 - (ptr_gray + c) / bg_gray (bg_gray_range
-draw; jitter and noise make this approximate, as for the pointer rule), so
-|ptr_gray - bg_gray (1 - d)| >= c; params record d_max, s_p_drawn, s_r_drawn.
+triangles under a shadow are darkened by the same factor.  Shadows keep their
+drawn strengths; instead pointer.min_bg_contrast (c) restrains the POINTER gray,
+which is drawn after the bg gray and the shadow strengths (separate streams,
+drawn earlier, so no draw order changes):
+
+    face levels the pointer may sit on:  [bg (1 - s_max), bg],  s_max = max(s_p, s_r)
+                                                                (0 without a shadow)
+    0 ...... f_lo = bg (1 - s_max) - c ][ forbidden ][ f_hi = bg + c ...... 255
+     allowed: |g - face| >= c for every face             allowed
+    ptr_gray = one randint over [lo, hi] minus (f_lo, f_hi)  (_pick_pointer_gray)
+
+(bg_gray_range draw; jitter and noise make this approximate, as for the bare
+rule).  params["pointer"] records forbidden_lo / forbidden_hi.
 
 Reflections and glares sit on the cover glass.  Each item takes a random
 ASCII glyph (GLYPHS = A-Z a-z 0-9) in a random available font (GLYPH_FONTS,
@@ -156,7 +164,8 @@ bool, str, list); positions are image px unless named otherwise.
                    major_lens[10], major_widths[10], inner_radius
     shadows        active, light_angle, s_p, s_r, rim_offset_frac,
                    rim_cutout_frac, rim_blur, offset
-    pointer        gray, hole_gray, edge_gray, gradient, edge_thickness
+    pointer        gray, hole_gray, edge_gray, gradient, edge_thickness,
+                   forbidden_lo, forbidden_hi (pointer gray interval it avoided)
     cut_tip        enabled, cut_r, ideal_apex_x / _y, tip_recession,
                    sigma_eff, w_star, contrast_at_tip, patch_ratio_at_tip, tip_rule
     jitter         brightness, contrast, sharpness
@@ -448,28 +457,6 @@ def shadow_darkening(m_p, m_r, s_p, s_r):
                       np.float32(s_r) * np.asarray(m_r, dtype=np.float32))
 
 
-def cap_shadow_strengths(s_p, s_r, ptr_gray, bg_gray, min_contrast):
-    """Cap the shadow strengths so a dark pointer keeps `min_contrast` over them.
-
-    s_p, s_r     : float 0-1, drawn pointer / rim shadow strengths
-    ptr_gray     : int, pointer body gray
-    bg_gray      : int, palette bg_gray_range draw (unshadowed face level)
-    min_contrast : int >= 0, pointer.min_bg_contrast; 0 = off (no cap)
-
-    The shadowed face gray is bg_gray * (1 - d).  A pointer darker than the
-    background loses contrast as d grows, so d is bounded by
-    d_max = clip(1 - (ptr_gray + c) / bg_gray, 0, 1) (0 when bg_gray = 0).
-    A pointer at or above the background only gains contrast: d_max = 1.
-    Since the masks are <= 1, clamping s_p and s_r to d_max bounds d.
-    Approximate: bg jitter / noise move the real face level, as for the
-    pointer rule itself.  Returns (d_max, s_p, s_r): floats.
-    """
-    if min_contrast <= 0 or ptr_gray >= bg_gray:
-        return 1.0, s_p, s_r
-    d_max = 0.0 if bg_gray <= 0 else min(max(1.0 - (ptr_gray + min_contrast) / bg_gray, 0.0), 1.0)
-    return d_max, min(s_p, d_max), min(s_r, d_max)
-
-
 def _shadow_strengths(S, srng):
     """Draw the shared shadow strength and its two per-shadow jitters.
 
@@ -550,28 +537,50 @@ def _draw_pointer_edge(img, mask, edge_gray, bg_arr, thickness, noise_amp, nrng)
     return Image.fromarray(arr)
 
 
-def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast):
+def pointer_forbidden_interval(bg_gray, min_contrast, s_max=0.0):
+    """Gray interval (float, float) a pointer must stay out of: [f_lo, f_hi] =
+    [bg_gray (1 - s_max) - c, bg_gray + c].
+
+    bg_gray      : int, palette bg_gray_range draw (bare face level)
+    min_contrast : int >= 0, c = pointer.min_bg_contrast
+    s_max        : float 0-1, max(s_p, s_r) when the image has a shadow, else 0;
+                   bg_gray (1 - s_max) is the darkest shadowed face (masks <= 1)
+    A gray g keeps |g - face| >= c for every face level in
+    [bg (1 - s_max), bg] iff g <= f_lo or g >= f_hi (endpoints allowed).
+    """
+    return bg_gray * (1.0 - s_max) - min_contrast, float(bg_gray + min_contrast)
+
+
+def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast, s_max=0.0):
     """Draw the pointer body gray (int) with at least `min_contrast` levels of
-    separation from the face background gray.
+    separation from the bare face gray AND from the darkest shadowed face.
 
     rng          : the "pointer" random.Random; exactly ONE randint call is made
     lo, hi       : int, inclusive pointer.gray_range
     bg_gray      : int, palette bg_gray_range draw (face background level)
     min_contrast : int >= 0, pointer.min_bg_contrast; 0 = off
+    s_max        : float 0-1, max(s_p, s_r) with a shadow, 0 without one
 
-    The allowed set {g in [lo, hi] : |g - bg_gray| >= min_contrast} is at most
-    two contiguous intervals, [lo, bg - c] and [bg + c, hi].  An index drawn
-    with randint(0, n_allowed - 1) is mapped onto them in ascending order:
+    The pointer gray is drawn after the bg and the shadow strengths (they live
+    on the palette / shadows streams, drawn earlier).  The faces it may sit on
+    span [bg (1 - s_max), bg], so the forbidden interval is
+    (f_lo, f_hi) = (bg (1 - s_max) - c, bg + c) (pointer_forbidden_interval)
+    and the allowed set is at most two contiguous intervals, [lo, floor(f_lo)]
+    and [bg + c, hi].  An index drawn with randint(0, n_allowed - 1) is mapped
+    onto them in ascending order:
 
-        lo ......... bg-c | forbidden | bg+c ......... hi
-        [ index 0 .. n_low-1 ]          [ n_low .. n-1 ]
+        lo ...... floor(f_lo) | forbidden: bare + shadowed face +- c | bg+c ...... hi
+        [ index 0 .. n_low-1 ]                                         [ n_low .. n-1 ]
 
-    With c = 0 the set is all of [lo, hi] and randint(0, n-1) + lo equals
-    randint(lo, hi) bit for bit (both are lo + randbelow(n)).  If the set is
-    empty, one randint(lo, hi) draw is still consumed and the endpoint of
-    [lo, hi] farthest from bg_gray is returned (the lower one on a tie).
+    With c = 0 the set is all of [lo, hi] (whatever s_max) and
+    randint(0, n-1) + lo equals randint(lo, hi) bit for bit (both are
+    lo + randbelow(n)).  With s_max = 0 this is the plain |g - bg| >= c rule.
+    If the set is empty, one randint(lo, hi) draw is still consumed and the
+    endpoint of [lo, hi] farthest from the forbidden interval is returned (the
+    lower one on a tie).
     """
-    low_hi = min(hi, bg_gray - min_contrast)  # int, top of the lower interval
+    f_lo, f_hi = pointer_forbidden_interval(bg_gray, min_contrast, s_max)  # float bounds
+    low_hi = min(hi, int(math.floor(f_lo + 1e-9)))  # int, top of the lower interval
     high_lo = max(lo, bg_gray + min_contrast)  # int, bottom of the upper interval
     if min_contrast <= 0:  # whole range allowed (c = 0 must not split at bg)
         low_hi, high_lo = hi, hi + 1
@@ -579,7 +588,9 @@ def _pick_pointer_gray(rng, lo, hi, bg_gray, min_contrast):
     n_high = max(0, hi - high_lo + 1)  # int, size of [high_lo, hi]
     if n_low + n_high == 0:
         rng.randint(lo, hi)  # keep the stream's draw count fixed
-        return hi if hi - bg_gray > bg_gray - lo else lo
+        # distance of each endpoint from the forbidden interval (float): hi above
+        # f_hi, lo below f_lo; c cancels, so compare hi - bg with bg (1 - s) - lo
+        return hi if hi - bg_gray > bg_gray * (1.0 - s_max) - lo else lo
     idx = rng.randint(0, n_low + n_high - 1)  # int, index into the allowed set
     return lo + idx if idx < n_low else high_lo + (idx - n_low)
 
@@ -1295,7 +1306,7 @@ def render_image(cfg, image_seed):
     # when the image has no shadow; nothing is composited onto img here, it
     # is applied once at step 13 as img * (1 - d)
     shade = None
-    m_p = m_r = None  # (C, C) float32 pointer / rim masks; shade is built after the pointer gray
+    m_p = m_r = None  # (C, C) float32 pointer / rim masks; shade is built at step 7
     if has_shadow:
         m_r = draw_rim_shadows(cx, cy, dial_radius, canvas_size, light_angle,
                                rim_offset, rim_cutout, rim_blur)  # (C, C) float32 rim mask
@@ -1323,21 +1334,22 @@ def render_image(cfg, image_seed):
     # --- 7 mounting hole + pointer (pointer stream) ---
     PT = cfg["pointer"]
     ptr_rng, ptr_np = rngs["pointer"]
+    # the faces the pointer may sit on: bare bg_gray and, with a shadow, the
+    # darkest shadowed face bg_gray (1 - max(s_p, s_r)); both drawn already
+    # (palette / shadows streams), so the pointer stream's order is unchanged
+    s_max = max(s_p, s_r) if has_shadow else 0.0  # float 0-1, strongest shadow
+    f_lo, f_hi = pointer_forbidden_interval(bg_gray, PT["min_bg_contrast"], s_max)  # float bounds
     ptr_gray = _pick_pointer_gray(ptr_rng, *PT["gray_range"], bg_gray,
-                                  PT["min_bg_contrast"])  # int body gray
+                                  PT["min_bg_contrast"], s_max)  # int body gray
     hole_gray = int(ptr_gray * ptr_rng.uniform(*PT["darker_frac_range"]))  # int
     edge_gray = int(ptr_gray * ptr_rng.uniform(*PT["darker_frac_range"]))  # int
     grad_strength = ptr_rng.uniform(*PT["gradient_range"])  # float
-    edge_thickness = ptr_rng.randint(*PT["edge_thickness_range"])  # int px
-    # cap the shadow strengths by the pointer rule (recorded; the draws are unchanged)
-    s_p_drawn, s_r_drawn = s_p, s_r  # float, strengths as drawn
-    d_max, s_p, s_r = cap_shadow_strengths(s_p, s_r, ptr_gray, bg_gray,
-                                           PT["min_bg_contrast"])  # float cap, effective strengths
-    rec["shadows"].update(s_p=s_p, s_r=s_r, d_max=d_max, s_p_drawn=s_p_drawn, s_r_drawn=s_r_drawn)
+    edge_thickness = ptr_rng.randint(*PT["edge_thickness_range"])  # int px (0 = no edge band)
     if has_shadow:
         shade = shadow_darkening(m_p, m_r, s_p, s_r)  # (C, C) float32
     rec["pointer"] = {"gray": ptr_gray, "hole_gray": hole_gray, "edge_gray": edge_gray,
-                      "gradient": grad_strength, "edge_thickness": edge_thickness}
+                      "gradient": grad_strength, "edge_thickness": edge_thickness,
+                      "forbidden_lo": f_lo, "forbidden_hi": f_hi}
 
     # hole drawn BEFORE the pre-pointer snapshot so it survives the cut-tip restore
     ImageDraw.Draw(img).ellipse([hole_cx - hole_r, hole_cy - hole_r,

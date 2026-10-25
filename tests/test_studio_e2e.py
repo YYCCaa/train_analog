@@ -919,22 +919,23 @@ def test_tile_save_bundles_image_and_params(page, tmp_path):
     assert params3["config"]["ticks"]["len_range"] == [6, 15]
 
 
-def test_min_bg_contrast_lightens_shadows(page, tmp_path):
-    # a person turns shadows fully on and makes the pointer dark
+def test_min_bg_contrast_avoids_shadowed_face(page, tmp_path):
+    # a person turns shadows on for every tile, then asks for a pointer/face
+    # contrast: the pointer gray is redrawn outside the bare AND shadowed face
     _commit_and_wait(page, _num(page, "shadows.prob"), "1")  # shadow on every tile
-    _commit_and_wait(page, _num(page, "shadows.strength_range", "hi"), "1")
-    _commit_and_wait(page, _num(page, "shadows.strength_range", "lo"), "1")
-    _commit_and_wait(page, _num(page, "pointer.gray_range", "hi"), "40")  # dark pointers only
-    before_src, before_mean = _tile_srcs(page), _tile_means(page)  # list[str] / list[float] (9)
-    # then asks for a high pointer/background contrast
-    _commit_and_wait(page, _num(page, "pointer.min_bg_contrast"), "100")
-    after_src, after_mean = _tile_srcs(page), _tile_means(page)  # list[str] / list[float] (9)
+    before_src = _tile_srcs(page)  # tile srcs with the contrast off, list[str] (9)
+    _commit_and_wait(page, _num(page, "pointer.min_bg_contrast"), "60")
+    after_src = _tile_srcs(page)  # tile srcs with the contrast on, list[str] (9)
     assert any(a != b for a, b in zip(before_src, after_src)), "no tile changed"
-    # shadows are lightened: the tiles get brighter on the whole, none darker
-    assert sum(after_mean) > sum(before_mean) + 5.0, (before_mean, after_mean)
-    assert all(a >= b - 0.5 for a, b in zip(after_mean, before_mean)), (before_mean, after_mean)
-    # the saved parameters of a tile show the cap
-    _, _, params, _ = _save_tile(page, 0, tmp_path / "save")  # dict, params.json
-    sh = params["sampled"]["shadows"]  # dict, shadow record
-    assert sh["s_p"] <= sh["d_max"] + 1e-3 and sh["s_r"] <= sh["d_max"] + 1e-3, sh
-    assert sh["s_p_drawn"] > sh["d_max"], sh
+    # the saved parameters of each of three tiles show the gray outside the interval
+    for i in range(3):
+        _, _, params, _ = _save_tile(page, i, tmp_path / f"save{i}")  # dict, params.json
+        pt, sh = params["sampled"]["pointer"], params["sampled"]["shadows"]  # dicts
+        bg = params["sampled"]["palette"]["bg_gray"]  # int, bare face gray
+        assert sh["active"] is True and "d_max" not in sh, sh
+        # darkest shadowed face - c; s_p / s_r are recorded to 4 decimals, so
+        # the recomputed bound is good to bg * 5e-5 < 0.02 levels
+        f_lo = bg * (1 - max(sh["s_p"], sh["s_r"])) - 60  # float
+        assert abs(pt["forbidden_lo"] - f_lo) < 0.02, (pt, sh)
+        assert pt["forbidden_hi"] == bg + 60, (pt, bg)
+        assert pt["gray"] <= pt["forbidden_lo"] or pt["gray"] >= pt["forbidden_hi"], pt
