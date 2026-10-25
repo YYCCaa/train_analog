@@ -569,15 +569,25 @@ def _ideal(res):
     return d["ideal_apex_x"], d["ideal_apex_y"]
 
 
+def _axis(res):
+    """Label axis recorded with a render (the drawn triangle's height, base-chord
+    midpoint -> apex, stretched, image px) -> ((ax, ay) apex floats, (ux, uy)
+    unit direction floats)."""
+    d = res.params["derived"]
+    ax, ay = d["axis_apex_x"], d["axis_apex_y"]  # floats, drawn apex
+    vx, vy = ax - d["axis_base_mid_x"], ay - d["axis_base_mid_y"]  # floats, base mid -> apex
+    n = math.hypot(vx, vy)
+    return (ax, ay), (vx / n, vy / n)
+
+
 def test_tip_label_is_visible_tip():
     for seed in range(6):
         a, b = _cut_pair(seed, **_NO_STRETCH)
         assert a.angle_deg == b.angle_deg
         assert _ideal(a) == _ideal(b)  # the cut does not move the triangle
-        ux, uy = _unit_dir(a.angle_deg)  # unit pointer direction (floats)
         for res in (a, b):
-            ix, iy = _ideal(res)  # ideal apex (floats)
-            dx, dy = res.tip_x - ix, res.tip_y - iy  # float px, label - ideal apex
+            (ix, iy), (ux, uy) = _axis(res)  # drawn apex, unit axis (floats)
+            dx, dy = res.tip_x - ix, res.tip_y - iy  # float px, label - drawn apex
             # the label sits ON the pointer axis, behind the ideal apex (along -u)
             # (params are rounded to 4 decimals, hence the 1e-3 tolerances)
             assert abs(-dx * uy + dy * ux) < 1e-3, (seed, dx, dy)
@@ -595,13 +605,12 @@ def test_tip_label_stretched():
     stretch = {"geometry.stretch_h_range": [sh, sh], "geometry.stretch_v_range": [sv, sv]}
     for seed in range(4):
         a, b = _cut_pair(seed, **stretch)
-        ux, uy = _unit_dir(a.angle_deg)  # unit pointer direction (floats)
         for res in (a, b):
-            ix, iy = _ideal(res)  # ideal apex, stretched (floats)
-            dx, dy = res.tip_x - ix, res.tip_y - iy  # float px, label - ideal apex
-            # on the stretched axis (direction (ux*sh, uy*sv)), behind the apex
-            assert abs(-dx * uy * sv + dy * ux * sh) < 1e-3, seed
-            assert dx * ux * sh + dy * uy * sv <= 1e-3, seed
+            (ix, iy), (ux, uy) = _axis(res)  # drawn apex, unit stretched axis (floats)
+            dx, dy = res.tip_x - ix, res.tip_y - iy  # float px, label - drawn apex
+            # on the stretched axis, behind the apex
+            assert abs(-dx * uy + dy * ux) < 1e-3, seed
+            assert dx * ux + dy * uy <= 1e-3, seed
             # tip_recession is that offset measured before the stretch
             rec = math.hypot(dx / sh, dy / sv)  # float px
             assert abs(rec - res.params["derived"]["tip_recession"]) < 1e-3, seed
@@ -1047,13 +1056,14 @@ def _tip_overshoot(res):
 
 @pytest.mark.parametrize("case", list(_CUT_CASES))
 def test_tip_label_on_visible_end(case):
-    # blur off and no observer floor (tip_label.base_blur 0): sigma_eff = 0, w* = 0,
-    # so the label is the raw visible end; the default floor (sigma_0 = 1) only
-    # ever moves it back from there (width-based label, w* ~ 1.35 px)
+    # blur off, no observer floor (tip_label.base_blur 0) and no patch rule
+    # (min_ratio 0): sigma_eff = 0, so the contrast map is the visible weight
+    # itself and the label is the raw visible end; the default floor (sigma_0 = 1)
+    # and patch rule only ever move it back from there
     enabled, rr = _CUT_CASES[case]
     pins = {**_CLEAN_TIP, "cut_tip.enabled": enabled, "cut_tip.radius_range": rr}  # dict
-    cfg = _cfg(**pins, **{"tip_label.base_blur": 0.0})
-    cfg_floor = _cfg(**pins)  # default base_blur 1.0
+    cfg = _cfg(**pins, **{"tip_label.base_blur": 0.0, "tip_label.min_ratio": 0.0})
+    cfg_floor = _cfg(**pins)  # default base_blur 1.0, default patch rule
     over = []  # list[float] px, label overshoot per seed
     for seed in range(60):
         res = g7.render_image(cfg, seed)
@@ -1108,7 +1118,7 @@ def test_visible_tip_square_on_axis():
     assert tx == 15.0 and abs(ty - 13.0) < 0.05 + 1e-9
 
 
-# ── width-based tip label (blur aware) ────────────────────────────────────
+# ── tip label = per-pixel blurred contrast + patch support (blur aware) ───
 
 def _aa_wedge(apex, half_deg, size=96, ss=8):
     """Area-coverage wedge (size, size) float32 in [0, 1] opening left (-x) from
@@ -1123,33 +1133,94 @@ def _aa_wedge(apex, half_deg, size=96, ss=8):
     return inside.mean(axis=(2, 3)).astype(np.float32)
 
 
-@pytest.mark.parametrize("half_deg", [4.0, 6.0, 10.0])
-@pytest.mark.parametrize("sigma", [0.5, 1.0, 2.0, 3.0])
-def test_width_tip_wedge_closed_form(half_deg, sigma):
-    apex = (80.3, 48.0)  # (x, y) float px, clean wedge apex; the wedge points to +x
-    vis = _aa_wedge(apex, half_deg)  # (96, 96) float32
-    w_star = g7.tip_width_threshold(0.5, sigma)  # float px
-    assert abs(w_star - 2 * math.sqrt(2) * 0.4769362762044699 * sigma) < 1e-9
-    hit = g7._width_tip(vis, apex, (1.0, 0.0), 75.0, 20.0, w_star)
-    assert hit is not None
-    (tx, ty), t, w = hit  # label (x, y), recession t, width at the label (floats)
-    want = w_star / (2 * math.tan(math.radians(half_deg)))  # float px, closed form
-    assert abs(t - want) <= 0.5, (half_deg, sigma, t, want)
-    assert ty == apex[1] and abs(tx - (apex[0] - t)) < 1e-9
-    assert w >= w_star and abs(w - w_star) < 0.2, (w, w_star)
+def _scan(vis, origin, u, t_max, sigma, c, patch, min_ratio):
+    """Label of the patch rule on vis from origin along -u -> (((x, y), t), field):
+    hit ((x, y) float px, t float px) or None, and the _TipField it used."""
+    field = g7._TipField(vis, origin, u, t_max, sigma, c, patch)  # contrast + support maps
+    return g7._patch_tip(field, origin, u, t_max, c, min_ratio), field
 
 
-def test_width_tip_none_and_cover():
+@pytest.mark.parametrize("sigma", [0.0, 0.5])
+def test_patch_tip_rejects_slender_tail(sigma):
+    # a wide wedge (half-angle 22 deg, the default pointer) pointing +x with a
+    # 1-px-wide, 6-px-long tail glued to its apex: the tail is sharp enough to
+    # pass the per-pixel contrast test (sigma <= 0.5), but it fills only a sliver
+    # of the 9 x 9 patch, so the patch rule puts the label back on the wedge
+    apex = (60.0, 48.0)  # (x, y) float px, wedge apex
+    vis = _aa_wedge(apex, 22.0)  # (96, 96) float32
+    vis[48, 60:67] = 1.0  # tail pixels x = 60..66 (6 px beyond the apex), row 48
+    origin, u = (75.0, 48.0), (1.0, 0.0)  # search start ahead of the tail, axis +x
+    contrast_only, _ = _scan(vis, origin, u, 60.0, sigma, 0.5, 9, 0.0)
+    (tx, ty), _t = contrast_only  # label with min_ratio 0 (floats)
+    assert ty == 48.0 and 64.0 <= tx <= 66.55, tx  # at the tail end
+    (px, py), _t2 = _scan(vis, origin, u, 60.0, sigma, 0.5, 9, 0.2)[0]  # patch rule (floats)
+    assert py == 48.0 and 54.0 <= px <= apex[0] + 0.5, px  # on the wedge, not the tail
+
+
+def test_patch_tip_bar_end_half_max():
+    # a long, wide bar (31 px) pointing up (-y) with an abrupt end; its pixels
+    # cover y >= 19.5, so the 2-D half-max of the sigma = 2 blur sits at 19.5
+    vis = np.zeros((96, 96), dtype=np.float32)  # (96, 96) float32
+    vis[20:90, 30:61] = 1.0
+    origin, u = (45.0, 5.0), (0.0, -1.0)  # (x, y) search start, axis -y
+    for ratio in (0.0, 0.2):
+        (tx, ty), _t = _scan(vis, origin, u, 60.0, 2.0, 0.5, 9, ratio)[0]  # floats
+        assert tx == 45.0 and abs(ty - 19.5) <= 0.5, (ratio, ty)
+    hit, field = _scan(vis, origin, u, 60.0, 2.0, 0.5, 9, 0.2)
+    # a blunt end fills about half the patch
+    assert 0.4 <= field.ratio(*hit[0]) <= 0.6, field.ratio(*hit[0])
+
+
+@pytest.mark.parametrize("w", [1, 2, 4, 8])
+@pytest.mark.parametrize("sigma", [0.0, 1.0, 2.0, 3.0])
+def test_contrast_map_is_erf_of_width(w, sigma):
+    # the 2-D map generalises the width rule: a long bar of width w keeps
+    # erf(w / (2 sqrt 2 sigma)) of its contrast at the centre line; on a pixel
+    # centre x it keeps Phi((e - x) / sigma) - Phi((s - x) / sigma), the bar
+    # covering [s, e] = [x_lo - 0.5, x_lo + w - 0.5]
+    vis = np.zeros((128, 128), dtype=np.float32)  # (128, 128) float32
+    x_lo = 64 - w // 2  # int px, first bar column
+    vis[:, x_lo:x_lo + w] = 1.0
+    xc = x_lo + (w - 1) // 2  # int px, pixel column at (or next to) the centre line
+    field = g7._TipField(vis, (xc, 20.0), (0.0, -1.0), 80.0, sigma, 0.5, 9)
+    got = float(field.contrast(xc, 64.0))  # float, Cmap on that column
+    if sigma == 0:
+        want = 1.0  # float, no blur: Cmap = the weight
+    else:
+        phi = lambda z: 0.5 * (1 + math.erf(z / math.sqrt(2)))  # standard normal CDF
+        want = phi((x_lo + w - 0.5 - xc) / sigma) - phi((x_lo - 0.5 - xc) / sigma)
+        if w % 2:  # odd w: that column is the centre line, the width rule exactly
+            assert abs(want - math.erf(w / (2 * math.sqrt(2) * sigma))) < 1e-12
+    assert abs(got - want) < 0.02, (w, sigma, got, want)
+
+
+def test_patch_tip_none_and_canvas_border():
     vis = np.zeros((32, 32), dtype=np.float32)  # (32, 32) nothing visible
-    assert g7._width_tip(vis, (16.0, 16.0), (0.0, -1.0), 20.0, 8.0, 1.0) is None
-    vis[10:20, 14:19] = 1.0  # 5-px wide bar, top row y = 10
-    hit = g7._width_tip(vis, (16.0, 5.0), (0.0, -1.0), 20.0, 8.0, 4.0)
-    # bilinear: the width ramps 0 -> 5 between y = 9 and y = 10, reaching 4 at y = 9.8
-    assert hit is not None and abs(hit[1] - 4.8) <= 0.06, hit
-    cov = np.ones((32, 32), dtype=bool)  # everything covered
-    assert g7._width_tip(vis, (16.0, 5.0), (0.0, -1.0), 20.0, 8.0, 4.0, cover=cov) is None
-    # a bar thinner than w* never qualifies
-    assert g7._width_tip(vis, (16.0, 5.0), (0.0, -1.0), 20.0, 8.0, 6.0) is None
+    assert _scan(vis, (16.0, 16.0), (0.0, -1.0), 20.0, 1.0, 0.5, 9, 0.2)[0] is None
+    # pixels outside the canvas never meet the criterion: the 9 x 9 patch on
+    # the corner pixel of an all-visible canvas holds 5 x 5 canvas pixels
+    full = np.ones((32, 32), dtype=np.float32)  # (32, 32) all visible
+    field = g7._TipField(full, (0.0, 0.0), (-1.0, 0.0), 0.0, 0.0, 0.5, 9)
+    assert abs(field.ratio(0.0, 0.0) - 25 / 81) < 1e-9
+    assert abs(field.ratio(0.4, -0.4) - 25 / 81) < 1e-9  # nearest pixel (0, 0)
+
+
+def test_patch_support_never_grows_with_patch_size():
+    # the rule's support is the smallest ratio over the odd squares 3..P, so a
+    # larger patch (same ratio) can only reject more: a wedge apex fills a
+    # growing square ever better, yet the rule's support must not grow
+    apex = (60.0, 48.0)  # (x, y) float px
+    vis = _aa_wedge(apex, 22.0)  # (96, 96) float32
+    xs = np.arange(40.0, 61.0, 0.5)  # (41,) float64 axis points behind the apex
+    ys = np.full_like(xs, 48.0)  # (41,) float64
+    prev = None  # (41,) float64, rule support at the previous patch size
+    for p in (3, 5, 9, 15, 21, 31):
+        f = g7._TipField(vis, (70.0, 48.0), (1.0, 0.0), 40.0, 1.0, 0.5, p)
+        s = f.rule_support(xs, ys)  # (41,) float64
+        assert np.all(s <= f.ratio(xs, ys) + 1e-12)  # never above the plain P x P ratio
+        if prev is not None:
+            assert np.all(s <= prev + 1e-12), p
+        prev = s
 
 
 def test_tip_threshold_math():
@@ -1158,8 +1229,6 @@ def test_tip_threshold_math():
         assert abs(g7._erfinv(c) - float(erfinv(c))) < 1e-10, c
     assert g7.tip_width_threshold(0.5, 0.0) == 0.0
     assert abs(g7.tip_width_threshold(0.5, 1.0) - 1.3490) < 1e-3
-
-
 def _slender(res):
     """Pointer wedge half-angle (float deg) recorded with a render."""
     g = res.params["geometry"]
@@ -1171,6 +1240,9 @@ def _slender(res):
 _SLENDER = {"geometry.hub_ratio_range": [0.2, 0.2], "geometry.chord_ratio_range": [0.5, 0.5]}
 
 
+_TIP_RULES = ("patch", "contrast", "clamped", "visible_end", "fallback")  # tuple[str], tip_rule values
+
+
 @pytest.mark.parametrize("pins", [{}, _SLENDER], ids=["default", "slender"])
 def test_tip_label_recedes_with_blur(pins):
     radii = (1, 3, 6)  # int px, dial blur radii in increasing order
@@ -1179,19 +1251,64 @@ def test_tip_label_recedes_with_blur(pins):
         for r in radii:
             res = g7.render_image(_cfg(**{**pins, "background.dial_circle_blur": True,
                                           "background.dial_circle_blur_radius": r}), seed)
-            d = res.params["derived"]
+            d, ct = res.params["derived"], res.params["cut_tip"]  # dicts
             assert abs(d["sigma_eff"] - math.hypot(r, 1.0)) < 1e-3
-            assert d["w_star"] == res.params["cut_tip"]["w_star"]
-            assert d["tip_width"] == res.params["cut_tip"]["tip_width"]
-            assert d["tip_width"] >= d["w_star"]
+            for key in ("sigma_eff", "w_star", "tip_recession", "contrast_at_tip",
+                        "patch_ratio_at_tip", "tip_rule"):
+                assert d[key] == ct[key], key
+            assert "tip_width" not in d and "tip_width" not in ct
+            assert d["tip_rule"] in _TIP_RULES, d["tip_rule"]
+            if d["tip_rule"] in ("patch", "contrast"):
+                assert d["contrast_at_tip"] >= 0.5 - 1e-3, d
+            if d["tip_rule"] == "patch":
+                assert d["patch_ratio_at_tip"] >= 0.2 - 1e-3, d
             recs.append(d["tip_recession"])
         # blurrier never moves the label forward along the axis
-        assert recs[0] <= recs[1] + 1e-6 and recs[1] <= recs[2] + 1e-6, (seed, recs)
-        if pins:  # a slender pointer moves strictly back, by ~ dw* / (2 tan a)
+        assert recs[0] <= recs[1] + 1e-4 and recs[1] <= recs[2] + 1e-4, (seed, recs)
+        if pins:  # a slender pointer moves strictly back with the blur
             assert _slender(res) < 7.0, _slender(res)
             assert recs[0] < recs[1] < recs[2], (seed, recs)
-            assert recs[2] - recs[0] > 15.0, (seed, recs)
+            assert recs[2] - recs[0] > 10.0, (seed, recs)
 
+
+# knob ("section.key", str) -> increasing values (list): raising any of them
+# must never move the label forward along the pointer axis
+_MONO_KNOBS = {
+    "background.dial_circle_blur_radius": [0, 1, 2, 3, 4, 6],
+    "tip_label.base_blur": [0.0, 0.5, 1.0, 2.0, 4.0],
+    "tip_label.contrast_frac": [0.2, 0.35, 0.5, 0.65, 0.8],
+    "tip_label.patch_size": [3, 5, 9, 15, 21, 31],
+    "tip_label.min_ratio": [0.0, 0.1, 0.2, 0.4, 0.6, 0.9],
+}
+
+
+@pytest.mark.parametrize("knob", list(_MONO_KNOBS))
+@pytest.mark.parametrize("pins", [{}, _SLENDER], ids=["default", "slender"])
+def test_tip_label_monotonic(knob, pins):
+    base = {**pins, "background.dial_circle_blur": True}  # dict, blur on (radius 3)
+    for seed in range(10):
+        recs = [g7.render_image(_cfg(**{**base, knob: v}), seed).params["derived"]["tip_recession"]
+                for v in _MONO_KNOBS[knob]]  # list[float] px, label recession per value
+        for a, b in zip(recs, recs[1:]):
+            assert b >= a - 1e-4, (knob, seed, recs)
+
+
+@pytest.mark.parametrize("radius", [0, 2, 4])
+def test_patch_rule_keeps_wide_end(radius):
+    # the default (wide, blunt-ended) pointer: the patch rule keeps the label
+    # within ~1 px of the contrast-only rule (min_ratio 0)
+    blur = {"background.dial_circle_blur": radius > 0,
+            "background.dial_circle_blur_radius": max(radius, 1)}  # dict
+    shifts = []  # list[float] px, patch-rule recession - contrast-only recession
+    for seed in range(40):
+        a = g7.render_image(_cfg(**blur, **{"tip_label.min_ratio": 0.0}), seed)
+        b = g7.render_image(_cfg(**blur), seed)
+        shifts.append(b.params["derived"]["tip_recession"] - a.params["derived"]["tip_recession"])
+    shifts = np.array(shifts)  # (40,) float64
+    print("radius %d shift: min %.2f mean %.2f p95 %.2f max %.2f"
+          % (radius, shifts.min(), shifts.mean(), np.percentile(shifts, 95), shifts.max()))
+    assert shifts.min() >= -1e-4
+    assert np.percentile(shifts, 95) <= 1.0, shifts
 
 def _bilinear(img, x, y):
     """Bilinear gray of img (H, W) at float arrays x, y (same shape) -> float64 array."""
@@ -1223,22 +1340,34 @@ def _axis_contrast(res, ahead):
     return (bg - float(prof[np.abs(s) <= 3].min())) / (bg - res.params["pointer"]["gray"])
 
 
-# contrast tolerances (float) picked from the measured distributions, see
-# test_tip_label_visible_after_blur: at the label >= c - _AT_LABEL_TOL, and
-# 3 sigma_eff beyond it < c + _AHEAD_TOL
-# (40 seeds x radius 2 / 4, measured): slender at-label min 0.42 mean 0.48-0.50,
-# 3 sigma ahead max 0.40.  The default (wide, a ~ 22 deg) pointer is cut off
-# abruptly, wider than w*, so the label sits on the cut arc and the blurred
-# contrast there is the half-max of a sharp end, ~ 0.5 x erf(w / 2 sqrt(2)
-# sigma): min 0.35 mean 0.38-0.43, ahead max 0.03; it gets the wider tolerance
-_AT_LABEL_TOL = {"slender": 0.12, "default": 0.17}  # case -> float
+def _patch_share(res, patch, frac, bg):
+    """Share (float) of the patch x patch square centred on the label's nearest
+    pixel whose measured contrast fraction (bg - gray) / (bg - pointer gray) in
+    the final image is >= frac; pixels outside the image count as failing."""
+    ix, iy = int(math.floor(res.tip_x + 0.5)), int(math.floor(res.tip_y + 0.5))  # int px
+    h = patch // 2  # int px, half side
+    win = np.zeros((patch, patch), dtype=np.float64)  # (P, P) float64, 0 = fails
+    sub = res.image[max(iy - h, 0):iy + h + 1, max(ix - h, 0):ix + h + 1]  # in-image part
+    oy, ox = max(h - iy, 0), max(h - ix, 0)  # int, where it lands in the window
+    win[oy:oy + sub.shape[0], ox:ox + sub.shape[1]] = (
+        (bg - sub.astype(np.float64)) / (bg - res.params["pointer"]["gray"]) >= frac)
+    return float(win.mean())
+
+
+# contrast tolerances (float), see test_tip_label_visible_after_blur: the
+# perpendicular profile at the label keeps >= c - _AT_LABEL_TOL, 3 sigma_eff
+# beyond it < c + _AHEAD_TOL, and >= min_ratio - _PATCH_TOL of the label's
+# patch measures >= c - 0.1 in the final image
+_AT_LABEL_TOL = 0.12
 _AHEAD_TOL = 0.10
+_PATCH_TOL = 0.05
 
 
 @pytest.mark.parametrize("case", ["slender", "default"])
 def test_tip_label_visible_after_blur(case):
-    c = 0.5  # float, default tip_label.contrast_frac
-    at, ahead = [], []  # list[float], contrast at / 3 sigma_eff beyond the label
+    tl = v7_config.default_config()["tip_label"]  # dict, default tip_label section
+    c, ratio, patch = tl["contrast_frac"], tl["min_ratio"], tl["patch_size"]  # float, float, int
+    at, ahead, share = [], [], []  # list[float], contrast at / ahead of the label, patch share
     pins = _SLENDER if case == "slender" else {}  # dict, geometry pins
     for radius in (2, 4):
         cfg = _cfg(**{**_CLEAN_TIP, **pins, "background.dial_circle_blur": True,
@@ -1248,10 +1377,116 @@ def test_tip_label_visible_after_blur(case):
             res = g7.render_image(cfg, seed)
             se = res.params["derived"]["sigma_eff"]  # float px
             a, b = _axis_contrast(res, 0.0), _axis_contrast(res, 3 * se)
+            s = _patch_share(res, patch, c - 0.1, 200.0)  # bg pinned to 200
             at.append(a)
             ahead.append(b)
-            assert a >= c - _AT_LABEL_TOL[case], (radius, seed, a)
+            share.append(s)
+            assert a >= c - _AT_LABEL_TOL, (radius, seed, a)
             assert b < c + _AHEAD_TOL, (radius, seed, b)
-    print("contrast at label: min %.3f mean %.3f max %.3f" % (min(at), np.mean(at), max(at)))
-    print("contrast 3 sigma ahead: min %.3f mean %.3f max %.3f"
-          % (min(ahead), np.mean(ahead), max(ahead)))
+            assert s >= ratio - _PATCH_TOL, (radius, seed, s)
+    print("%s contrast at label: min %.3f mean %.3f max %.3f"
+          % (case, min(at), np.mean(at), max(at)))
+    print("%s contrast 3 sigma ahead: min %.3f mean %.3f max %.3f"
+          % (case, min(ahead), np.mean(ahead), max(ahead)))
+    print("%s patch share: min %.3f mean %.3f max %.3f"
+          % (case, min(share), np.mean(share), max(share)))
+
+
+# ── the label sits on the principal axis (after stretch, displacements, offset) ──
+
+# "section.key" -> value pins (dict): the schema maxima of every transform that
+# moves or skews the pointer (stretch, dial / pointer displacement)
+_AXIS_EXTREMES = {"geometry.stretch_h_range": [0.8, 1.1], "geometry.stretch_v_range": [0.8, 1.1],
+                  "geometry.displacement_range": [-10.0, 10.0],
+                  "geometry.ptr_displacement_range": [-6.0, 6.0],
+                  "dataset.angle_deg_range": [0, 359]}
+
+
+def _line_dist(px, py, ax, ay, bx, by):
+    """Perpendicular distance (float px) of (px, py) from the line through a and b."""
+    dx, dy = bx - ax, by - ay  # float, line direction
+    return abs((px - ax) * dy - (py - ay) * dx) / math.hypot(dx, dy)
+
+
+def test_tip_on_principal_axis_geometry():
+    cfg = _cfg(**_AXIS_EXTREMES)
+    dist = []  # list[float] px, label distance from the hub -> apex line
+    for seed in range(200):
+        res = g7.render_image(cfg, seed)
+        d = res.params["derived"]  # dict
+        dist.append(_line_dist(res.tip_x, res.tip_y, d["axis_base_mid_x"], d["axis_base_mid_y"],
+                               d["axis_apex_x"], d["axis_apex_y"]))
+    dist = np.array(dist)  # (200,) float64
+    print("axis (geometry) dist: mean %.4f p95 %.4f max %.4f"
+          % (dist.mean(), np.percentile(dist, 95), dist.max()))
+    assert dist.max() < 0.05, dist.max()
+
+
+def _stretched_centres(res):
+    """Pointer (hub) centre and mounting-hole centre of a render, stretched, image
+    px, from its recorded geometry -> ((px, py), (hx, hy)) floats."""
+    g, d = res.params["geometry"], res.params["derived"]  # dicts
+    c = g["canvas_size"] // 2  # int px, canvas centre
+
+    def img_pt(x, y):
+        """Canvas point (x, y) -> stretched image px (stretch about c - 0.5)."""
+        return (c - 0.5 + (x - c + 0.5) * g["stretch_h"] + d["canvas_offset_x"],
+                c - 0.5 + (y - c + 0.5) * g["stretch_v"] + d["canvas_offset_y"])
+    pcx = c + g["ptr_displacement_mag"] * math.cos(g["ptr_displacement_angle_rad"])  # float
+    pcy = c + g["ptr_displacement_mag"] * math.sin(g["ptr_displacement_angle_rad"])
+    hcx = pcx + g["hole_displacement_mag"] * math.cos(g["hole_displacement_angle_rad"])
+    hcy = pcy + g["hole_displacement_mag"] * math.sin(g["hole_displacement_angle_rad"])
+    return img_pt(pcx, pcy), img_pt(hcx, hcy)
+
+
+# geometry case (str) -> ("section.key" -> value pins dict, p95 bound float px
+# or None).  PCA of the triangle pixels pins the height of the long, slender
+# triangle well, so there the label must be within 0.6 px.  The default
+# pointer's triangle left after the hub disc is short and fat (length ~ 1.2 x
+# width), so its principal direction swings with a 1-px raster asymmetry and
+# the fitted line misses even the drawn apex by ~1.3 px p95; there (None) the
+# label must merely be no farther from it than the drawn apex is, + 0.1 px p95
+_PCA_CASES = {
+    "slender": ({**_SLENDER, "geometry.stretch_h_range": [0.8, 1.1],
+                 "geometry.stretch_v_range": [0.8, 1.1]}, 0.6),
+    "default": ({}, None),
+}
+
+
+@pytest.mark.parametrize("case", list(_PCA_CASES))
+def test_tip_on_principal_axis_pixels(case):
+    # a person fits the triangle's height to the dark TRIANGLE pixels of a clean
+    # render (PCA; the hub disc and the mounting hole are left out) and checks
+    # the label lies on it
+    pins, bound = _PCA_CASES[case]  # dict, float px or None
+    cfg = _cfg(**{**_CLEAN_TIP, "cut_tip.enabled": False,
+                  "palette.outer_gray_range": [220, 220], "palette.rim_gray_range": [220, 220],
+                  **pins})
+    ys, xs = np.mgrid[:IMG, :IMG]  # (256, 256) int pixel grids
+    dist, d_apex = [], []  # list[float] px, label / drawn apex distance from the fitted axis
+    for seed in range(100):
+        res = g7.render_image(cfg, seed)
+        d, g = res.params["derived"], res.params["geometry"]  # dicts
+        smax = max(g["stretch_h"], g["stretch_v"])  # float, largest stretch
+        (pcx, pcy), (hcx, hcy) = _stretched_centres(res)  # floats, hub / hole centres
+        inside = (((xs - IMG / 2) / d["outer_rx"]) ** 2
+                  + ((ys - IMG / 2) / d["outer_ry"]) ** 2) < 0.95  # (256, 256) bool, inside B
+        sel = ((res.image < 100) & inside
+               & (np.hypot(xs - pcx, ys - pcy) > g["hub_radius"] * 1.2 * smax)
+               & (np.hypot(xs - hcx, ys - hcy) > g["hole_radius"] * smax + 1.5))  # (256, 256) bool
+        pts = np.stack([xs[sel], ys[sel]], axis=1).astype(np.float64)  # (N, 2) float64
+        mean = pts.mean(axis=0)  # (2,) float64 centroid
+        evals, evecs = np.linalg.eigh(np.cov((pts - mean).T))  # (2,), (2, 2) float64
+        ax_dir = evecs[:, np.argmax(evals)]  # (2,) float64 principal direction
+        dist.append(_line_dist(res.tip_x, res.tip_y, mean[0], mean[1],
+                               mean[0] + ax_dir[0], mean[1] + ax_dir[1]))
+        d_apex.append(_line_dist(d["axis_apex_x"], d["axis_apex_y"], mean[0], mean[1],
+                                 mean[0] + ax_dir[0], mean[1] + ax_dir[1]))
+    dist, d_apex = np.array(dist), np.array(d_apex)  # (100,) float64 each
+    print("%s axis (pixels) dist: mean %.3f p50 %.3f p95 %.3f max %.3f; drawn apex p95 %.3f"
+          % (case, dist.mean(), np.median(dist), np.percentile(dist, 95), dist.max(),
+             np.percentile(d_apex, 95)))
+    if bound is None:
+        assert np.percentile(dist, 95) <= np.percentile(d_apex, 95) + 0.1, (dist, d_apex)
+    else:
+        assert np.percentile(dist, 95) < bound, dist
