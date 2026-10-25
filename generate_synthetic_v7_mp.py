@@ -1082,10 +1082,16 @@ def tip_count_label(pix, apex, base_left, base_right, n):
         A' ●   P(t) = A' + t h,  h = (M' - A') / |M' - A'|,  M' = (B_l' + B_r') / 2
           ╱ ╲
      ── ●─●─● ── L(t): the line through P(t) parallel to B_l' B_r'
-        ╱     ╲   count(t) = # pointer pixels p with -0.5 < d(p) - t k <= 0.5,
-    B_l' ●──M'──● B_r'   d(p) = (p - A') . nb, nb the unit base normal (toward
-                         the base), k = h . nb: a 1-px band, each axis-aligned
-                         pixel row counted once (rows at t in [row - 0.5, row + 0.5))
+        ╱     ╲   count(t) = # pointer pixels whose unit SQUARE L(t) passes
+    B_l' ●──M'──● B_r'   through: -r <= d(p) - t k < r, d(p) = (p - A') . nb,
+                         nb the unit base normal (toward the base), k = h . nb,
+                         r = (|nb_x| + |nb_y|) / 2 = half the square's extent
+                         along nb (0.5 for an axis-aligned base, up to 0.707)
+
+        tilted L(t):  ┌──┬──┐        a fixed 1-px band (r = 0.5) skips pixels
+                      │ ╱│  │        a tilted line clearly crosses (count 0
+                      │╱ │  │        inside a continuous 1-px sliver); r makes
+                     ╱┼──┤  │        the count = pixels the line touches
 
     t* = the smallest t on the TIP_T_STEP grid in [0, |M' - A'|] with
     count(t) > n; fallback (no such t): M'.  Vectorised: each pixel projects
@@ -1113,13 +1119,14 @@ def tip_count_label(pix, apex, base_left, base_right, n):
     if k < 0:
         nbx, nby, k = -nbx, -nby, -k  # orient nb toward the base
     k = max(k, 1e-6)
+    r = (abs(nbx) + abs(nby)) / 2.0  # float px, pixel square's half extent along nb
     n_grid = int(math.floor(h_len / TIP_T_STEP + 1e-9))  # int, last grid index
     ys, xs = np.nonzero(pix)  # (N,) int64 pointer pixel coords
     d = (xs - ax) * nbx + (ys - ay) * nby  # (N,) float64 signed distance from A' along nb
-    # pixel counted at grid t_i = i * step iff d - 0.5 <= t_i k < d + 0.5, i.e.
-    # i in [ceil((d - 0.5) / (k step)), ceil((d + 0.5) / (k step)) - 1]
-    i_lo = np.ceil(np.round((d - 0.5) / (k * TIP_T_STEP), 6)).astype(np.int64)  # (N,) int64
-    i_hi = np.ceil(np.round((d + 0.5) / (k * TIP_T_STEP), 6)).astype(np.int64) - 1  # (N,) int64
+    # pixel counted at grid t_i = i * step iff d - r <= t_i k < d + r, i.e.
+    # i in [ceil((d - r) / (k step)), ceil((d + r) / (k step)) - 1]
+    i_lo = np.ceil(np.round((d - r) / (k * TIP_T_STEP), 6)).astype(np.int64)  # (N,) int64
+    i_hi = np.ceil(np.round((d + r) / (k * TIP_T_STEP), 6)).astype(np.int64) - 1  # (N,) int64
     i_lo = np.maximum(i_lo, 0)
     i_hi = np.minimum(i_hi, n_grid)
     ok = i_lo <= i_hi  # (N,) bool, pixel's band meets the scan

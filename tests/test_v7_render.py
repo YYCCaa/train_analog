@@ -1367,8 +1367,11 @@ def test_tip_count_label_closed_form(tan_a):
 
 
 def _brute_count(pix, apex, base_left, base_right, t):
-    """count(t) of tip_count_label by direct evaluation (int): pointer pixels with
-    -0.5 < d - t k <= 0.5, d along the unit base normal toward the base."""
+    """count(t) of tip_count_label by direct evaluation (int): pointer pixels whose
+    unit square the base-parallel line L(t) passes through, judged from the
+    square's 4 corners (signed distances to L(t) along the unit base normal:
+    not all on one side; the half-open tie rule -r < d - t k <= r of the
+    generator only matters on exact corner touches, which random floats avoid)."""
     mx, my = (base_left[0] + base_right[0]) / 2, (base_left[1] + base_right[1]) / 2
     hl = math.hypot(mx - apex[0], my - apex[1])
     hx, hy = (mx - apex[0]) / hl, (my - apex[1]) / hl  # unit height (floats)
@@ -1379,8 +1382,35 @@ def _brute_count(pix, apex, base_left, base_right, t):
         nx, ny = -nx, -ny
     k = hx * nx + hy * ny  # float
     ys, xs = np.nonzero(pix)
-    d = (xs - apex[0]) * nx + (ys - apex[1]) * ny - t * k  # (N,) float64
-    return int(((d > -0.5) & (d <= 0.5)).sum())
+    d = (xs - apex[0]) * nx + (ys - apex[1]) * ny - t * k  # (N,) float64, centre distance
+    # (4, N) float64 corner distances: centre +- 0.5 px in x and y
+    corners = np.stack([d + sx * 0.5 * nx + sy * 0.5 * ny for sx in (-1, 1) for sy in (-1, 1)])
+    return int(((corners.min(axis=0) < 0) & (corners.max(axis=0) > 0)).sum())
+
+
+def test_tip_count_no_dropout_on_tilted_sliver():
+    # user sample inspect_tip_location/v7_seed593719257: the pointer points
+    # right, its base-parallel lines tilt ~9 deg off vertical, and the tip is a
+    # continuous 1-px sliver; a fixed 1-px band (|d| <= 0.5) skipped it at some
+    # t (count 0 inside the pointer).  Counting the squares the line passes
+    # through must see >= 1 pixel at every t along the sliver.
+    for tilt_deg in (5.0, 9.0, 20.0, 35.0, 45.0):
+        th = math.radians(tilt_deg)  # float rad, base tilt off vertical
+        ax, ay = 10.0, 30.2  # float px, apex
+        # height points +x; base direction tilted th off vertical
+        bl_, br_ = (60.0 - 20 * math.sin(th), 30.2 - 20 * math.cos(th)), \
+                   (60.0 + 20 * math.sin(th), 30.2 + 20 * math.cos(th))
+        # (64, 80) bool, a 1-px staircase sliver climbing 0.15 px per column (a
+        # row step adds |nb_x| + |nb_y| > 1 to the distance: the old band's gap)
+        pix = np.zeros((64, 80), dtype=bool)
+        i = np.arange(50)  # (50,) int, column index along the sliver
+        pix[30 - np.floor(i * 0.15).astype(int), 10 + i] = True
+        ts = np.arange(0.0, 40.0, g7.TIP_T_STEP)  # (T,) float px along the height
+        counts = [_brute_count(pix, (ax, ay), bl_, br_, t) for t in ts]
+        assert min(counts) >= 1, (tilt_deg, counts.index(min(counts)))
+        # and the generator agrees: with n = 0 the label is at the sliver's start
+        (lx, ly), t, cnt, fb = g7.tip_count_label(pix, (ax, ay), bl_, br_, 0)
+        assert not fb and t <= 0.5 and cnt >= 1, (tilt_deg, t, cnt)
 
 
 def test_tip_count_label_matches_brute_force_any_angle():
@@ -1447,10 +1477,10 @@ def _dark_on_line(res, back, dark=100, reach=12.0):
 
     The line runs through the label moved `back` px (float) along the height
     toward the apex (A'), parallel to the stretched base
-    (RenderResult.tip_axis); a pixel counts when its gray < dark (int), its
-    centre lies in the 1-px band -0.5 < signed distance <= 0.5 (distance along
-    the base normal, + toward the base) and within `reach` px of the line point
-    along the base direction (keeps the far face / boundary out).
+    (RenderResult.tip_axis); a pixel counts when its gray < dark (int), the
+    line passes through its unit square (its 4 corners are not all on one side
+    of the line) and it lies within `reach` px of the line point along the base
+    direction (keeps the far face / boundary out).
     """
     (ax, ay), (mx, my), (bx, by) = res.tip_axis  # floats, image px
     hl = math.hypot(mx - ax, my - ay)
@@ -1462,7 +1492,10 @@ def _dark_on_line(res, back, dark=100, reach=12.0):
     ys, xs = np.nonzero(res.image < dark)  # (N,) int dark pixel coords
     d = (xs - px) * nx + (ys - py) * ny  # (N,) float64 distance from the line
     lat = (xs - px) * bx + (ys - py) * by  # (N,) float64 position along the line
-    return int(((d > -0.5) & (d <= 0.5) & (np.abs(lat) <= reach)).sum())
+    # (4, N) float64 corner distances: centre +- 0.5 px in x and y
+    corners = np.stack([d + sx * 0.5 * nx + sy * 0.5 * ny for sx in (-1, 1) for sy in (-1, 1)])
+    crossed = (corners.min(axis=0) < 0) & (corners.max(axis=0) > 0)  # (N,) bool
+    return int((crossed & (np.abs(lat) <= reach)).sum())
 
 
 # "section.key" -> value pins (dict): _CLEAN_TIP (flat face 200, black pointer,
