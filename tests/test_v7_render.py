@@ -302,7 +302,7 @@ def test_pick_pointer_gray():
             got = g7._pick_pointer_gray(random.Random(s), lo, hi, 160, 0, 0.0, info, h)
             assert got == want, (lo, hi, h, s)
             assert info == {"fallback": False, "headroom_ok": ok}, (lo, hi, h)
-    # c > 0 on I: the forbidden interval is removed from I, the fallback endpoint is I's
+    # c > 0 on I: the forbidden window is removed from I, the fallback endpoint is I's
     vals = {g7._pick_pointer_gray(rng, 0, 255, 160, 60, 0.0, None, 50.56) for _ in range(3000)}
     assert vals == set(range(51, 101))  # [51, 100]; the upper part [220, 204] is empty
     assert g7._pick_pointer_gray(random.Random(0), 0, 255, 150, 120, 0.0, None, 50.56) == 51
@@ -604,7 +604,7 @@ def _pointer_footprint(cfg, seed):
 
 
 def test_min_bg_contrast_isolated():
-    # shadows off: with a shadow the forbidden interval also covers the shadowed face
+    # shadows off: with a shadow a second window (+- c) also covers the shadowed face
     # (jitter off: its per-image caps see the pointer gray, see _NO_JITTER)
     flat = {**_NO_JITTER, "shadows.prob": 0.0}
     base = _cfg(**flat)
@@ -1991,31 +1991,98 @@ def test_tip_on_principal_axis_pixels(case):
 
 # ── min_bg_contrast restrains the pointer gray (drawn after bg + shadow) ─────
 
-def test_pointer_forbidden_interval_unit():
+def _allowed_brute(i_lo, i_hi, bg, c, s_max):
+    """Reference allowed pointer grays (set[int]) by brute force over the ints of
+    I = [i_lo, i_hi]: g is allowed iff |g - sh| >= c and |g - bg| >= c, with
+    sh = bg (1 - s_max) the darkest shadowed face (float) and the generator's
+    1e-9 slack for float rounding (a gray exactly c away is allowed)."""
+    sh = bg * (1.0 - s_max)  # float, darkest shadowed face level
+    return {g for g in range(i_lo, i_hi + 1)
+            if abs(g - sh) >= c - 1e-9 and abs(g - bg) >= c - 1e-9}
+
+
+def test_pointer_forbidden_windows_unit():
     import random
-    # bare face 180, darkest shadowed face 180 * (1 - 0.5) = 90, c = 40
-    f_lo, f_hi = g7.pointer_forbidden_interval(180, 40, 0.5)  # floats
-    assert (f_lo, f_hi) == (50.0, 220.0)
-    assert g7.pointer_forbidden_interval(180, 40) == (140.0, 220.0)  # no shadow: bg +- c
+    # three pieces: bare face 180, darkest shadowed face 180 * (1 - 0.5) = 90, c = 40
+    #   0 ...... 50 ](  90 +- 40  )[ 130 .. 140 ](  180 +- 40  )[ 220 ...... 255
+    w = g7.pointer_forbidden_windows(180, 40, 0.5)  # list of [lo, hi] floats
+    assert w == [[50.0, 130.0], [140.0, 220.0]]
+    assert g7._pointer_allowed_pieces(0, 255, w) == [(0, 50), (130, 140), (220, 255)]
+    # no shadow: sh == bg, the windows coincide -> one window bg +- c (bare rule)
+    assert g7.pointer_forbidden_windows(180, 40) == [[140.0, 220.0]]
+    assert g7.pointer_forbidden_windows(180, 40, 0.0) == [[140.0, 220.0]]
+    # overlap: sh = 180 * 0.7 = 126, 126 + 40 > 180 - 40 -> one merged window
+    # (86, 220); 86 is exactly c below sh (float sh = 125.99999999999999) -> allowed
+    w = g7.pointer_forbidden_windows(180, 40, 0.3)
+    assert len(w) == 1 and w[0][0] == pytest.approx(86.0) and w[0][1] == 220.0
+    assert g7._pointer_allowed_pieces(0, 255, w) == [(0, 86), (220, 255)]
+    # touching: sh = 160 * 0.5 = 80, 80 + 40 == 160 - 40 -> two windows; the
+    # shared end 120 is c from both faces and allowed (a one-gray middle piece)
+    w = g7.pointer_forbidden_windows(160, 40, 0.5)
+    assert w == [[40.0, 120.0], [120.0, 200.0]]
+    assert g7._pointer_allowed_pieces(0, 255, w) == [(0, 40), (120, 120), (200, 255)]
+    # float-rounded touch: 150 * (1 - 0.44) = 84.00000000000001 (exactly 84), c 33:
+    # sh + c = 117.00000000000001 > bg - c = 117 by rounding only -> still two
+    # windows, and 117 (33 from both faces) stays allowed
+    w = g7.pointer_forbidden_windows(150, 33, 0.44)
+    assert len(w) == 2, w
+    assert g7._pointer_allowed_pieces(0, 255, w) == [(0, 51), (117, 117), (183, 255)]
+    # c = 0: no window, all of I
+    assert g7.pointer_forbidden_windows(180, 0, 0.5) == []
+    assert g7._pointer_allowed_pieces(10, 240, []) == [(10, 240)]
+    # exact boundary ints, fractional sh: 175 * 0.5 = 87.5, c = 30 -> 57 and 118
+    # (30.5 away) allowed, 58 / 117 (29.5) not; 145 = bg - c and 205 = bg + c allowed
+    w = g7.pointer_forbidden_windows(175, 30, 0.5)
+    assert w == [[57.5, 117.5], [145.0, 205.0]]
+    assert g7._pointer_allowed_pieces(0, 255, w) == [(0, 57), (118, 145), (205, 255)]
+    # float-rounded sh: 100 * (1 - 0.7) = 30.000000000000004 (exactly 30), c = 20:
+    # 50 is exactly c above the shadowed face and stays allowed
+    w = g7.pointer_forbidden_windows(100, 20, 0.7)
+    assert g7._pointer_allowed_pieces(0, 255, w) == [(0, 10), (50, 80), (120, 255)]
+    # I clips the pieces; a window past an end of I removes nothing there
+    assert g7._pointer_allowed_pieces(60, 200, [[50.0, 130.0], [140.0, 220.0]]) == [(130, 140)]
+    assert g7._pointer_allowed_pieces(100, 255, [[10.0, 50.0]]) == [(100, 255)]
+    assert g7._pointer_allowed_pieces(100, 150, [[50.0, 130.0], [140.0, 220.0]]) == [(130, 140)]
+    assert g7._pointer_allowed_pieces(60, 120, [[50.0, 130.0]]) == []
+    # brute force over random cases: the pieces are exactly the allowed ints,
+    # at most 3, ascending, separated by at least one forbidden gray
+    rng = random.Random(5)  # case generator (random.Random)
+    for _ in range(3000):
+        bg, c = rng.randint(0, 255), rng.randint(0, 120)  # int face gray, int contrast
+        s_max = rng.choice([0.0, 1.0, rng.random(), rng.randint(1, 99) / 100])  # float 0-1
+        i_lo = rng.randint(0, 255)  # int, bottom of I
+        i_hi = rng.randint(i_lo, 255)  # int, top of I
+        pieces = g7._pointer_allowed_pieces(
+            i_lo, i_hi, g7.pointer_forbidden_windows(bg, c, s_max))  # list of (a, b) ints
+        got = set().union(*(range(a, b + 1) for a, b in pieces))  # set[int]
+        assert got == _allowed_brute(i_lo, i_hi, bg, c, s_max), (bg, c, s_max, i_lo, i_hi)
+        assert len(pieces) <= 3 and all(a <= b for a, b in pieces), pieces
+        assert all(b0 + 1 < a1 for (_, b0), (a1, _) in zip(pieces, pieces[1:])), pieces
+
+
+def test_pick_pointer_gray_two_windows():
+    import random
     rng = random.Random(3)  # shared stream (random.Random)
-    vals = {g7._pick_pointer_gray(rng, 0, 255, 180, 40, 0.5) for _ in range(3000)}  # set[int]
-    assert vals == set(range(0, 51)) | set(range(220, 256))  # endpoints allowed, both sides
-    # a fractional f_lo: 175 * (1 - 0.3) - 30 = 92.5 -> the lower interval ends at 92
-    vals = {g7._pick_pointer_gray(rng, 0, 255, 175, 30, 0.3) for _ in range(3000)}
-    assert max(v for v in vals if v < 175) == 92 and min(v for v in vals if v > 92) == 205
+    # three pieces (bg 180, sh 90, c 40): every allowed gray reached, both ends of
+    # every piece included, nothing inside either window
+    vals = {g7._pick_pointer_gray(rng, 0, 255, 180, 40, 0.5) for _ in range(4000)}  # set[int]
+    assert vals == set(range(0, 51)) | set(range(130, 141)) | set(range(220, 256))
+    # headroom H = 50.56 clips I to [51, 204]: only the middle piece is left
+    vals = {g7._pick_pointer_gray(rng, 0, 255, 180, 40, 0.5, None, 50.56) for _ in range(500)}
+    assert vals == set(range(130, 141))
     # c = 0: exactly the old randint(lo, hi) draw, whatever the shadow
     for s_max in (0.0, 0.4, 1.0):
         for seed in range(200):
             want = random.Random(seed).randint(10, 240)  # int, old draw
             assert g7._pick_pointer_gray(random.Random(seed), 10, 240, 160, 0, s_max) == want
-    # s_max = 0 reproduces the bare rule draw for draw
+    # s_max = 0: the plain |g - bg| >= c rule
     for seed in range(200):
         a = g7._pick_pointer_gray(random.Random(seed), 0, 255, 160, 60, 0.0)  # int
         assert abs(a - 160) >= 60
-    # empty set: one draw consumed, endpoint farthest from the forbidden interval
+    # empty set: one draw consumed, the endpoint of I farthest from its NEAREST
+    # face level.  bg 150, s 0.6 -> sh 60, c 80: windows (-20, 140) + (70, 230)
+    # merge, I = [0, 200] is covered; lo is 60 from sh, hi 50 from bg -> lo
     c1, c2 = random.Random(9), random.Random(9)  # two identical streams
-    # bg 150, s 0.6 -> faces [60, 150], c 80 -> forbidden (-20, 230); range [0, 200]:
-    # lo is 60 below the shadowed face, hi 50 above the bare face -> lo
     assert g7._pick_pointer_gray(c1, 0, 200, 150, 80, 0.6) == 0
     c2.randint(0, 200)
     assert c1.random() == c2.random(), "infeasible case must consume one draw"
@@ -2024,29 +2091,61 @@ def test_pointer_forbidden_interval_unit():
     assert info == {"fallback": True, "headroom_ok": True}  # headroom 0: I = [lo, hi]
     g7._pick_pointer_gray(random.Random(1), 0, 255, 150, 0, 0.6, info)  # c = 0: never
     assert info == {"fallback": False, "headroom_ok": True}
-    # bg 100, s 0.1 -> faces [90, 100], c 200: hi is 140 above, lo 90 below -> hi
+    # bg 100, s 0.1 -> sh 90, c 200: hi is 140 from bg, lo 90 from sh -> hi
     assert g7._pick_pointer_gray(random.Random(0), 0, 240, 100, 200, 0.1) == 240
+    # an I between the faces: bg 200, s 0.5 -> sh 100, c 60 (merged (40, 260)).
+    # I = [120, 150]: 120 is 20 from sh, 150 is 50 from both -> 150 (the old
+    # one-interval rule measured from the interval [sh, bg] and took 120)
+    assert g7._pick_pointer_gray(random.Random(0), 120, 150, 200, 60, 0.5) == 150
+    # tie: I = [110, 190], each end 10 from its nearest face -> the lower end
+    assert g7._pick_pointer_gray(random.Random(0), 110, 190, 200, 60, 0.5) == 110
 
 
-def test_render_records_forbidden_interval():
+def test_pick_pointer_gray_uniform_over_allowed_set():
+    """ONE randint mapped over the three pieces: no gray outside the allowed set,
+    every allowed gray reached, and the draw uniform over the allowed set (a
+    chi-square goodness-of-fit test; the pieces get 51 : 11 : 36 of the mass)."""
+    import random
+    from scipy import stats
+    allowed = list(range(0, 51)) + list(range(130, 141)) + list(range(220, 256))  # list[int], 98
+    n = len(allowed) * 400  # int, draws (400 expected per allowed gray)
+    rng = random.Random(11)  # pointer-like stream (random.Random)
+    vals = np.array([g7._pick_pointer_gray(rng, 0, 255, 180, 40, 0.5)
+                     for _ in range(n)])  # (n,) int64, drawn grays
+    counts = np.bincount(vals, minlength=256)  # (256,) int64, draws per gray
+    assert counts[allowed].sum() == n, "a gray inside a window was drawn"
+    assert (counts[allowed] > 0).all()
+    chi2, p = stats.chisquare(counts[allowed])  # float statistic, float p-value
+    print("chi2 %.1f on %d dof, p = %.3f" % (chi2, len(allowed) - 1, p))
+    assert p > 1e-3, (chi2, p)
+
+
+def test_render_records_forbidden_windows():
     # no gradient / noise: headroom H = 0, so the base interval I is the whole
-    # gray range and the contrast rule alone decides (H > 0 would leave
-    # I = [51, 204] inside the forbidden (14, 210): the endpoint fallback)
-    pins = {"shadows.prob": 1.0, "shadows.strength_range": [0.6, 0.6],
+    # gray range and the contrast rule alone decides
+    pins = {"shadows.prob": 1.0, "shadows.strength_range": [0.8, 0.8],
             "shadows.strength_jitter": 0.0, "palette.bg_gray_range": [160, 160],
             "pointer.min_bg_contrast": 50, "pointer.gradient_range": [0.0, 0.0],
             "pointer.noise_amplitude": 0}
+    # strength 0.8: sh = 160 * 0.2 = 32 -> two windows (-18, 82) and (110, 210);
+    # allowed [82, 110] (between the faces) and [210, 255]
     for seed in range(6):
         p = g7.render_image(_cfg(**pins), seed).params  # dict, sampled values
         pt = p["pointer"]  # dict
-        assert pt["forbidden_lo"] == pytest.approx(160 * 0.4 - 50, abs=1e-3)
-        assert pt["forbidden_hi"] == pytest.approx(210.0)
-        assert pt["gray"] <= pt["forbidden_lo"] or pt["gray"] >= pt["forbidden_hi"], pt
+        assert "forbidden_lo" not in pt and "forbidden_hi" not in pt
+        assert np.allclose(pt["forbidden"], [[-18.0, 82.0], [110.0, 210.0]], atol=1e-3), pt
+        assert all(pt["gray"] <= lo or pt["gray"] >= hi for lo, hi in pt["forbidden"]), pt
         assert pt["gray_fallback"] is False
-        assert p["shadows"]["s_p"] == pytest.approx(0.6) and "d_max" not in p["shadows"]
-    # no shadow: the interval is bg +- c
+        assert p["shadows"]["s_p"] == pytest.approx(0.8) and "d_max" not in p["shadows"]
+    # strength 0.6: sh = 64, 64 + 50 > 160 - 50 -> one merged window (14, 210)
+    pt = g7.render_image(_cfg(**{**pins, "shadows.strength_range": [0.6, 0.6]}), 0).params["pointer"]
+    assert np.allclose(pt["forbidden"], [[14.0, 210.0]], atol=1e-3), pt
+    # no shadow: the window is bg +- c
     pt = g7.render_image(_cfg(**{**pins, "shadows.prob": 0.0}), 0).params["pointer"]
-    assert (pt["forbidden_lo"], pt["forbidden_hi"]) == (110.0, 210.0)
+    assert pt["forbidden"] == [[110.0, 210.0]]
+    # c = 0: no window recorded
+    pt = g7.render_image(_cfg(**{**pins, "pointer.min_bg_contrast": 0}), 0).params["pointer"]
+    assert pt["forbidden"] == []
 
 
 # "section.key" -> value pins (dict): strong shadows (strength 0.8 -> darkest face
@@ -2094,20 +2193,35 @@ def _pointer_face_levels(c, seed):
 
 
 def test_min_bg_contrast_keeps_pointer_visible_over_shadow():
-    c, tol = 80, 3  # int, pointer.min_bg_contrast under test; int levels tolerance
-    gaps = {80: [], 0: []}  # c -> list of (shadow gap, bare gap) floats per seed
+    """A person reads three levels off 40 renders (_GAP_PINS: shadows on every
+    image, strength 0.8, flat face 150-170, so the darkest shadowed face is
+    sh = bg * 0.2 = 30-34) with c = 60: the pointer body contrasts with the
+    bare AND the deep-shadow face, and some pointers sit BETWEEN the two faces,
+    in the middle band the two-window rule opens up:
+
+        0 ](░ sh +- 60 ░)[ sh+60 .. bg-60 ](░ bg +- 60 ░)[ bg+60 .. 255
+                  90-94 ..... 90-110   <- middle band (the old one-interval
+                                          rule forbade all of (sh-c, bg+c))
+    """
+    c, tol = 60, 3  # int, pointer.min_bg_contrast under test; int levels tolerance
+    gaps = {c: [], 0: []}  # c -> list of (shadow gap, bare gap) floats per seed
+    between = []  # list of (seed, (ptr, shd, bare)), c-renders with shd < ptr < bare
     for seed in range(40):
         for cc in gaps:
             lv = _pointer_face_levels(cc, seed)
             if lv is not None:
                 ptr, shd, bare = lv
                 gaps[cc].append((abs(ptr - shd), abs(ptr - bare)))
-    on, off = np.array(gaps[80]), np.array(gaps[0])  # (N, 2) float64
-    print("c=80 shadow / bare gaps p0 p10 p50:", np.percentile(on, [0, 10, 50], axis=0).T,
-          "c=0:", np.percentile(off, [0, 10, 50], axis=0).T, len(on), len(off))
+                if cc == c and shd < ptr < bare:
+                    between.append((seed, lv))
+    on, off = np.array(gaps[c]), np.array(gaps[0])  # (N, 2) float64
+    print("c=%d shadow / bare gaps p0 p10 p50:" % c, np.percentile(on, [0, 10, 50], axis=0).T,
+          "c=0:", np.percentile(off, [0, 10, 50], axis=0).T, len(on), len(off),
+          "between the faces:", len(between), between[:3])
     assert len(on) >= 30 and len(off) >= 30
     assert on.min(axis=0)[0] >= c - tol and on.min(axis=0)[1] >= c - tol, on.min(axis=0)
-    assert (off.min(axis=1) < c - tol).any(), "the measurement cannot tell c = 0 from c = 80"
+    assert (off.min(axis=1) < c - tol).any(), "the measurement cannot tell c = 0 from c = 60"
+    assert between, "no pointer gray between the shadowed and the bare face"
 
 
 # ── pointer triangle: own hard raster (per-line round(width), centred) ──────
@@ -2356,14 +2470,35 @@ def test_gray_warning_too_narrow_counts_levels():
 def test_gray_warning_contrast_fallback_share():
     cfg = _cfg(**{"pointer.min_bg_contrast": 90, "palette.bg_gray_range": [100, 160],
                   "shadows.prob": 0.5})
-    # hand enumeration, I = [51, 204], c = 90: the upper part bg + 90 <= 204 needs
-    # bg <= 114; the lower part needs bg (1 - s) - 90 >= 51.  No shadow: empty for
-    # bg 115..140 (26 of 61); shadow (s_max >= 0.45): empty for bg 115..160 (46)
-    want = 0.5 * 26 / 61 + 0.5 * 46 / 61  # float, 36 / 61
+    # hand enumeration, I = [51, 204], c = 90: the upper part [bg + 90, 204]
+    # needs bg <= 114.  Below the bare window, A = [51, bg - 90] is empty for
+    # bg 115..140 (26 of 61): no gray at all, shadow or not.  bg 141..160 (20):
+    # A is non-empty and the shadowed window (sh - 90, sh + 90) covers it iff
+    # sh = bg (1 - s_max) < 141 (its top sh + 90 > bg - 90 always): every
+    # shadow (s_max >= 0.45), never without one
+    want = (26 + 0.5 * 20) / 61  # float, 36 / 61
     assert g7.pointer_fallback_share(cfg) == pytest.approx(want)
     w = g7.pointer_gray_warnings(cfg)
     assert len(w) == 1 and w[0].startswith("pointer.min_bg_contrast: 90")
     assert f"{want * 100:.1f}%" in w[0] and "point mass" in w[0]
+
+
+def test_fallback_share_user_config_is_zero():
+    """The user's config (palette.bg_gray_range [63, 255], c = 35, defaults
+    otherwise; I = [51, 204]).  The old one-interval rule forbade
+    (bg (1 - s_max) - 35, bg + 35) and fell back for ~9.3 % of images (exact
+    enumeration; ~9.1 % over 2000 renders), which raised the warning.  With two
+    windows: for bg <= 169 the upper part [bg + 35, 204] is open; for bg >= 170,
+    A = [51, min(204, bg - 35)] holds >= 85 grays while the shadowed window
+    (sh - 35, sh + 35) removes at most 69, so no image is left without a gray."""
+    cfg = _cfg(**{"palette.bg_gray_range": [63, 255], "pointer.min_bg_contrast": 35})
+    share = g7.pointer_fallback_share(cfg)  # float 0-1, predicted fallback share
+    print("user config fallback share (two windows): %.6f" % share)
+    assert share == 0.0
+    assert g7.pointer_gray_warnings(cfg) == []
+    fb = sum(g7.render_image(cfg, s).params["pointer"]["gray_fallback"]
+             for s in range(300))  # int, fallback images among 300 renders
+    assert fb == 0
 
 
 def test_max_strength_cdf_matches_grid():
@@ -2384,15 +2519,19 @@ def test_gray_warnings_predict_render_rates():
     """2000 seeds through render_image: the empirical headroom_ok == False and
     gray_fallback rates agree with the predictions within sampling error.
     (a) is all-or-nothing given the worst-case H (here every image's H rounds
-    to the same band, so 100 %); c = 40 puts s* inside the shadow strength
-    distribution, so the CDF part of the enumeration is exercised."""
+    to the same band, so 100 %).  (c) uses the user's wide face range
+    (bg 63-255) with c = 60, I = [51, 204]: for bg >= 145 the empty band
+    s* < s_max < s2 cuts the shadow strength distribution [0.45, 0.67] from
+    below for 54 bg values and from above for 76, so both CDF terms of the
+    enumeration are exercised; predicted share ~0.164 (the old one-interval
+    rule: ~0.271, the middle band between the faces rescues the rest)."""
     n = 2000  # int, seeds per config
     cfg_a = _cfg(**{"pointer.gray_range": [230, 255]})
     no_room = sum(not g7.render_image(cfg_a, s).params["pointer"]["headroom_ok"]
                   for s in range(n))  # int, images without headroom
     print("no headroom: predicted 1.0, empirical %.4f" % (no_room / n))
     assert no_room == n
-    cfg_c = _cfg(**{"pointer.min_bg_contrast": 40})
+    cfg_c = _cfg(**{"pointer.min_bg_contrast": 60, "palette.bg_gray_range": [63, 255]})
     p = g7.pointer_fallback_share(cfg_c)  # float, predicted share
     fb = sum(g7.render_image(cfg_c, s).params["pointer"]["gray_fallback"]
              for s in range(n))  # int, fallback images

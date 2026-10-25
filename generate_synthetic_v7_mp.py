@@ -961,15 +961,18 @@ def pointer_forbidden_windows(bg_gray, min_contrast, s_max=0.0):
                    (sh == bg: the two windows coincide, the bare |g - bg| >= c rule)
     A gray g is allowed iff |g - sh| >= c and |g - bg| >= c (window ends
     allowed).  Overlapping windows (sh + c > bg - c) merge into one; windows
-    that only touch stay two (the shared end is allowed).  A gray between the
-    faces (sh + c <= g <= bg - c) contrasts with both.
+    that only touch stay two (the shared end is allowed).  The overlap test
+    carries the 2e-9 slack of _pointer_allowed_pieces' two 1e-9 tolerances, so
+    a float-rounded touch (sh + c = bg - c + 1e-14) still leaves the shared
+    int allowed and the merged and the two-window int sets never differ.  A
+    gray between the faces (sh + c <= g <= bg - c) contrasts with both.
     """
     c = float(min_contrast)  # float, contrast c
     if c <= 0:
         return []
     sh = bg_gray * (1.0 - s_max)  # float, darkest shadowed face level
     bg = float(bg_gray)  # float, bare face level
-    if sh + c > bg - c:  # overlap (always when s_max = 0): one window
+    if sh + c > bg - c + 2e-9:  # overlap (always when s_max = 0, c >= 1): one window
         return [[sh - c, bg + c]]
     return [[sh - c, sh + c], [bg - c, bg + c]]
 
@@ -977,7 +980,8 @@ def pointer_forbidden_windows(bg_gray, min_contrast, s_max=0.0):
 def _pointer_allowed_pieces(i_lo, i_hi, windows):
     """Allowed int pieces (list of (a, b) int pairs, inclusive, ascending, each
     a <= b) of I = [i_lo, i_hi] minus the open float windows (list of [lo, hi]
-    floats, ascending, disjoint; pointer_forbidden_windows).  A window
+    floats, ascending by lo; pointer_forbidden_windows; windows that overlap
+    by float rounding are handled too).  A window
     (w_lo, w_hi) forbids the ints floor(w_lo) + 1 .. ceil(w_hi) - 1, so g with
     |g - level| >= c is allowed exactly (1e-9 tolerance for float rounding):
 
