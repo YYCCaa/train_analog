@@ -1606,26 +1606,39 @@ def render_image(cfg, image_seed):
     rec["tri_artifacts"] = {"enabled": bool(T["enabled"]), "count_drawn": n_tris}
     if not T["enabled"]:
         n_tris = 0
-    tri_items = []  # list[dict], one record per triangle (gray, centre, size, placed)
+    tri_items = []  # list[dict], one record per triangle (gray, centre, size, placed, pixels)
     rec["tri_artifacts"].update(n=n_tris, items=tri_items)
     tv = T["pixel_var"]
+    # V, (C, C) bool: inside B and off the pointer + hole.  B sits where the
+    # displacement puts it, so the centres depend on the displacement: the
+    # triangles are the one content layer that is not a pure translation
+    allowed = inside_outer & ~ptr_blocked
+    v_idx = np.flatnonzero(allowed)  # (|V|,) int64, row-major flat indices of V
     for _ in range(n_tris):
         tri_gray = trng.randint(*T["gray_range"])  # int mean gray
-        tcx = trng.randint(0, canvas_size - 1)
-        tcy = trng.randint(0, canvas_size - 1)
+        # centre drawn from V (ONE draw); row-major flat index -> (row, col)
+        flat = int(v_idx[trng.randrange(len(v_idx))]) if len(v_idx) else \
+            cy * canvas_size + cx  # int, flat canvas index of the centre
+        tcy, tcx = divmod(flat, canvas_size)  # int px, centre row / column
         sz = trng.randint(*T["size_range"])  # int px
-        verts = []  # list of 3 (x, y) float tuples, triangle vertices
+        offs = []  # list of 3 (dx, dy) float tuples, vertex offsets from the draw point
         for _v in range(3):
             va = trng.uniform(0, 2 * math.pi)
             vr = trng.uniform(*T["vertex_dist_range"]) * sz
-            verts.append((tcx + vr * math.cos(va), tcy + vr * math.sin(va)))
+            offs.append((vr * math.cos(va), vr * math.sin(va)))
+        # translate so the triangle's CENTROID sits on the centre (the centroid
+        # is always inside the triangle, so the centre pixel is a valid spot)
+        gx, gy = sum(o[0] for o in offs) / 3.0, sum(o[1] for o in offs) / 3.0  # float, centroid offset
+        verts = [(tcx + dx - gx, tcy + dy - gy) for dx, dy in offs]  # 3 (x, y) float vertices
         tri_mask = Image.new("L", size2, 0)
         ImageDraw.Draw(tri_mask).polygon(verts, fill=255)
-        valid = (np.array(tri_mask) > 127) & inside_outer & ~ptr_blocked  # (C, C) bool
+        valid = (np.array(tri_mask) > 127) & allowed  # (C, C) bool
+        if not valid.any():  # sub-pixel triangle: paint the centre pixel alone
+            valid[tcy, tcx] = bool(allowed[tcy, tcx])
         tri_items.append({"gray": tri_gray, "center_x": tcx, "center_y": tcy, "size": sz,
-                          "placed": bool(valid.any())})
-        if not valid.any():
-            continue
+                          # always True (V is never empty: B minus the pointer)
+                          "placed": bool(valid.any()), "pixels": int(valid.sum())})
+        # drawn for every triangle, so the numpy stream's draw count is fixed
         noise = tnp.integers(-tv, tv + 1, size2, dtype=np.int16)  # (C, C) int16 per-pixel fill noise
         arr[valid] = np.clip(tri_gray + noise, 0, 255).astype(np.uint8)[valid]
 

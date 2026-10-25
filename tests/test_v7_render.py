@@ -162,8 +162,13 @@ def test_tri_change_isolated():
     off = _cfg(**flat, **{"tri_artifacts.enabled": False})
     # triangle footprint probes: same draws, extreme fills -> every pixel a
     # triangle touches (incl. blur spread) differs between the two
-    probe_lo = _cfg(**flat, **{"tri_artifacts.gray_range": [0, 0]})
-    probe_hi = _cfg(**flat, **{"tri_artifacts.gray_range": [255, 255]})
+    # same range width as the default [65, 184] (120 levels), shifted to the
+    # extremes: the tri stream makes the same draws (randint consumes a
+    # width-dependent number of random bits), so the probes and `base` place
+    # the same triangles
+    w = base["tri_artifacts"]["gray_range"][1] - base["tri_artifacts"]["gray_range"][0]  # int
+    probe_lo = _cfg(**flat, **{"tri_artifacts.gray_range": [0, w]})
+    probe_hi = _cfg(**flat, **{"tri_artifacts.gray_range": [255 - w, 255]})
     centre = _radius_grid() < 0.3 * DIAL  # (256, 256) bool, ~pointer hub region
     lo, hi = base["tri_artifacts"]["count_range"]
     # seeds whose tri_artifacts stream draws >= 1 triangle (count is its first draw)
@@ -301,6 +306,55 @@ def test_pick_pointer_gray():
     vals = {g7._pick_pointer_gray(rng, 0, 255, 160, 60, 0.0, None, 50.56) for _ in range(3000)}
     assert vals == set(range(51, 101))  # [51, 100]; the upper part [220, 204] is empty
     assert g7._pick_pointer_gray(random.Random(0), 0, 255, 150, 120, 0.0, None, 50.56) == 51
+
+
+# ── C: triangle artifacts are always placed ─────────────────────────────────
+
+def test_triangles_always_placed():
+    cfg = _cfg(**{"tri_artifacts.count_range": [6, 6]})
+    cxs, cys, rs = [], [], []  # list[float]: centre offsets from the B centre, / B radius
+    for seed in range(500):
+        p = g7.render_image(cfg, seed).params
+        t = p["tri_artifacts"]
+        assert t["n"] == 6 and len(t["items"]) == 6
+        bx = p["derived"]["canvas_offset_x"] + p["geometry"]["canvas_size"] // 2 \
+            - p["geometry"]["displacement_x"]  # int px, B centre x (image)
+        by = p["derived"]["canvas_offset_y"] + p["geometry"]["canvas_size"] // 2 \
+            - p["geometry"]["displacement_y"]  # int px, B centre y (image)
+        orx, ory = p["derived"]["outer_rx"], p["derived"]["outer_ry"]  # float px, B radii
+        for it in t["items"]:
+            assert it["placed"] is True and it["pixels"] >= 1, (seed, it)
+            dx, dy = (it["center_x"] - bx) / orx, (it["center_y"] - by) / ory
+            assert dx * dx + dy * dy <= 1.0 + 1e-9, (seed, it)  # centre inside B
+            cxs.append(dx)
+            cys.append(dy)
+            rs.append(math.hypot(dx, dy))
+    cxs, cys, rs = np.array(cxs), np.array(cys), np.array(rs)  # (3000,) float64 each
+    # quadrant balance (loose): each quadrant of B gets 15-35% of the centres
+    quads = [((cxs >= 0) & (cys >= 0)).mean(), ((cxs < 0) & (cys >= 0)).mean(),
+             ((cxs >= 0) & (cys < 0)).mean(), ((cxs < 0) & (cys < 0)).mean()]
+    assert all(0.15 <= q <= 0.35 for q in quads), quads
+    # radial coverage: the outer annulus r > 0.7 holds 51% of B's area, the
+    # pointer only blocks part of the inner disc -> clearly more than a third
+    assert (rs > 0.7).mean() > 0.4, float((rs > 0.7).mean())
+
+
+def test_triangles_paint_off_pointer_inside_boundary():
+    # footprint = pixels that differ between tri gray 0 and 255.  Both ranges
+    # have width 1, so the tri stream makes the same draws in both (a range of
+    # another width consumes a different number of random bits per randint)
+    base = {"tri_artifacts.count_range": [6, 6], **_NO_JITTER,
+            "background.dial_circle_blur": False}
+    r = _radius_grid()
+    for seed in range(10):
+        lo_cfg = _cfg(**base, **{"tri_artifacts.gray_range": [0, 0]})  # dict
+        lo = g7.render_image(lo_cfg, seed)
+        hi = g7.render_image(_cfg(**base, **{"tri_artifacts.gray_range": [255, 255]}), seed)
+        foot = lo.image != hi.image  # (256, 256) bool, triangle pixels
+        assert foot.sum() >= 6, seed
+        assert not (foot & (r > IMG / 2)).any()  # inside B (well inside the image)
+        ptr = _pointer_footprint(lo_cfg, seed)  # (256, 256) bool, same triangles
+        assert not (foot & _erode(ptr, 2)).any(), seed  # never on the pointer body (2 px: bicubic stretch spread)
 
 
 # ── B: exposure jitter never saturates (capped factors) ────────────────────
@@ -492,20 +546,24 @@ def test_edge_noise_scaled_near_extremes():
 # 0 and 2 are unchanged, so no other stream moved). Only the image is hashed,
 # so moving the tip label to the visible (cut) tip left these unchanged.
 # Since the edge clamp they are the pointer.edge_max_frac = 1 renders.
+# Re-pinned for the no-clamping change (headroom pointer gray, amplitude
+# scale, capped exposure jitter, triangle centres drawn from the valid region:
+# the gray draw, the jitter factors and the tri stream all moved; expected).
 _PRE_CONTRAST_HASHES = {
-    0: "e0c38ede1599cf8d16dcaef4347406454bd2163df2c4866ffa86c1d96a1f6ad6",
-    1: "e3545616c3cfe7f4dc5305faabbef780e3ea52d2cdd9cb068c6e684ae080b3a8",
-    2: "6da293f03654acd47597967cfd86bd8683143d6add586da6678e09cf2e401717",
+    0: "31d6262873cae415e544e020d8e614afc82d53e186c59ddc5a3989b8af4ed950",
+    1: "e8ea76755d57519b442b3f3c0dca65f00fa81f253d2a619bc0e6ca1854fb76b5",
+    2: "4ecdc0d11b5f86556bf38cc843fb6929593a43b552d44a6d21bb294132f82823",
 }
 
 
 # sha256 hex (str) of the same renders with the DEFAULT pointer.edge_max_frac
 # 0.25 (re-pinned when the edge clamp arrived: seeds 0 and 2 change near the
-# apex; seed 1's apex sits under the rim band, so it is unchanged)
+# apex; seed 1's apex sits under the rim band, so it is unchanged); re-pinned
+# for the no-clamping change, like _PRE_CONTRAST_HASHES
 _DEFAULT_HASHES = {
-    0: "5b6bc1295ee5619d6112e05c9ddb2a313eca17dd1d64db6a0a6ae495fe29ffce",
-    1: "e3545616c3cfe7f4dc5305faabbef780e3ea52d2cdd9cb068c6e684ae080b3a8",
-    2: "076ab6daadff4c318017f9e6987b3042f9ed6cdba77196fae151f25653394cb9",
+    0: "64d4f5a3a472aa1eca2c37a9bb1ae7006373e2a6cf37a3780774e18b14c880d5",
+    1: "e8ea76755d57519b442b3f3c0dca65f00fa81f253d2a619bc0e6ca1854fb76b5",
+    2: "ab3497599601abd7237d3091d1bcea96dd2e3a5f983708989f80e9be23d82065",
 }
 
 
@@ -603,10 +661,12 @@ def test_digit_jitter_direction():
 # "section.key" -> value pins (dict): fixed dial size (radius 85, outer
 # boundary radius 85 * 1.2 = 102), no stretch, shadows always on (they must
 # translate too).  outer 1.2 keeps ceil(102) + 1 = 103 below radius + margin,
-# so the canvas half is radius + margin + max|displacement|.
+# so the canvas half is radius + margin + max|displacement|.  Triangles off:
+# their centres are drawn from the part of the content inside B (every
+# triangle is placed), so they follow where B sits, not the content.
 _DISP_PINS = {"geometry.scale_range": [1.0, 1.0], "outer.scale_range": [1.2, 1.2],
               "geometry.stretch_h_range": [1.0, 1.0], "geometry.stretch_v_range": [1.0, 1.0],
-              "shadows.prob": 1.0}
+              "shadows.prob": 1.0, "tri_artifacts.enabled": False}
 _DISP_RB = 85 * 1.2  # float px, outer boundary radius under _DISP_PINS
 _DISP_M = 20  # int px, canvas_margin of the displaced config
 
