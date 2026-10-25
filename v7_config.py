@@ -179,6 +179,17 @@ _REMOVED = {
     # blur-aware tip label keys, replaced by the pixel-count rule tip_label.min_pixels
     ("tip_label", "contrast_frac"), ("tip_label", "base_blur"),
     ("tip_label", "patch_size"), ("tip_label", "min_ratio"),
+    # px pointer-shadow offset / constant blur, replaced by the modelled shadow
+    # (cast distance as a fraction of the dial radius, penumbra growing with it);
+    # px -> fraction has no exact conversion, so they are dropped with a hint
+    ("shadows", "offset_range"), ("shadows", "blur_radius"),
+}
+
+# Replacement hint per removed key, shape dict[(section str, key str), str];
+# appended to the "removed" warning so old YAMLs say what to set instead.
+_REMOVED_HINTS = {
+    ("shadows", "offset_range"): "use shadows.distance_frac_range (fraction of the dial radius)",
+    ("shadows", "blur_radius"): "use shadows.blur_min and shadows.blur_per_px",
 }
 
 
@@ -294,7 +305,9 @@ def migrate_config(data, schema=None, defaults=None):
                 else:
                     warns.append(f"{name}: replaced by {moves[0][0]} which is also set; ignored")
             elif (sec, key) in _REMOVED:
-                warns.append(f"{name}: removed in a newer version, ignored")
+                hint = _REMOVED_HINTS.get((sec, key))  # str | None, replacement keys
+                warns.append(f"{name}: removed in a newer version, ignored"
+                             + (f"; {hint}" if hint else ""))
             else:
                 warns.append(f"{name}: unknown key, ignored")
     cfg = {}

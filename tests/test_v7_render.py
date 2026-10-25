@@ -552,9 +552,13 @@ def test_edge_noise_scaled_near_extremes():
 # Re-pinned for the pointer triangle's own hard raster (per-line round(width),
 # centred, replacing Pillow's polygon in the pointer, its mask and its shadow;
 # expected).  Previous values: 0 31d62628..., 1 e8ea7675..., 2 4ecdc0d1...
+# Re-pinned for the physically modelled pointer shadow (hub swept from the
+# face, floating triangle, penumbra growing with the cast distance): only
+# seed 1 has a shadow and changed (1 03b29b49... -> 37ee8de6...); seeds 0 and
+# 2 have none and are unchanged, so no stream moved.
 _PRE_CONTRAST_HASHES = {
     0: "296bcacea0929c338125d89bc0c198064d771054954f0786aca56d525a4b0709",
-    1: "03b29b4969a846e369f1b01069184b7c7f927300c1976298432784ef810cd0ed",
+    1: "37ee8de665a336b50762d19724bce7367b13b9717c35977053cc7b8ba66d52a9",
     2: "2b07c73df1ccd6ab3dcadc64a07e6dead8df1971e46758bbaf9bc42608f4b725",
 }
 
@@ -563,10 +567,11 @@ _PRE_CONTRAST_HASHES = {
 # 0.25 (re-pinned when the edge clamp arrived: seeds 0 and 2 change near the
 # apex; seed 1's apex sits under the rim band, so it is unchanged); re-pinned
 # for the no-clamping change and the pointer raster, like _PRE_CONTRAST_HASHES
-# (previous values: 0 64d4f5a3..., 1 e8ea7675..., 2 ab349759...)
+# (previous values: 0 64d4f5a3..., 1 e8ea7675..., 2 ab349759...); re-pinned
+# for the modelled pointer shadow (seed 1 only: 03b29b49... -> 37ee8de6...)
 _DEFAULT_HASHES = {
     0: "0842334bc121d696838fda4fe8c50245a999645ce6fb98fa051a04c373c67cc1",
-    1: "03b29b4969a846e369f1b01069184b7c7f927300c1976298432784ef810cd0ed",
+    1: "37ee8de665a336b50762d19724bce7367b13b9717c35977053cc7b8ba66d52a9",
     2: "6325e541743e2848c4948f6dc70f9115ad00c6f5d904a3d7ce4d79587fcf98c3",
 }
 
@@ -740,7 +745,7 @@ def test_boundary_fixed_and_black_outside():
 # (unless overridden), shared strength 0.5 with no jitter, no blur anywhere
 # the config allows it (rim blur has a schema min of 0.5)
 _SHD_PINS = {"shadows.prob": 1.0, "shadows.strength_range": [0.5, 0.5],
-             "shadows.strength_jitter": 0.0, "shadows.blur_radius": 0.0,
+             "shadows.strength_jitter": 0.0, "shadows.blur_min": 0.0, "shadows.blur_per_px": 0.0,
              "shadows.rim_blur_range": [0.5, 0.5],
              "background.dial_circle_blur": False}
 _SHD_SEEDS = range(6)  # seeds (range of int) every shadow render test uses
@@ -829,6 +834,258 @@ def test_strength_jitter_individual():
     S0 = dict(S, strength_jitter=0.0)
     assert all(g7._shadow_strengths(S0, g7.section_rngs(s)["shadows"][0]) == (0.5, 0.5)
                for s in range(5))
+
+
+# ── physically modelled pointer shadow (hub swept, floating triangle) ───────
+
+# "section.key" -> value pins (dict): a clean scene a person can read gray levels
+# off: flat face 150-170, no noise / blur / jitter / glass / digits / triangles,
+# no stretch or displacement, a small centred hole (inside the hub), no rim
+# crescent (cutout 1, offset 0), pointer shadow always on at strength 0.6
+_PS_PINS = {"shadows.prob": 1.0, "shadows.strength_range": [0.6, 0.6],
+            "shadows.strength_jitter": 0.0, "shadows.rim_cutout_frac": [1.0, 1.0],
+            "shadows.rim_offset_frac": [0.0, 0.0],
+            "palette.bg_gray_range": [150, 170], "pointer.gray_range": [20, 60],
+            "pointer.noise_amplitude": 0, "pointer.gradient_range": [0.0, 0.0],
+            "pointer.edge_noise_amplitude": 0,
+            "background.noise_intensity": 0, "background.variation": 0,
+            "background.dial_circle_blur": False, "hier_noise.block_variance": 0,
+            "hier_noise.pixel_variance": 0, "digits.show_prob": 0.0,
+            "tri_artifacts.enabled": False, "reflections.prob": 0.0, "glares.prob": 0.0,
+            "jitter.brightness_range": [1.0, 1.0], "jitter.contrast_range": [1.0, 1.0],
+            "jitter.sharpness_range": [1.0, 1.0],
+            "geometry.stretch_h_range": [1.0, 1.0], "geometry.stretch_v_range": [1.0, 1.0],
+            "geometry.displacement_range": [0.0, 0.0],
+            "geometry.hole_ratio_range": [0.5, 0.5], "geometry.hole_disp_range": [0.0, 0.0]}
+
+
+def _shadow_geom(p):
+    """Pointer-shadow geometry of one render's params (dict), image coords
+    (valid without stretch).  Returns dict: c (x, y) float hub centre, r float
+    hub radius, u (x, y) float unit cast direction, d float px cast distance,
+    a (x, y) float unit pointer axis (hub -> apex)."""
+    g, dv, s = p["geometry"], p["derived"], p["shadows"]  # dicts
+    half = g["canvas_size"] // 2  # int px, canvas centre
+    cx = half + g["ptr_displacement_mag"] * math.cos(g["ptr_displacement_angle_rad"])
+    cy = half + g["ptr_displacement_mag"] * math.sin(g["ptr_displacement_angle_rad"])
+    lr = math.radians(s["light_angle"] - 90)  # float rad, cast direction
+    pa = math.radians(p["angle"]["angle_deg"] - 90)  # float rad, pointer direction
+    return {"c": (cx + dv["canvas_offset_x"], cy + dv["canvas_offset_y"]),
+            "r": g["hub_radius"], "u": (math.cos(lr), math.sin(lr)), "d": s["distance"],
+            "a": (math.cos(pa), math.sin(pa))}
+
+
+def _px(img, x, y):
+    """Gray (int) of img (H, W) at the pixel nearest the float point (x, y)."""
+    return int(img[int(round(y)), int(round(x))])
+
+
+def test_pointer_shadow_shapes_geometry():
+    # unblurred components: the hub shadow is the disc swept from c to c + d u
+    # (a stadium, attached to the hub); the triangle is the pointer's own raster
+    # shifted by d u
+    C = 200  # int px, canvas side
+    ys, xs = np.mgrid[:C, :C]  # (C, C) int grids
+    rng = np.random.default_rng(3)  # np Generator, random cases
+    for _ in range(12):
+        cx, cy = 100 + rng.uniform(-3, 3), 100 + rng.uniform(-3, 3)  # float px, hub centre
+        r = rng.uniform(8, 35)  # float px, hub radius
+        d = rng.uniform(0, 45)  # float px, cast distance
+        lr = rng.uniform(0, 2 * math.pi)  # float rad, cast direction
+        pa = rng.uniform(0, 2 * math.pi)  # float rad, pointer direction
+        apex = (cx + 70 * math.cos(pa), cy + 70 * math.sin(pa))
+        perp = (-math.sin(pa), math.cos(pa))  # unit across the pointer
+        bl = (cx + 0.9 * r * perp[0], cy + 0.9 * r * perp[1])
+        br = (cx - 0.9 * r * perp[0], cy - 0.9 * r * perp[1])
+        sh = g7.pointer_shadow_shapes(apex, bl, br, cx, cy, r, 85, d, lr, 0.0, 60.0, C)
+        ux, uy = math.cos(lr), math.sin(lr)  # float, unit u
+        hub = sh["hub"]  # (C, C) bool
+        assert len(sh["hub_slices"]) == g7.SHADOW_HUB_SLICES
+        assert np.array_equal(hub, np.logical_or.reduce(sh["hub_slices"]))
+        disc0 = np.hypot(xs - cx, ys - cy) <= r - 0.01  # (C, C) bool, hub disc
+        disc1 = np.hypot(xs - cx - d * ux, ys - cy - d * uy) <= r - 0.01  # disc at c + d u
+        assert hub[disc0].all() and hub[disc1].all(), (r, d)
+        # distance of every pixel centre to the segment c -> c + d u, (C, C) float
+        t = np.clip(((xs - cx) * ux + (ys - cy) * uy) / max(d, 1e-9), 0, 1) if d > 0 else 0
+        dist = np.hypot(xs - cx - t * d * ux, ys - cy - t * d * uy)
+        assert not (hub & (dist > r + 0.75)).any(), (r, d)
+        want = g7.raster_pointer_triangle((apex[0] + d * ux, apex[1] + d * uy),
+                                          (bl[0] + d * ux, bl[1] + d * uy),
+                                          (br[0] + d * ux, br[1] + d * uy), C)
+        assert np.array_equal(sh["triangle"], want)
+        assert set(np.unique(sh["arc"])) <= {0, g7.SHADOW_ARC_LEVEL}
+
+
+def test_shadow_sigmas_grow_with_distance():
+    sig_tri, sig_hub = g7.shadow_sigmas(20.0, 1.0, 0.12)  # float, list of K float
+    assert sig_tri == pytest.approx(2.4)
+    assert len(sig_hub) == 8 and sig_hub[0] == 1.0  # near the face: blur_min wins
+    assert sig_hub[-1] == pytest.approx(0.12 * 20 * 7.5 / 8)
+    assert all(a <= b for a, b in zip(sig_hub, sig_hub[1:]))
+
+
+def test_pointer_shadow_light_side_clean_far_side_dark():
+    # a person looking at the hub: toward the light the face right next to the
+    # hub is bare; away from the light the hub's shadow is attached to it
+    cfg = _cfg(**_PS_PINS)
+    off_cfg = _cfg(**{**_PS_PINS, "shadows.prob": 0.0})
+    n_light = n_far = 0  # int, samples checked on each side
+    for seed in range(40):
+        res = g7.render_image(cfg, seed)
+        img = res.image.astype(np.int32)  # (256, 256) int32
+        bare = g7.render_image(off_cfg, seed).image.astype(np.int32)  # (256, 256) int32
+        near_ptr = _dilate(_pointer_footprint(cfg, seed), 2)  # (256, 256) bool
+        geo = _shadow_geom(res.params)  # dict
+        (cx, cy), r, (ux, uy), d = geo["c"], geo["r"], geo["u"], geo["d"]
+        # light side: radius r + 3 around -u (+-20 deg), off the pointer
+        for da in np.radians(np.arange(-20, 21, 5)):
+            ang = math.atan2(-uy, -ux) + da  # float rad
+            x, y = cx + (r + 3) * math.cos(ang), cy + (r + 3) * math.sin(ang)
+            if near_ptr[int(round(y)), int(round(x))]:
+                continue
+            assert _px(img, x, y) >= 0.97 * _px(bare, x, y), (seed, math.degrees(da))
+            n_light += 1
+        # far side: d / 2 beyond the hub edge along +u, off the pointer
+        x, y = cx + (r + d / 2) * ux, cy + (r + d / 2) * uy
+        if d >= 4 and not near_ptr[int(round(y)), int(round(x))]:
+            assert _px(img, x, y) <= (1 - 0.6 * 0.7) * _px(bare, x, y), (seed, d)
+            n_far += 1
+    assert n_light >= 100 and n_far >= 20, (n_light, n_far)
+
+
+def _half_width(h, H, W2):
+    """Half-width (float px) of an isosceles triangle of height H and base
+    half-width W2 at distance h from the apex (0 outside [0, H])."""
+    return W2 * h / H if 0 <= h <= H else 0.0
+
+
+def test_pointer_shadow_separates_at_large_distance():
+    # d = 0.5 dial radius, slender pointer: wherever the shadow's offset across
+    # the pointer beats both half-widths plus 3 sigma, a person sees bare face
+    # between the pointer and its shadow on the line across mid-height.  The
+    # hub's own (swept) shadow and the shifted dial-circle arc may legitimately
+    # cross that line, so only samples clear of them by 3 sigma are judged
+    pins = {**_PS_PINS, "shadows.distance_frac_range": [0.5, 0.5],
+            "geometry.hub_ratio_range": [0.2, 0.2], "geometry.chord_ratio_range": [0.5, 0.5]}
+    cfg = _cfg(**pins)
+    off_cfg = _cfg(**{**pins, "shadows.prob": 0.0})
+    qualifying = 0  # int, seeds where a gap must exist
+    for seed in range(60):
+        res = g7.render_image(cfg, seed)
+        p, geo = res.params, _shadow_geom(res.params)  # dict, dict
+        (cx, cy), r, (ux, uy), d, (ax, ay) = geo["c"], geo["r"], geo["u"], geo["d"], geo["a"]
+        g = p["geometry"]  # dict
+        H = g["tip_dist"] + g["chord_dist"]  # float px, triangle height
+        W2 = g["chord_half"]  # float px, base half-width
+        # mid-height point M (image coords) and the unit normal n of the axis
+        mx = cx + (g["tip_dist"] - H / 2) * ax
+        my = cy + (g["tip_dist"] - H / 2) * ay
+        nx, ny = -ay, ax  # float, unit across the pointer
+        across = d * (ux * nx + uy * ny)  # float px, shadow offset across the axis
+        along = d * (ux * ax + uy * ay)  # float px, shadow offset along the axis (toward apex)
+        # the shadow's point on this line comes from the triangle at H/2 + along
+        # from the apex (the shift moved it `along` toward the apex)
+        w_ptr = _half_width(H / 2, H, W2)  # float px, pointer half-width on the line
+        w_sh = _half_width(H / 2 + along, H, W2)  # float px, shadow half-width on the line
+        sig = p["shadows"]["blur_triangle"]  # float px
+        sig_hub = p["shadows"]["blur_hub_far"]  # float px
+        if w_sh <= 0 or abs(across) <= w_ptr + w_sh + 3 * sig:
+            continue
+        sgn = 1.0 if across > 0 else -1.0  # float, side the shadow falls on
+        clear = []  # (x, y) float px samples a person can judge as bare face
+        for s in np.arange(w_ptr + 1.5, abs(across) - w_sh - 3 * sig, 0.5):
+            x, y = mx + sgn * s * nx, my + sgn * s * ny  # float px, sample point
+            t = min(max(((x - cx) * ux + (y - cy) * uy) / d, 0.0), 1.0)  # sweep param
+            hub_gap = math.hypot(x - cx - t * d * ux, y - cy - t * d * uy) - r  # float px
+            arc_gap = abs(math.hypot(x - cx - d * ux, y - cy - d * uy)
+                          - g["dial_radius"])  # float px, from the shifted circle
+            if hub_gap >= 3 * sig_hub + 1 and arc_gap >= 3 * sig + 2:
+                clear.append((x, y))
+        if not clear:
+            continue
+        qualifying += 1
+        img = res.image.astype(np.int32)  # (256, 256) int32
+        bare = g7.render_image(off_cfg, seed).image.astype(np.int32)  # (256, 256) int32
+        for x, y in clear:
+            assert _px(img, x, y) >= 0.97 * _px(bare, x, y), (seed, x, y, across, w_ptr, w_sh)
+        # and the shadow itself is there, visibly darker than the bare face (a
+        # slender blurred triangle is faint: its peak is ~ s erf(w / (sigma sqrt 2)))
+        sx, sy = mx + across * nx, my + across * ny  # float px, shadow midline
+        assert _px(img, sx, sy) < 0.97 * _px(bare, sx, sy), (seed, across)
+    assert qualifying >= 10, qualifying
+
+
+def _edge_width(profile, step):
+    """10-90 % width (float px) of a monotone-decreasing edge profile
+    ((N,) float, 1 -> 0), sampled every `step` px."""
+    hi_i = np.argmax(profile < 0.9)  # first sample below 90 %
+    lo_i = np.argmax(profile < 0.1)  # first sample below 10 %
+    return (lo_i - hi_i) * step
+
+
+def _bilinear(a, x, y):
+    """Bilinear sample of a (H, W) float array at float (x, y) (pixel centre i at i)."""
+    x0, y0 = int(math.floor(x)), int(math.floor(y))
+    fx, fy = x - x0, y - y0
+    return ((1 - fx) * (1 - fy) * a[y0, x0] + fx * (1 - fy) * a[y0, x0 + 1]
+            + (1 - fx) * fy * a[y0 + 1, x0] + fx * fy * a[y0 + 1, x0 + 1])
+
+
+def test_hub_penumbra_grows_along_the_sweep():
+    # across the stadium's side boundary the edge is sharp near the hub and
+    # soft near the far end (blur grows with the cast distance)
+    C = 240  # int px, canvas side
+    for d, lr in ((15.0, 0.3), (25.0, 2.0), (40.0, 4.0)):
+        cx = cy = 120.0  # float px, hub centre
+        r = 30.0  # float px, hub radius
+        sh = g7.pointer_shadow_shapes((cx, cy - 1), (cx - 0.5, cy), (cx + 0.5, cy),
+                                      cx, cy, r, 85, d, lr, 0.0, 0.0, C)
+        sh["triangle"][:] = False  # hub sweep alone
+        sh["arc"][:] = 0
+        m, _, sig_hub = g7.pointer_shadow_mask(sh, d, 1.0, 0.12)  # (C, C) float32
+        ux, uy = math.cos(lr), math.sin(lr)  # float, unit u
+        nx, ny = -uy, ux  # float, unit across u
+        widths = []  # float px, 10-90 % width at t = 0.15 and t = 0.9
+        for t in (0.15, 0.9):
+            px0, py0 = cx + t * d * ux, cy + t * d * uy  # point on the sweep axis
+            ss = np.arange(r - 10, r + 10, 0.1)  # (N,) float px across the side edge
+            prof = np.array([_bilinear(m, px0 + s * nx, py0 + s * ny) for s in ss])
+            widths.append(_edge_width(prof, 0.1))
+        assert widths[0] < widths[1], (d, widths, sig_hub)
+
+
+def test_pointer_not_darkened_by_its_shadow():
+    # the plate and hub sit above the shadow: the body reads the same gray
+    for seed in range(8):
+        on = _cfg(**_PS_PINS)
+        off = _cfg(**{**_PS_PINS, "shadows.prob": 0.0})
+        body = _erode(_pointer_footprint(on, seed), 3)  # (256, 256) bool
+        a = g7.render_image(on, seed).image.astype(np.int32)
+        b = g7.render_image(off, seed).image.astype(np.int32)
+        assert body.sum() > 50
+        assert abs(float(np.median(a[body])) - float(np.median(b[body]))) <= 1.0, seed
+
+
+def test_shadow_distance_changes_only_the_shadow():
+    # the cast distance is ONE draw at the old offset's position: changing its
+    # range changes no other section's draws; params record d = frac * radius
+    a = _cfg(**{"shadows.prob": 1.0})
+    b = _cfg(**{"shadows.prob": 1.0, "shadows.distance_frac_range": [0.4, 0.5]})
+    for seed in range(5):
+        pa, pb = g7.render_image(a, seed).params, g7.render_image(b, seed).params
+        for sec in pa:
+            if sec != "shadows":
+                assert pa[sec] == pb[sec], (seed, sec)
+        sb = pb["shadows"]  # dict
+        assert 0.4 <= sb["distance_frac"] <= 0.5
+        assert sb["distance"] == pytest.approx(sb["distance_frac"] * pb["geometry"]["dial_radius"],  # frac rounded to 4 dp
+                                               abs=0.02)
+        assert sb["blur_triangle"] == pytest.approx(max(1.0, 0.12 * sb["distance"]), abs=1e-3)
+        assert "offset" not in sb
+        assert {k: v for k, v in pa["shadows"].items() if k not in
+                ("distance_frac", "distance", "blur_triangle", "blur_hub_far")} == \
+            {k: v for k, v in sb.items() if k not in
+             ("distance_frac", "distance", "blur_triangle", "blur_hub_far")}
 
 
 # ── tip label = visible tip (cut_tip aware) ─────────────────────────────
@@ -1796,7 +2053,7 @@ def test_render_records_forbidden_interval():
 # bg * 0.2), any pointer gray, flat face 150-170, nothing that perturbs gray
 # levels (noise, blur, jitter, effects), so a person can read the levels off
 _GAP_PINS = {"shadows.prob": 1.0, "shadows.strength_range": [0.8, 0.8],
-             "shadows.strength_jitter": 0.0, "shadows.blur_radius": 0.0,
+             "shadows.strength_jitter": 0.0, "shadows.blur_min": 0.0, "shadows.blur_per_px": 0.0,
              "shadows.rim_blur_range": [0.5, 0.5],
              "pointer.gray_range": [0, 255], "palette.bg_gray_range": [150, 170],
              "pointer.noise_amplitude": 0, "pointer.gradient_range": [0.0, 0.0],

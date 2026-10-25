@@ -32,6 +32,7 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
   │ 3  ticks -> separate overlay (value + alpha)          [td layer] │
   │ 4  rim crescent shadow mask m_r    ─┐ only if has_shadow;        │
   │ 5  pointer + circle shadow mask m_p ┘ masks only, img untouched; │
+  │    (hub swept from the face + floating triangle, penumbra ∝ d)   │
   │    d = max(s_p*m_p, s_r*m_r)  float32 darkening  [d layer]       │
   │    (built at 7, s_p / s_r as drawn; the pointer gray avoids them)│
   │ 6  digits -> overlay                                  [td layer] │
@@ -130,7 +131,31 @@ ambient light, so it scales the surface by an albedo-independent factor,
 out = in * (1 - d).  One shared strength s per image, jittered separately
 for the pointer (s_p) and rim (s_r) shadows; overlapping shadows of the
 one light do not compound (max, not product).  Ticks, digits, noise and
-triangles under a shadow are darkened by the same factor.  Shadows keep their
+triangles under a shadow are darkened by the same factor; the pointer, hub
+and hole sit above the face and are never darkened.
+
+The pointer shadow is modelled (pointer_shadow_shapes / pointer_shadow_mask):
+the hub is a cylinder standing ON the face, the triangle plate sits on its
+top, and the light casts every point at height h by h cot(elev) along u (the
+unit vector away from the light, from light_angle).  One draw
+distance_frac ~ U(shadows.distance_frac_range) gives d = distance_frac *
+dial_radius, the plate's cast distance:
+
+     side view                              top view (light from upper-left)
+       light                                   ╭───╮
+         ╲   plate (height z)                   │hub│▒▒╮   hub: disc swept along u from
+          ╲ ▬▬▬▬▬▬▬▬▬▬▬▬▬                       ╰───╯▒▒│   0 to d (a stadium), attached
+           ╲  ┃hub┃                               ╰▒▒▒▒╯   to the hub; the part under the
+      ══════╲═┻━━━┻═══ face                                hub is hidden -> far-side crescent
+             ●──d──►    d = z cot(elev)            triangle: shifted by d u (floating plate):
+                                                   small d -> a sliver beside the pointer,
+                                                   large d -> the whole triangle, separated
+
+Penumbra: sigma = max(blur_min, blur_per_px * cast distance).  Triangle and
+the shifted dial-circle arc (SHADOW_ARC_LEVEL): blur_per_px * d.  Hub: K =
+SHADOW_HUB_SLICES slices of the sweep, slice k blurred with t_k d, t_k =
+(k + 0.5) / K, so the edge is sharp at the hub and soft at the far end.
+m_p = max of the blurred components.  Shadows keep their
 drawn strengths; instead pointer.min_bg_contrast (c) restrains the POINTER gray,
 which is drawn after the bg gray and the shadow strengths (separate streams,
 drawn earlier, so no draw order changes):
@@ -239,7 +264,9 @@ bool, str, list); positions are image px unless named otherwise.
     ticks          drawn; when drawn: angle_jitter, gray, per_digit,
                    major_lens[10], major_widths[10], inner_radius
     shadows        active, light_angle, s_p, s_r, rim_offset_frac,
-                   rim_cutout_frac, rim_blur, offset
+                   rim_cutout_frac, rim_blur, distance_frac, distance (px,
+                   = distance_frac * dial_radius), blur_triangle (sigma px),
+                   blur_hub_far (sigma px of the last hub slice)
     pointer        gray, hole_gray, edge_gray, gradient, edge_thickness,
                    forbidden_lo, forbidden_hi (pointer gray interval it avoided;
                    only enforced when min_bg_contrast > 0), gray_fallback (bool:
@@ -288,6 +315,7 @@ NUM_IMAGES = 30000  # default number of images (int) for the CLI
 NUM_DIGITS = 10  # digits on the dial face (int)
 DEG_PER_DIGIT = 360.0 / NUM_DIGITS  # angular pitch of the digits (float, deg)
 SHADOW_ARC_LEVEL = 128  # mask level (int, of 255) of the dial-circle shadow arc: 0.5 x the pointer
+SHADOW_HUB_SLICES = 8  # K (int): slices of the hub-shadow sweep, each blurred with its own sigma
 
 # RNG stream names (tuple[str, ...]): every config section that draws random
 # values, plus "angle" for the pointer angle (canvas/dataset draw nothing).
@@ -487,30 +515,120 @@ def draw_scale_digits(td_value, td_alpha, cx, cy, dial_radius, tick_inner_radius
 
 # ── shadows ─────────────────────────────────────────────────────────────
 
-def draw_shadow(mask, apex, base_left, base_right,
-                cx, cy, hub_radius, dial_radius,
-                offset_dx, offset_dy, gap_start_deg, gap_span_deg):
-    """Draw the offset pointer shadow and the circle shadow shape into a mask.
+def _stadium(canvas_size, x0, y0, x1, y1, radius):
+    """Pixels whose centre lies within `radius` of the segment (x0, y0) -> (x1, y1).
 
-    mask : "L" image (C, C), 0 = no shadow.  The triangle + hub are drawn at
-    255 (shape 1.0; the triangle via raster_pointer_triangle, like the
-    pointer), the offset dial-circle arc at SHADOW_ARC_LEVEL (~0.5).
-    The arc goes first, so the pointer shape wins where they overlap.  The
-    mask is blurred later, so the tip naturally loses its sharpness.
+    All args float px (canvas_size int); a zero-length segment gives a disc.
+    Returns (C, C) bool.
     """
-    mdraw = ImageDraw.Draw(mask)  # draws the shadow shape into the mask
-    tri = [(p[0] + offset_dx, p[1] + offset_dy) for p in (apex, base_left, base_right)]
-    scx, scy = cx + offset_dx, cy + offset_dy  # float px, shadow hub centre
-    # offset outer circle (with matching arc gap), half as dark as the pointer
-    bbox = [scx - dial_radius, scy - dial_radius, scx + dial_radius, scy + dial_radius]
-    _arc_or_circle(mdraw, bbox, gap_start_deg, gap_span_deg, SHADOW_ARC_LEVEL, 2)
-    hub_box = [scx - hub_radius, scy - hub_radius, scx + hub_radius, scy + hub_radius]
-    # the triangle: the same hard raster as the pointer itself (exact float
-    # vertices, round(width) px per scan line), pasted at 255 over the arc
-    m_arr = np.array(mask)  # (C, C) uint8, mask so far (the arc)
-    m_arr[raster_pointer_triangle(tri[0], tri[1], tri[2], mask.size)] = 255
-    mask.paste(Image.fromarray(m_arr))
-    mdraw.ellipse(hub_box, fill=255)
+    ys, xs = np.ogrid[:canvas_size, :canvas_size]  # (C, 1), (1, C) int grids
+    vx, vy = x1 - x0, y1 - y0  # float px, segment vector
+    len2 = vx * vx + vy * vy  # float px^2, squared segment length
+    if len2 <= 1e-12:
+        t = 0.0  # float: degenerate segment, nearest point is the start
+    else:
+        # (C, C) float64 in 0-1: projection of each pixel centre onto the segment
+        t = np.clip(((xs - x0) * vx + (ys - y0) * vy) / len2, 0.0, 1.0)
+    dx, dy = xs - (x0 + t * vx), ys - (y0 + t * vy)  # (C, C) float64, offset to the nearest point
+    return dx * dx + dy * dy <= radius * radius
+
+
+def pointer_shadow_shapes(apex, base_left, base_right, cx, cy, hub_radius, dial_radius,
+                          dist, light_rad, gap_start_deg, gap_span_deg, canvas_size,
+                          slices=SHADOW_HUB_SLICES):
+    """Pre-blur shape masks of the physically modelled pointer shadow.
+
+    The hub is a cylinder standing ON the face; the triangle plate sits on its
+    top.  Light from -u casts every point at height h by h cot(elev) along u;
+    the plate is at the top, so it casts by the full distance d (dist):
+
+         side view                          top view (u = away from the light)
+           light                                ╭───╮
+             ╲   plate (height z)               │hub│▒▒╮   hub: the disc swept along u
+              ╲ ▬▬▬▬▬▬▬▬▬▬▬▬▬                   ╰───╯▒▒│   from 0 to d (a stadium); the
+               ╲  ┃hub┃                           ╰▒▒▒▒╯   part under the hub is hidden
+          ══════╲═┻━━━┻═══ face                           by the hub -> a crescent on
+                 ●──d──►    d = z cot(elev)               the far side only
+                                                triangle: shifted by d u (floating plate)
+
+    apex, base_left, base_right : (x, y) float px, the pointer's exact vertices
+    cx, cy, hub_radius          : float px, hub centre and radius
+    dial_radius                 : int px; the printed dial circle is shifted too
+    dist                        : float px, cast distance d (>= 0)
+    light_rad                   : float rad, direction u the shadow is cast in
+                                  (image coords, 0 = +x, clockwise)
+    gap_start_deg, gap_span_deg : float deg, the dial circle's arc gap (PIL arc)
+    canvas_size                 : int C
+    slices                      : int K, hub-sweep slices
+
+    Returns dict:
+      "hub"        (C, C) bool, the whole stadium (union of the slices)
+      "hub_slices" list of K (C, C) bool, slice k = the stadium segment for
+                   t in [k/K, (k+1)/K] (hub disc centred at c + t d u)
+      "triangle"   (C, C) bool, raster_pointer_triangle of the vertices + d u
+      "arc"        (C, C) uint8, the dial-circle outline (width 2, same arc gap)
+                   shifted by d u, at SHADOW_ARC_LEVEL (0 elsewhere)
+    """
+    ux, uy = math.cos(light_rad), math.sin(light_rad)  # float, unit cast direction u
+    ox, oy = dist * ux, dist * uy  # float px, full cast offset d u
+    hub_slices = []  # list of K (C, C) bool, stadium segments
+    for k in range(slices):
+        t0, t1 = k / slices, (k + 1) / slices  # float, slice's sweep interval
+        hub_slices.append(_stadium(canvas_size, cx + t0 * ox, cy + t0 * oy,
+                                   cx + t1 * ox, cy + t1 * oy, hub_radius))
+    hub = np.logical_or.reduce(hub_slices)  # (C, C) bool, union stadium
+    tri = [(p[0] + ox, p[1] + oy) for p in (apex, base_left, base_right)]  # 3 (x, y) float
+    triangle = raster_pointer_triangle(tri[0], tri[1], tri[2], canvas_size)  # (C, C) bool
+    arc_img = Image.new("L", (canvas_size, canvas_size), 0)  # "L" (C, C), shifted circle
+    scx, scy = cx + ox, cy + oy  # float px, shifted hub centre (the circle's centre)
+    _arc_or_circle(ImageDraw.Draw(arc_img),
+                   [scx - dial_radius, scy - dial_radius, scx + dial_radius, scy + dial_radius],
+                   gap_start_deg, gap_span_deg, SHADOW_ARC_LEVEL, 2)
+    return {"hub": hub, "hub_slices": hub_slices, "triangle": triangle,
+            "arc": np.array(arc_img, dtype=np.uint8)}
+
+
+def shadow_sigmas(dist, blur_min, blur_per_px, slices=SHADOW_HUB_SLICES):
+    """Penumbra widths of the pointer shadow (Gaussian sigma, float px).
+
+    An edge at height h casts by h cot(elev) and its penumbra grows with that
+    distance: sigma = max(blur_min, blur_per_px * cast distance).
+      triangle / arc (all at the plate height): max(blur_min, blur_per_px d)
+      hub slice k (height rises 0 -> top, t_k = (k + 0.5) / K): max(blur_min,
+      blur_per_px t_k d)
+    Returns (sigma_tri float, sigma_hub list of K float).
+    """
+    sig_tri = max(blur_min, blur_per_px * dist)  # float px
+    sig_hub = [max(blur_min, blur_per_px * (k + 0.5) / slices * dist)
+               for k in range(slices)]  # list of K float px
+    return sig_tri, sig_hub
+
+
+def _blur_mask(mask_u8, sigma):
+    """Gaussian blur (PIL, radius = sigma px, float) of a (C, C) uint8 mask;
+    returns (C, C) float32 in 0-1.  sigma <= 0 leaves it sharp."""
+    im = Image.fromarray(mask_u8)
+    if sigma > 0:
+        im = im.filter(ImageFilter.GaussianBlur(radius=sigma))
+    return np.asarray(im, dtype=np.float32) / 255.0
+
+
+def pointer_shadow_mask(shapes, dist, blur_min, blur_per_px):
+    """Blurred pointer-shadow shape m_p (0-1) from pointer_shadow_shapes.
+
+    Every hub slice is blurred with its own sigma (sharp where the hub meets
+    the face, soft at the far end); the triangle and the shifted arc together
+    with the triangle's sigma (the triangle at 255 wins over the arc).  The
+    components are combined with max.
+    Returns (m_p (C, C) float32 0-1, sigma_tri float px, sigma_hub list of K float px).
+    """
+    sig_tri, sig_hub = shadow_sigmas(dist, blur_min, blur_per_px, len(shapes["hub_slices"]))
+    ta = shapes["arc"].copy()  # (C, C) uint8, arc + triangle at 255
+    ta[shapes["triangle"]] = 255
+    m_p = _blur_mask(ta, sig_tri)  # (C, C) float32
+    for sl, sg in zip(shapes["hub_slices"], sig_hub):
+        np.maximum(m_p, _blur_mask(sl.astype(np.uint8) * 255, sg), out=m_p)
+    return m_p, sig_tri, sig_hub
 
 
 def draw_rim_shadows(cx, cy, dial_radius, canvas_size, light_angle,
@@ -1721,10 +1839,15 @@ def render_image(cfg, image_seed):
     rim_offset = srng.uniform(*S["rim_offset_frac"])  # float, crescent offset / dial radius
     rim_cutout = srng.uniform(*S["rim_cutout_frac"])  # float, cutout radius / dial radius
     rim_blur = srng.uniform(*S["rim_blur_range"])  # float px, rim mask blur
-    shd_dist = srng.uniform(*S["offset_range"])  # float px, pointer shadow offset
+    # cast distance of the pointer shadow: ONE uniform draw at the position of
+    # the old px offset draw, so the stream's draw count is unchanged
+    dist_frac = srng.uniform(*S["distance_frac_range"])  # float, d / dial_radius
+    shd_dist = dist_frac * dial_radius  # float px, cast distance d
+    sig_tri, sig_hub = shadow_sigmas(shd_dist, S["blur_min"], S["blur_per_px"])  # float px, list
     rec["shadows"] = {"active": has_shadow, "light_angle": light_angle, "s_p": s_p, "s_r": s_r,
                       "rim_offset_frac": rim_offset, "rim_cutout_frac": rim_cutout,
-                      "rim_blur": rim_blur, "offset": shd_dist}
+                      "rim_blur": rim_blur, "distance_frac": dist_frac, "distance": shd_dist,
+                      "blur_triangle": sig_tri, "blur_hub_far": sig_hub[-1]}
     # shadow darkening fraction on the canvas, (C, C) float32 in 0-1, or None
     # when the image has no shadow; nothing is composited onto img here, it
     # is applied once at step 13 as img * (1 - d)
@@ -1742,12 +1865,13 @@ def render_image(cfg, image_seed):
         s_bl = (bmx + chord_half * perp[0], bmy + chord_half * perp[1])
         s_br = (bmx - chord_half * perp[0], bmy - chord_half * perp[1])
         light_rad = math.radians(light_angle - 90)  # shadow-cast direction (float, rad)
-        p_mask = Image.new("L", (canvas_size, canvas_size), 0)  # pointer shadow shape, "L" (C, C)
-        draw_shadow(p_mask, s_apex, s_bl, s_br, ptr_cx, ptr_cy,
-                    hub_radius, dial_radius, shd_dist * math.cos(light_rad),
-                    shd_dist * math.sin(light_rad), gap_start_deg, gap_span_deg)
-        blur = ImageFilter.GaussianBlur(radius=S["blur_radius"])  # shadow blur filter (PIL)
-        m_p = np.asarray(p_mask.filter(blur), dtype=np.float32) / 255.0  # (C, C) float32, 0-1
+        # pre-blur component masks (dict, see pointer_shadow_shapes): hub swept
+        # from the face, triangle plate shifted by d u, shifted dial-circle arc
+        shapes = pointer_shadow_shapes(s_apex, s_bl, s_br, ptr_cx, ptr_cy, hub_radius,
+                                       dial_radius, shd_dist, light_rad,
+                                       gap_start_deg, gap_span_deg, canvas_size)
+        m_p = pointer_shadow_mask(shapes, shd_dist, S["blur_min"],
+                                  S["blur_per_px"])[0]  # (C, C) float32, 0-1
 
     # --- 6 digits on the overlay ---
     if show_digits:

@@ -94,8 +94,9 @@ shadows:
   prob: 0.5  # float scalar; probability of pointer + rim shadows
   strength_range: [0.50, 0.62]  # [lo, hi] float; shared darkening fraction s per image (0 = none, 1 = black)
   strength_jitter: 0.05  # float scalar; per-shadow +/- jitter of s, drawn separately for pointer and rim
-  offset_range: [15.0, 25.0]  # [lo, hi] float; pointer shadow displacement (px)
-  blur_radius: 2.5  # float scalar; pointer shadow Gaussian blur (px)
+  distance_frac_range: [0.05, 0.3]  # [lo, hi] float; pointer shadow cast distance d / dial radius (plate height x cot(light elevation))
+  blur_min: 1.0  # float scalar; pointer shadow blur sigma (px) where the hub meets the face
+  blur_per_px: 0.12  # float scalar; penumbra: extra blur sigma (px) per px of cast distance
   rim_offset_frac: [0.15, 0.35]  # [lo, hi] float; crescent offset / dial radius
   rim_cutout_frac: [0.8, 0.95]  # [lo, hi] float; crescent cutout radius / dial radius
   rim_blur_range: [4.0, 8.0]  # [lo, hi] float; rim shadow blur radius (px)

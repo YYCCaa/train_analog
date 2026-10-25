@@ -345,7 +345,7 @@ FLOAT_RANGES = [  # keys the old code draws with random.uniform
     "ticks.angle_jitter_range", "digits.outside_jitter_range",
     "digits.inside_jitter_range",
     "digits.angle_jitter_range", "digits.gap_range",
-    "pointer.gradient_range", "shadows.offset_range",
+    "pointer.gradient_range", "shadows.distance_frac_range",
     "geometry.scale_range", "jitter.contrast_range",
     "shadows.strength_range",
     "reflections.rotation_range", "reflections.aspect_range", "reflections.shear_range",
@@ -419,6 +419,34 @@ def test_old_tip_label_keys_removed_with_warning():
     for key in ("contrast_frac", "base_blur", "patch_size", "min_ratio"):
         w = _warned(warns, f"tip_label.{key}:")  # list[str]
         assert w and "removed in a newer version" in w[0], (key, warns)
+
+
+def test_old_shadow_offset_keys_removed_with_warning():
+    # a YAML from the px-offset shadow era loads; offset_range / blur_radius are
+    # dropped with a warning naming their replacements, the new keys take defaults
+    old = "shadows:\n  offset_range: [15, 25]\n  blur_radius: 2.5\n"  # str, old section
+    cfg, warns = vc.parse_config_text_with_warnings(old)
+    vc.validate_config(cfg)
+    assert "offset_range" not in cfg["shadows"] and "blur_radius" not in cfg["shadows"]
+    assert cfg["shadows"]["distance_frac_range"] == [0.05, 0.3]
+    assert (cfg["shadows"]["blur_min"], cfg["shadows"]["blur_per_px"]) == (1.0, 0.12)
+    w = _warned(warns, "shadows.offset_range:")  # list[str]
+    assert w and "removed in a newer version" in w[0] and "shadows.distance_frac_range" in w[0]
+    w = _warned(warns, "shadows.blur_radius:")  # list[str]
+    assert w and "shadows.blur_min" in w[0] and "shadows.blur_per_px" in w[0], warns
+
+
+def test_shadow_distance_keys_schema():
+    leaves = _leaves(vc.load_schema())  # dict "section.key" -> schema leaf
+    want = {"shadows.distance_frac_range": ("float_range", 0.0, 0.6, 0.01),
+            "shadows.blur_min": ("float", 0.0, 6.0, 0.1),
+            "shadows.blur_per_px": ("float", 0.0, 0.5, 0.01)}  # name -> (type, min, max, step)
+    for name, (t, lo, hi, st) in want.items():
+        leaf = leaves[name]
+        assert (leaf["type"], leaf["min"], leaf["max"], leaf["step"]) == (t, lo, hi, st), name
+        assert leaf["help"], name
+    assert leaves["shadows.distance_frac_range"]["help"].startswith(
+        "How far the pointer shadow is cast, as a fraction of the dial radius")
 
 
 def test_range_types_match_draw_kind():
