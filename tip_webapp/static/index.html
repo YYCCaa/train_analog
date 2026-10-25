@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Tip finder</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23171a21' stroke='%239aa3b2' stroke-width='2'/%3E%3Cpath d='M16 17 25 8' stroke='%2322d3ee' stroke-width='3' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='17' r='2.5' fill='%23e7e9ee'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app" data-testid="app" data-state="idle">
+    <header class="topbar">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <circle cx="16" cy="16" r="13.5" class="mark-face"/>
+          <path d="M16 17 25 8" class="mark-needle"/>
+          <circle cx="25" cy="8" r="2.6" class="mark-tip"/>
+          <circle cx="16" cy="17" r="2.4" class="mark-hub"/>
+        </svg>
+        <h1>Tip finder</h1>
+      </div>
+      <p class="model-badge" id="model-badge" data-testid="model-badge" title="Loading model information">Loading model…</p>
+    </header>
+
+    <div class="toolbar" role="toolbar" aria-label="Image and prediction tools">
+      <div class="tool-group">
+        <button type="button" class="btn btn-primary" id="open-button" data-testid="open-button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg>
+          Open image…
+        </button>
+        <input type="file" id="file-input" data-testid="file-input" accept="image/*" class="visually-hidden"
+               tabindex="-1" aria-hidden="true">
+        <button type="button" class="btn" id="camera-button" data-testid="camera-button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8a2 2 0 0 1 2-2h2l1.5-2h5L16 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><circle cx="12" cy="12.5" r="3.5"/></svg>
+          Camera
+        </button>
+        <div class="samples-wrap">
+          <button type="button" class="btn" id="samples-button" data-testid="samples-button"
+                  aria-expanded="false" aria-controls="samples-menu">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>
+            Samples
+          </button>
+          <div class="samples-menu" id="samples-menu" data-testid="samples-menu" role="group"
+               aria-label="Labelled sample dials" hidden>
+            <p class="samples-head">Validation dials with ground truth</p>
+            <div class="samples-grid" id="samples-grid"></div>
+          </div>
+        </div>
+      </div>
+      <div class="tool-group">
+        <button type="button" class="btn btn-ghost" id="fit-button" data-testid="fit-button"
+                title="Fit the whole image in view">Fit</button>
+        <span class="zoom-label" id="zoom-label" data-testid="zoom-label" aria-label="Zoom level">–</span>
+      </div>
+      <div class="tool-group tool-group-end">
+        <label class="check" for="auto-predict">
+          <input type="checkbox" id="auto-predict" data-testid="auto-predict" checked>
+          Auto-predict on release
+        </label>
+        <button type="button" class="btn btn-accent" id="predict-button" data-testid="predict-button" disabled>
+          <span class="btn-spinner" aria-hidden="true"></span>
+          <span class="btn-label">Predict</span>
+        </button>
+      </div>
+    </div>
+
+    <main class="workspace">
+      <section class="stage-card" aria-labelledby="stage-heading">
+        <h2 id="stage-heading" class="visually-hidden">Image and square selection</h2>
+        <div class="stage" id="stage" data-testid="stage" tabindex="0"
+             role="group" aria-roledescription="selection canvas"
+             aria-label="Image. Drag to select a square; drag inside to move it, drag a corner to resize."
+             aria-describedby="stage-keys statusbar"
+             data-scale="1" data-offset-x="0" data-offset-y="0" data-natural-w="0" data-natural-h="0"
+             data-heatmap="on" data-heatmap-scale="log" data-heatmap-opacity="0.7">
+          <canvas id="stage-canvas" data-testid="stage-canvas" aria-hidden="true"></canvas>
+
+          <div class="stage-empty" id="stage-empty" data-testid="stage-empty">
+            <svg class="stage-empty-icon" viewBox="0 0 48 48" aria-hidden="true">
+              <circle cx="24" cy="24" r="19"/><path d="M24 25 36 13"/><circle cx="24" cy="25" r="3"/>
+              <path d="M10 24h3M35 24h3M24 10v3M14 14l2 2M32 32l2 2M14 34l2-2" />
+            </svg>
+            <p class="stage-empty-title">Open a dial photo to find its pointer tip</p>
+            <p class="stage-empty-hint">
+              <strong>Open image…</strong>, drop a file here, paste with <kbd>Ctrl</kbd>+<kbd>V</kbd>,
+              take one <strong>Camera</strong> frame, or try a <strong>Sample</strong>.
+            </p>
+            <p class="stage-empty-hint">Then drag a square around the dial, like Paint's select tool.</p>
+          </div>
+
+          <div class="camera" id="camera-panel" data-testid="camera-panel" data-state="off" hidden>
+            <video id="camera-video" data-testid="camera-video" playsinline muted autoplay></video>
+            <div class="camera-bar">
+              <label class="visually-hidden" for="camera-select">Camera</label>
+              <select id="camera-select" data-testid="camera-select" hidden></select>
+              <button type="button" class="btn btn-accent" id="capture-button" data-testid="capture-button" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="3" class="fill"/></svg>
+                Capture
+              </button>
+              <button type="button" class="btn" id="camera-cancel" data-testid="camera-cancel">Cancel</button>
+            </div>
+          </div>
+
+          <div class="drop-hint" id="drop-hint" aria-hidden="true">Drop the image to open it</div>
+        </div>
+
+        <div class="statusbar" id="statusbar" data-testid="statusbar">
+          <span class="status-item" title="Cursor position in image pixels">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2l9 5-4 1-1 4z"/></svg>
+            <span id="status-cursor" data-testid="status-cursor">–</span>
+          </span>
+          <span class="status-item" title="Selection: left,top · size">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" stroke-dasharray="2 2"/></svg>
+            <span id="status-selection" data-testid="status-selection">–</span>
+          </span>
+          <span class="status-item" title="Working image size">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3.5" width="12" height="9" rx="1"/></svg>
+            <span id="status-image" data-testid="status-image">–</span>
+          </span>
+          <span class="status-item status-hint" id="stage-keys"><span><kbd>←↑→↓</kbd>&nbsp;move&nbsp;(<kbd>Shift</kbd>&nbsp;×10)
+            · <kbd>+</kbd>&nbsp;<kbd>−</kbd>&nbsp;size · <kbd>Enter</kbd>&nbsp;predict · wheel&nbsp;zoom ·
+            <kbd>Space</kbd>+drag or middle-drag&nbsp;pan</span></span>
+        </div>
+
+        <div class="error" id="error-box" data-testid="error-box" role="alert" hidden></div>
+        <div class="notice" id="notice-box" data-testid="notice-box" hidden></div>
+      </section>
+
+      <aside class="side" aria-label="Prediction and cues">
+        <section class="card readout" id="readout" data-testid="readout" aria-labelledby="readout-heading"
+                 data-state="empty">
+          <div class="card-head">
+            <h2 id="readout-heading">Prediction</h2>
+            <span class="chip" id="verdict-chip" data-testid="verdict-chip" hidden></span>
+          </div>
+          <p class="status" id="status" data-testid="status" role="status" aria-live="polite">
+            Select a square on an image, then predict.
+          </p>
+          <dl class="facts">
+            <div><dt>Tip (image px)</dt><dd id="out-tip" data-testid="out-tip">–</dd></div>
+            <div><dt>Tip (model px)</dt><dd id="out-tip-model" data-testid="out-tip-model">–</dd></div>
+            <div><dt>Confidence <span class="hint" title="Probability mass inside the 5×5 decode window">ⓘ</span></dt>
+                 <dd id="out-confidence" data-testid="out-confidence">–</dd></div>
+            <div><dt>Peak prob</dt><dd id="out-peak" data-testid="out-peak">–</dd></div>
+            <div><dt>Runner-up <span class="hint" title="Mass of the second-best look-alike peak">ⓘ</span></dt>
+                 <dd id="out-runner" data-testid="out-runner">–</dd></div>
+            <div><dt>Square</dt><dd id="out-box" data-testid="out-box">–</dd></div>
+            <div class="gt-row" hidden><dt><span class="swatch swatch-gt" aria-hidden="true"></span>Ground truth</dt>
+                 <dd id="out-gt" data-testid="out-gt">–</dd></div>
+            <div class="gt-row" hidden><dt>Error</dt><dd id="out-error" data-testid="out-error">–</dd></div>
+            <div class="wide"><dt>Timing</dt><dd id="out-timing" data-testid="out-timing">–</dd></div>
+          </dl>
+          <ol class="candidates" id="candidates" data-testid="candidates" aria-label="Candidate peaks"></ol>
+        </section>
+
+        <section class="card cues" aria-labelledby="cues-heading">
+          <div class="card-head">
+            <h2 id="cues-heading">Heatmap</h2>
+            <label class="switch" for="heatmap-toggle">
+              <input type="checkbox" id="heatmap-toggle" data-testid="heatmap-toggle" role="switch" checked>
+              <span class="switch-track" aria-hidden="true"></span>
+              <span>Show heatmap</span>
+            </label>
+          </div>
+          <div class="cue-row">
+            <label for="heatmap-opacity">Opacity</label>
+            <input type="range" id="heatmap-opacity" data-testid="heatmap-opacity" min="0" max="100" step="5" value="70"
+                   aria-describedby="heatmap-opacity-value">
+            <output id="heatmap-opacity-value" for="heatmap-opacity">70%</output>
+          </div>
+          <div class="cue-row">
+            <span id="scale-label">Scale</span>
+            <div class="segmented" role="radiogroup" aria-labelledby="scale-label">
+              <label><input type="radio" name="heatmap-scale" value="log" data-testid="scale-log" checked><span>Log</span></label>
+              <label><input type="radio" name="heatmap-scale" value="linear" data-testid="scale-linear"><span>Linear</span></label>
+            </div>
+          </div>
+          <div class="legend" aria-hidden="true">
+            <canvas id="legend-canvas" width="256" height="12"></canvas>
+            <div class="legend-ticks" id="legend-ticks"></div>
+          </div>
+          <p class="cue-help" id="scale-help">Log shows log₁₀ p from 10⁻⁶ to 1, so secondary hypotheses stay visible.</p>
+          <ul class="key" aria-label="Marker key">
+            <li><span class="swatch swatch-tip" aria-hidden="true"></span>Predicted tip, ring = 7 px budget at model scale</li>
+            <li><span class="swatch swatch-cand" aria-hidden="true"></span>Other candidate peaks (5×5 mass %)</li>
+            <li><span class="swatch swatch-gt" aria-hidden="true"></span>Ground truth (samples only)</li>
+          </ul>
+        </section>
+
+        <section class="card modelview" aria-labelledby="modelview-heading">
+          <div class="card-head">
+            <h2 id="modelview-heading">What the model saw</h2>
+            <span class="muted small">256 × 256 gray</span>
+          </div>
+          <div class="modelview-body">
+            <canvas id="model-canvas" data-testid="model-canvas" width="512" height="512"
+                    role="img" aria-label="The 256 by 256 gray input the model saw, with heatmap and markers"></canvas>
+            <figure class="zoom">
+              <canvas id="zoom-canvas" data-testid="zoom-canvas" width="240" height="240"
+                      role="img" aria-label="Five times zoom around the predicted tip"></canvas>
+              <figcaption>
+                <strong>Tip zoom ×5</strong> · 48 × 48 model px.
+                Dashed square = the 5 × 5-cell decode window (10 × 10 model px) whose softmax centroid is the tip.
+              </figcaption>
+            </figure>
+          </div>
+        </section>
+
+        <details class="card about" id="about" data-testid="about">
+          <summary><h2>About the model</h2></summary>
+          <dl class="facts facts-stack" id="about-list"></dl>
+        </details>
+      </aside>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
