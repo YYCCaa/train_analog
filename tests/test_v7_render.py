@@ -314,7 +314,8 @@ def _pointer_footprint(cfg, seed):
 
 
 def test_min_bg_contrast_isolated():
-    flat = {"jitter.contrast_range": [1.0, 1.0]}
+    # shadows off: min_bg_contrast now also caps shadow strength (tested separately)
+    flat = {"jitter.contrast_range": [1.0, 1.0], "shadows.prob": 0.0}
     base = _cfg(**flat)
     strong = _cfg(**flat, **{"pointer.min_bg_contrast": 90})
     any_diff = False
@@ -1255,3 +1256,82 @@ def test_tip_label_visible_after_blur(case):
     print("contrast at label: min %.3f mean %.3f max %.3f" % (min(at), np.mean(at), max(at)))
     print("contrast 3 sigma ahead: min %.3f mean %.3f max %.3f"
           % (min(ahead), np.mean(ahead), max(ahead)))
+
+
+# ── min_bg_contrast also caps the shadow darkening ──────────────────────
+
+def test_cap_shadow_strengths_unit():
+    # dark pointer (20) on bg 180, c 60: d_max = 1 - 80/180
+    d_max, s_p, s_r = g7.cap_shadow_strengths(0.9, 0.7, 20, 180, 60)  # floats
+    assert d_max == pytest.approx(1 - 80 / 180)
+    assert s_p == pytest.approx(d_max) and s_r == pytest.approx(d_max)
+    assert g7.cap_shadow_strengths(0.3, 0.2, 20, 180, 60)[1:] == (0.3, 0.2)  # below the cap
+    # light pointer (230) on bg 120: darkening only adds contrast, no cap
+    assert g7.cap_shadow_strengths(0.9, 0.7, 230, 120, 60) == (1.0, 0.9, 0.7)
+    # c = 0: never capped, even for a dark pointer
+    assert g7.cap_shadow_strengths(0.9, 0.7, 20, 180, 0) == (1.0, 0.9, 0.7)
+    # no room (ptr + c >= bg): shadow fully removed
+    assert g7.cap_shadow_strengths(0.9, 0.7, 100, 150, 80)[1:] == (0.0, 0.0)
+    # black background: nothing to darken
+    assert g7.cap_shadow_strengths(0.9, 0.7, 0, 0, 5) == (1.0, 0.9, 0.7)  # ptr >= bg: no cap
+
+
+def test_render_records_shadow_cap():
+    pins = {"shadows.prob": 1.0, "shadows.strength_range": [0.9, 0.9],
+            "shadows.strength_jitter": 0.0, "pointer.gray_range": [20, 20],
+            "palette.bg_gray_range": [180, 180], "pointer.min_bg_contrast": 60}
+    sh = g7.render_image(_cfg(**pins), 0).params["shadows"]
+    assert sh["s_p_drawn"] == pytest.approx(0.9) and sh["s_r_drawn"] == pytest.approx(0.9)
+    assert sh["d_max"] == pytest.approx(1 - 80 / 180, abs=1e-3)
+    assert sh["s_p"] == pytest.approx(sh["d_max"], abs=1e-3) and sh["s_r"] == pytest.approx(sh["d_max"], abs=1e-3)
+
+
+# "section.key" -> value pins (dict): strong shadows, dark pointer on a mid-light
+# face, nothing that perturbs gray levels (noise, blur, jitter, effects)
+_CAP_PINS = {"shadows.prob": 1.0, "shadows.strength_range": [0.9, 0.9],
+             "shadows.strength_jitter": 0.0, "shadows.blur_radius": 0.0,
+             "shadows.rim_blur_range": [0.5, 0.5],
+             "pointer.gray_range": [0, 40], "palette.bg_gray_range": [150, 200],
+             "pointer.noise_amplitude": 0, "pointer.gradient_range": [0.0, 0.0],
+             "pointer.edge_noise_amplitude": 0,
+             "background.noise_intensity": 0, "background.variation": 0,
+             "background.dial_circle_blur": False, "hier_noise.block_variance": 0,
+             "hier_noise.pixel_variance": 0, "digits.show_prob": 0.0,
+             "tri_artifacts.enabled": False, "reflections.prob": 0.0, "glares.prob": 0.0,
+             "jitter.brightness_range": [1.0, 1.0], "jitter.contrast_range": [1.0, 1.0],
+             "jitter.sharpness_range": [1.0, 1.0]}
+
+
+def _shadow_pointer_gap(c, seed):
+    """Visible gap (float, gray levels) between the shadowed face and the pointer body.
+
+    Median gray of the deep-shadow face region minus median gray of the
+    pointer body, as a person would compare them.  The region is where a
+    strength-1 shadow blackens a bright face (c = 0 reference render).
+    Returns (gap, pointer median, face median) or None if a region is too small.
+    """
+    extra = {k: v for k, v in _CAP_PINS.items() if not k.startswith("shadows.strength")}
+    umbra, off = _umbra(extra, seed)  # (256, 256) bool, (256, 256) int32 (unshadowed)
+    img = g7.render_image(_cfg(**{**_CAP_PINS, "pointer.min_bg_contrast": c}), seed).image
+    body = _erode((off < 100) & (_radius_grid() < DIAL * 0.95), 2)  # (256, 256) bool, pointer body
+    if umbra.sum() < 50 or body.sum() < 20:
+        return None
+    face = float(np.median(img[umbra]))  # float, shadowed face gray
+    ptr = float(np.median(off[body]))  # float, pointer body gray
+    return face - ptr, ptr, face
+
+
+def test_min_bg_contrast_keeps_pointer_visible_over_shadow():
+    c = 80  # int, pointer.min_bg_contrast under test
+    gaps_on, gaps_off = [], []  # list[float], per seed, c = 80 / c = 0
+    for seed in range(40):
+        on, off = _shadow_pointer_gap(c, seed), _shadow_pointer_gap(0, seed)
+        if on is None or off is None:
+            continue
+        gaps_on.append(on[0])
+        gaps_off.append(off[0])
+    print("c=80 gaps", np.percentile(gaps_on, [0, 10, 50, 90, 100]),
+          "c=0 gaps", np.percentile(gaps_off, [0, 10, 50, 90, 100]), len(gaps_on))
+    assert len(gaps_on) >= 15
+    assert min(gaps_on) >= c - 3, sorted(gaps_on)[:5]
+    assert min(gaps_off) < c - 3, sorted(gaps_off)[:5]  # the test discriminates

@@ -70,7 +70,7 @@ pointer:
   noise_amplitude: 25  # int scalar; per-pixel noise amplitude on body (+/-)
   edge_thickness_range: [1, 3]  # [lo, hi] int; edge band width (px)
   edge_noise_amplitude: 5  # int scalar; per-pixel noise amplitude on edge (+/-)
-  min_bg_contrast: 0  # int scalar; min |pointer gray - bg gray| (bg_gray_range draw); 0 = off
+  min_bg_contrast: 0  # int scalar; min |pointer gray - bg gray|, also for the shadowed background: shadows are lightened so they keep this contrast (bg_gray_range draw); 0 = off
 
 background:
   lowfreq_size: 8  # int scalar; low-frequency gradient tile resolution (NxN)

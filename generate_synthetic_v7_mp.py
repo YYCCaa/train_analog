@@ -33,6 +33,7 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
   │ 4  rim crescent shadow mask m_r    ─┐ only if has_shadow;        │
   │ 5  pointer + circle shadow mask m_p ┘ masks only, img untouched; │
   │    d = max(s_p*m_p, s_r*m_r)  float32 darkening  [d layer]       │
+  │    (built after 7: s capped so a dark pointer keeps min contrast)│
   │ 6  digits -> overlay                                  [td layer] │
   │ 7  mounting hole, pointer body (gradient + noise), pointer edge, │
   │    cut-tip (restore pre-pointer pixels near the apex)            │
@@ -75,7 +76,11 @@ ambient light, so it scales the surface by an albedo-independent factor,
 out = in * (1 - d).  One shared strength s per image, jittered separately
 for the pointer (s_p) and rim (s_r) shadows; overlapping shadows of the
 one light do not compound (max, not product).  Ticks, digits, noise and
-triangles under a shadow are darkened by the same factor.
+triangles under a shadow are darkened by the same factor.  pointer.min_bg_contrast
+(c) also covers the shadowed face: for a pointer darker than the background the
+strengths are clamped to d_max = 1 - (ptr_gray + c) / bg_gray (bg_gray_range
+draw; jitter and noise make this approximate, as for the pointer rule), so
+|ptr_gray - bg_gray (1 - d)| >= c; params record d_max, s_p_drawn, s_r_drawn.
 
 Reflections and glares sit on the cover glass.  Each item takes a random
 ASCII glyph (GLYPHS = A-Z a-z 0-9) in a random available font (GLYPH_FONTS,
@@ -409,6 +414,28 @@ def shadow_darkening(m_p, m_r, s_p, s_r):
     """
     return np.maximum(np.float32(s_p) * np.asarray(m_p, dtype=np.float32),
                       np.float32(s_r) * np.asarray(m_r, dtype=np.float32))
+
+
+def cap_shadow_strengths(s_p, s_r, ptr_gray, bg_gray, min_contrast):
+    """Cap the shadow strengths so a dark pointer keeps `min_contrast` over them.
+
+    s_p, s_r     : float 0-1, drawn pointer / rim shadow strengths
+    ptr_gray     : int, pointer body gray
+    bg_gray      : int, palette bg_gray_range draw (unshadowed face level)
+    min_contrast : int >= 0, pointer.min_bg_contrast; 0 = off (no cap)
+
+    The shadowed face gray is bg_gray * (1 - d).  A pointer darker than the
+    background loses contrast as d grows, so d is bounded by
+    d_max = clip(1 - (ptr_gray + c) / bg_gray, 0, 1) (0 when bg_gray = 0).
+    A pointer at or above the background only gains contrast: d_max = 1.
+    Since the masks are <= 1, clamping s_p and s_r to d_max bounds d.
+    Approximate: bg jitter / noise move the real face level, as for the
+    pointer rule itself.  Returns (d_max, s_p, s_r): floats.
+    """
+    if min_contrast <= 0 or ptr_gray >= bg_gray:
+        return 1.0, s_p, s_r
+    d_max = 0.0 if bg_gray <= 0 else min(max(1.0 - (ptr_gray + min_contrast) / bg_gray, 0.0), 1.0)
+    return d_max, min(s_p, d_max), min(s_r, d_max)
 
 
 def _shadow_strengths(S, srng):
@@ -1178,6 +1205,7 @@ def render_image(cfg, image_seed):
     # when the image has no shadow; nothing is composited onto img here, it
     # is applied once at step 13 as img * (1 - d)
     shade = None
+    m_p = m_r = None  # (C, C) float32 pointer / rim masks; shade is built after the pointer gray
     if has_shadow:
         m_r = draw_rim_shadows(cx, cy, dial_radius, canvas_size, light_angle,
                                rim_offset, rim_cutout, rim_blur)  # (C, C) float32 rim mask
@@ -1196,7 +1224,6 @@ def render_image(cfg, image_seed):
                     shd_dist * math.sin(light_rad), gap_start_deg, gap_span_deg)
         blur = ImageFilter.GaussianBlur(radius=S["blur_radius"])  # shadow blur filter (PIL)
         m_p = np.asarray(p_mask.filter(blur), dtype=np.float32) / 255.0  # (C, C) float32, 0-1
-        shade = shadow_darkening(m_p, m_r, s_p, s_r)  # (C, C) float32
 
     # --- 6 digits on the overlay ---
     if show_digits:
@@ -1212,6 +1239,13 @@ def render_image(cfg, image_seed):
     edge_gray = int(ptr_gray * ptr_rng.uniform(*PT["darker_frac_range"]))  # int
     grad_strength = ptr_rng.uniform(*PT["gradient_range"])  # float
     edge_thickness = ptr_rng.randint(*PT["edge_thickness_range"])  # int px
+    # cap the shadow strengths by the pointer rule (recorded; the draws are unchanged)
+    s_p_drawn, s_r_drawn = s_p, s_r  # float, strengths as drawn
+    d_max, s_p, s_r = cap_shadow_strengths(s_p, s_r, ptr_gray, bg_gray,
+                                           PT["min_bg_contrast"])  # float cap, effective strengths
+    rec["shadows"].update(s_p=s_p, s_r=s_r, d_max=d_max, s_p_drawn=s_p_drawn, s_r_drawn=s_r_drawn)
+    if has_shadow:
+        shade = shadow_darkening(m_p, m_r, s_p, s_r)  # (C, C) float32
     rec["pointer"] = {"gray": ptr_gray, "hole_gray": hole_gray, "edge_gray": edge_gray,
                       "gradient": grad_strength, "edge_thickness": edge_thickness}
 
