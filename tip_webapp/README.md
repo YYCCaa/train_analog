@@ -218,6 +218,8 @@ Validation on 22,500 images: mean 0.58 px, **median 0.42 px**, p95 1.55 px, **p9
 away (the opposite end of the needle-shaped triangle), and the true tip appears as the runner-up
 candidate (19 %), which the ambiguous chip flags. It is kept as an honest failure demo.
 
+To use the model in your own project, see [model/README.md](model/README.md) (I/O, decode, drop-in Python).
+
 ## Tests
 
 ```bash
