@@ -8,8 +8,9 @@ local web apps (`tip_webapp/`, `grayscale_webapp/`, `studio/`). Data and trainin
 
 Logs: `tmp_smoke/testlogs/<task>/<timestamp>/` (gitignored), written by
 `python C:/Users/Administrator/.claude/hooks/wt.py testlog <task> <label> -- <command>`.
-Under `testlog`, a bare `python` resolves to the system Python312 (no pytest): write the venv interpreter instead,
-`C:/Users/Administrator/PycharmProjects/train_dial/.venv/Scripts/python.exe -m pytest ...`.
+Under `testlog`, a bare `python` resolves to the system Python312 (no pytest), and the worktree guard blocks the venv
+interpreter's absolute path in agent worktrees: wrap the command in cmd so PATH picks the venv,
+`... testlog <task> <label> -- cmd /c python -m pytest -q <file>` (from Git Bash write `cmd //c`).
 
 Run every command from the repo root. No test needs a GPU, the network, or the real dataset; datasets are synthetic
 and written to tmp_path / tempfile.
