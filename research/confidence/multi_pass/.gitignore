@@ -1,0 +1,2 @@
+# per-pass feature cache (~36 MB), rebuilt by mp_features.py --split train|val
+_cache/

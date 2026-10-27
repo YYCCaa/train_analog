@@ -1,0 +1,21 @@
+C:\Users\Administrator\PycharmProjects\train_dial\.claude\worktrees\agent-a7a880af9dce6e013\research\confidence\multi_pass\mp_scores.py:225: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\builder\windows\pytorch\torch\csrc\utils\tensor_numpy.cpp:212.)
+  x0 = torch.from_numpy(np.ascontiguousarray(val["images"][:n])).to(mf.DEV).float().div(255.0)[:, None]
+val dih m9 K=2  - conf : dAUROC3 +0.0087 [-0.0006,+0.0204]   dAP3 -0.035 [-0.070,-0.004]
+val dih m9 K=2  - m9   : dAUROC3 +0.0047 [+0.0008,+0.0088]   dAP3 +0.006 [-0.011,+0.025]
+val dih m9 K=8  - conf : dAUROC3 +0.0147 [+0.0050,+0.0263]   dAP3 -0.012 [-0.049,+0.023]
+val dih m9 K=8  - m9   : dAUROC3 +0.0107 [+0.0060,+0.0157]   dAP3 +0.030 [+0.007,+0.053]
+val dih m5 K=4  - conf : dAUROC3 +0.0146 [+0.0078,+0.0223]   dAP3 +0.043 [+0.009,+0.076]
+val dih m5 K=4  - m9   : dAUROC3 +0.0106 [+0.0044,+0.0168]   dAP3 +0.084 [+0.051,+0.122]
+val dih m5 K=8  - conf : dAUROC3 +0.0186 [+0.0103,+0.0280]   dAP3 +0.067 [+0.029,+0.101]
+val dih m5 K=8  - m9   : dAUROC3 +0.0147 [+0.0089,+0.0205]   dAP3 +0.108 [+0.071,+0.145]
+train TTA-err K=8  mean-map own m5              AUROC3 0.9432  AP3 0.115  AUROC7 1.000  (bad3 86, miss 1)
+train TTA-err K=8  mean-map own m9              AUROC3 0.9456  AP3 0.074  AUROC7 1.000  (bad3 86, miss 1)
+train TTA-err K=8  mean-map m5 at clean argmax  AUROC3 0.9380  AP3 0.083  AUROC7 1.000  (bad3 86, miss 1)
+train TTA-err K=8  clean conf                   AUROC3 0.9290  AP3 0.060  AUROC7 0.998  (bad3 86, miss 1)
+val   TTA-err K=8  mean-map own m5              AUROC3 0.9573  AP3 0.201  AUROC7 0.994  (bad3 164, miss 7)
+val   TTA-err K=8  mean-map own m9              AUROC3 0.9518  AP3 0.154  AUROC7 0.996  (bad3 164, miss 7)
+val   TTA-err K=8  mean-map m5 at clean argmax  AUROC3 0.9556  AP3 0.197  AUROC7 0.995  (bad3 164, miss 7)
+val   TTA-err K=8  clean conf                   AUROC3 0.9344  AP3 0.142  AUROC7 0.980  (bad3 164, miss 7)
+K=2 codes [0, 7]: mean-map m5+m9 0.49 ms/image (max |numpy - cache| 1.4e-07, 1.3e-07);  + tip spread 0.28 ms/image (gap 8.8e-06 px)
+K=4 codes [0, 4, 5, 7]: mean-map m5+m9 0.91 ms/image (max |numpy - cache| 1.1e-07, 1.3e-07);  + tip spread 0.44 ms/image (gap 7.6e-06 px)
+K=8 codes [0, 2, 4, 6, 1, 3, 5, 7]: mean-map m5+m9 3.05 ms/image (max |numpy - cache| 7.8e-08, 8.9e-08);  + tip spread 0.76 ms/image (gap 5.2e-06 px)

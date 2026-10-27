@@ -1,0 +1,25 @@
+[check] 128 images; clean tip vs bundle meta max |diff| 8.28e-06 px
+[check] dih:2            bias (-0.016,+0.015)  median 0.229  p95 0.547  |pred - fwd(label)| median 0.329  map_inv gap 1.5e-05  ok
+[check] dih:4            bias (+0.031,+0.023)  median 0.209  p95 0.604  |pred - fwd(label)| median 0.336  map_inv gap 1.5e-05  ok
+[check] dih:6            bias (+0.017,+0.029)  median 0.221  p95 0.470  |pred - fwd(label)| median 0.350  map_inv gap 1.5e-05  ok
+[check] dih:1            bias (+0.021,+0.009)  median 0.211  p95 0.534  |pred - fwd(label)| median 0.331  map_inv gap 1.5e-05  ok
+[check] dih:3            bias (+0.005,+0.008)  median 0.212  p95 0.535  |pred - fwd(label)| median 0.300  map_inv gap 1.5e-05  ok
+[check] dih:5            bias (-0.004,+0.008)  median 0.199  p95 0.534  |pred - fwd(label)| median 0.324  map_inv gap 7.6e-06  ok
+[check] dih:7            bias (-0.018,+0.001)  median 0.233  p95 0.500  |pred - fwd(label)| median 0.339  map_inv gap 1.5e-05  ok
+[check] shift:(6, 0)     bias (+0.019,+0.012)  median 0.189  p95 0.467  |pred - fwd(label)| median 0.315  map_inv gap 7.6e-06  ok
+[check] shift:(-6, 0)    bias (-0.011,+0.015)  median 0.186  p95 0.459  |pred - fwd(label)| median 0.329  map_inv gap 1.5e-05  ok
+[check] shift:(0, 6)     bias (-0.004,-0.010)  median 0.165  p95 0.428  |pred - fwd(label)| median 0.307  map_inv gap 7.6e-06  ok
+[check] shift:(0, -6)    bias (-0.009,+0.011)  median 0.163  p95 0.437  |pred - fwd(label)| median 0.312  map_inv gap 1.5e-05  ok
+[check] shift:(6, 6)     bias (+0.012,-0.004)  median 0.199  p95 0.650  |pred - fwd(label)| median 0.345  map_inv gap 7.6e-06  ok
+[check] shift:(-6, -6)   bias (-0.006,+0.023)  median 0.216  p95 0.487  |pred - fwd(label)| median 0.328  map_inv gap 1.5e-05  ok
+[check] shift:(6, -6)    bias (+0.009,+0.016)  median 0.200  p95 0.524  |pred - fwd(label)| median 0.357  map_inv gap 1.5e-05  ok
+[check] scale:0.95       bias (-0.001,+0.027)  median 0.232  p95 0.557  |pred - fwd(label)| median 0.288  map_inv gap nan  ok
+[check] scale:1.05       bias (-0.048,+0.002)  median 0.231  p95 0.543  |pred - fwd(label)| median 0.351  map_inv gap nan  ok
+[check] scale:0.97       bias (-0.017,+0.015)  median 0.203  p95 0.515  |pred - fwd(label)| median 0.333  map_inv gap nan  ok
+[check] scale:1.03       bias (-0.009,-0.014)  median 0.231  p95 0.508  |pred - fwd(label)| median 0.347  map_inv gap nan  ok
+[check] scale:0.96       bias (-0.016,+0.016)  median 0.220  p95 0.553  |pred - fwd(label)| median 0.329  map_inv gap nan  ok
+[check] scale:1.04       bias (-0.044,-0.013)  median 0.225  p95 0.541  |pred - fwd(label)| median 0.335  map_inv gap nan  ok
+[check] scale:0.98       bias (-0.017,+0.013)  median 0.219  p95 0.472  |pred - fwd(label)| median 0.320  map_inv gap nan  ok
+[check] hflip, wrong map 256-x: median 1.025 px; right map 255-x: 0.209 px
+[check] fast_inside vs inside_dial: mismatched px per image max 0 (of 65536)
+[check] all transforms map back correctly
