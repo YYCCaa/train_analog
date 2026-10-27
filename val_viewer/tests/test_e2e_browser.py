@@ -301,3 +301,64 @@ def test_lazy_images(browser, served):
         assert n_loaded == 60, n_loaded
     finally:
         ctx.close()
+
+
+def test_failed_load_can_be_retried(page):
+    aborted: list = []
+
+    def flaky(route):
+        """Abort the first /api/list request, let every later one through."""
+        if not aborted:
+            aborted.append(route.request.url)
+            route.abort()
+        else:
+            route.continue_()
+
+    page.route("**/api/list*", flaky)
+    set_n(page, "7")
+    expect(page.locator("#status")).not_to_have_text("")
+    assert len(aborted) == 1
+    set_n(page, "7")  # same value again, like a person retrying
+    expect(page.locator("#col-best .entry")).to_have_count(7)
+    expect(page.locator("#col-worst .entry")).to_have_count(7)
+    expect(page.locator("#status")).to_have_text("")
+
+
+def _focus_entry_by_tab(page, side: str, rank: int) -> None:
+    """Press Tab from the n field until the entry (side, rank) has focus (max 60 presses)."""
+    page.locator("#n-input").focus()
+    sel = f"#col-{side} .entry[data-rank='{rank}']"
+    for _ in range(60):
+        page.keyboard.press("Tab")
+        if page.evaluate("(s) => document.activeElement === document.querySelector(s)", sel):
+            return
+    pytest.fail(f"could not Tab to {sel}")
+
+
+def test_keyboard_opens_detail_and_traps_focus(page):
+    detail = page.locator("#detail")
+    inside = "() => !!document.activeElement.closest('#detail')"
+    _focus_entry_by_tab(page, "best", 1)
+    page.keyboard.press("Enter")
+    expect(detail).to_be_visible()
+    expect(detail).to_have_attribute("data-side", "best")
+    expect(detail).to_have_attribute("data-rank", "1")
+    assert page.evaluate(inside)
+    for _ in range(8):
+        page.keyboard.press("Tab")
+        assert page.evaluate(inside)
+    for _ in range(4):
+        page.keyboard.press("Shift+Tab")
+        assert page.evaluate(inside)
+    page.keyboard.press("Escape")
+    expect(detail).to_be_hidden()
+    assert page.evaluate("() => document.activeElement === document.querySelector(\"#col-best .entry[data-rank='1']\")")
+    _focus_entry_by_tab(page, "worst", 2)
+    page.keyboard.press("Space")
+    expect(detail).to_be_visible()
+    expect(detail).to_have_attribute("data-side", "worst")
+    expect(detail).to_have_attribute("data-rank", "2")
+    assert page.evaluate(inside)
+    page.keyboard.press("Escape")
+    expect(detail).to_be_hidden()
+    assert page.evaluate("() => document.activeElement === document.querySelector(\"#col-worst .entry[data-rank='2']\")")

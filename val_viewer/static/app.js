@@ -16,8 +16,10 @@ const ZOOM_WIN = 32, ZOOM_K = 8;
 
 // state: page state. n: int; scale: "log" | "linear"; tok: int, id of the newest list load;
 //   entries: {best: Entry[], worst: Entry[]}, Entry = {rank, pos, name, label:[x,y], tip:[x,y], err, conf};
-//   detail: {side: "best"|"worst", idx: int (0-based)} | null; loaded: bool, a list load has succeeded
-const state = { n: 24, scale: "log", tok: 0, entries: { best: [], worst: [] }, detail: null, loaded: false };
+//   detail: {side: "best"|"worst", idx: int (0-based)} | null; loadedN: int|null, n of the lists on screen;
+//   pendingN: int|null, n of the load in flight; opener: HTMLElement|null, entry that opened the detail view
+const state = { n: 24, scale: "log", tok: 0, entries: { best: [], worst: [] }, detail: null,
+  loadedN: null, pendingN: null, opener: null };
 
 const $ = (sel) => document.querySelector(sel);
 const nInput = $("#n-input"), statusEl = $("#status"), detailEl = $("#detail");
@@ -66,6 +68,9 @@ const dialUrl = (pos) => `/api/image/${pos}.png`;
 function buildEntry(side, e) {
   const el = document.createElement("article");
   el.className = "entry";
+  el.tabIndex = 0;
+  el.setAttribute("role", "button");
+  el.setAttribute("aria-label", `open detail of #${e.rank}, val ${e.pos}`);
   el.dataset.side = side; el.dataset.rank = e.rank; el.dataset.pos = e.pos;
   const marks = `<svg class="markers" viewBox="0 0 256 256">${markersInner(e)}</svg>`;
   el.innerHTML = `<div class="caption">${captionHtml(e)}</div><div class="panels">`
@@ -96,17 +101,19 @@ async function getJson(url) {
 /** Load both lists for state.n; a stale response (older request) is dropped. */
 async function loadLists() {
   const tok = ++state.tok;
+  const n = state.n;  // int, n this load asks for
+  state.pendingN = n;
   try {
     const [best, worst] = await Promise.all([
-      getJson(`/api/list?side=best&n=${state.n}`), getJson(`/api/list?side=worst&n=${state.n}`)]);
+      getJson(`/api/list?side=best&n=${n}`), getJson(`/api/list?side=worst&n=${n}`)]);
     if (tok !== state.tok) return;
     state.entries = { best, worst };
-    state.loaded = true;
+    state.loadedN = state.pendingN = n;
     closeDetail();
     renderLists();
     statusEl.textContent = "";
   } catch (err) {
-    if (tok === state.tok) statusEl.textContent = String(err.message || err);
+    if (tok === state.tok) { state.pendingN = null; statusEl.textContent = String(err.message || err); }
   }
 }
 
@@ -122,7 +129,7 @@ function applyN() {
   if (!Number.isFinite(v)) v = state.n;
   v = Math.min(N_MAX, Math.max(N_MIN, v));
   nInput.value = String(v);
-  if (v === state.n && state.loaded) return;
+  if (v === state.loadedN || v === state.pendingN) return;  // already shown or loading; a failed load clears both
   state.n = v;
   loadLists();
 }
@@ -138,7 +145,8 @@ function applyScale() {
 /* ---------------- detail view ---------------- */
 
 /** Open the detail view on entry idx (int, 0-based) of side. */
-function openDetail(side, idx) {
+function openDetail(side, idx, opener) {
+  state.opener = opener || null;
   state.detail = { side, idx };
   detailEl.hidden = false;
   document.body.style.overflow = "hidden";
@@ -148,9 +156,12 @@ function openDetail(side, idx) {
 
 /** Close the detail view. */
 function closeDetail() {
+  const back = state.opener;
+  state.opener = null;
   state.detail = null;
   detailEl.hidden = true;
   document.body.style.overflow = "";
+  if (back && back.isConnected) back.focus();  // return focus to the entry that opened the view
 }
 
 /** Fill the detail view from state.detail. */
@@ -205,7 +216,14 @@ $("#markers-toggle").addEventListener("change", (ev) => {
 for (const side of ["best", "worst"]) {
   $(`#col-${side}`).addEventListener("click", (ev) => {
     const el = ev.target.closest(".entry");
-    if (el) openDetail(side, Number(el.dataset.rank) - 1);
+    if (el) openDetail(side, Number(el.dataset.rank) - 1, el);
+  });
+  $(`#col-${side}`).addEventListener("keydown", (ev) => {
+    const el = ev.target.closest(".entry");
+    if (el && ev.target === el && (ev.key === "Enter" || ev.key === " ")) {
+      ev.preventDefault();
+      openDetail(side, Number(el.dataset.rank) - 1, el);
+    }
   });
 }
 $("#detail-prev").addEventListener("click", () => stepDetail(-1));
@@ -214,6 +232,12 @@ $("#detail-close").addEventListener("click", closeDetail);
 document.addEventListener("keydown", (ev) => {
   if (!state.detail) return;
   if (ev.key === "Escape") closeDetail();
+  else if (ev.key === "Tab") {  // focus trap: cycle through the enabled buttons of the dialog
+    const btns = [...detailEl.querySelectorAll("button:not(:disabled)")];
+    const i = btns.indexOf(document.activeElement);
+    ev.preventDefault();
+    btns[(i + (ev.shiftKey ? -1 : 1) + btns.length) % btns.length].focus();
+  }
   else if (ev.key === "ArrowRight") { ev.preventDefault(); stepDetail(1); }
   else if (ev.key === "ArrowLeft") { ev.preventDefault(); stepDetail(-1); }
 });
