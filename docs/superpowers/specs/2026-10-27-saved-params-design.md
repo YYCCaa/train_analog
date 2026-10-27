@@ -32,10 +32,10 @@ It stays a local research tool for one person on the training machine.
    follow it; each entry says whether it is a train or a val image.
 4. val_viewer detail view: the full parameter list of the image shown, grouped by section, readable without
    scrolling sideways; a clear message when the dataset (or that image) has no saved parameters.
-5. Nothing that works today changes: with the toggle off the generator's output is byte-identical to today's;
-   with the toggle on the PNGs, `labels.csv` and every config field are still byte-identical (only the extra file and
-   one `run:` entry are added); val_viewer's val numbers on `sv9_150k` stay 22,500 / p99 3.07 / max 140.10 /
-   235 over 3 px / 13 over 7 px.
+5. Nothing that works today changes. Toggle off or on, the PNGs and `labels.csv` are byte-identical to today's and
+   `config.yaml` is identical apart from its `run:` block (which already differs per run through `finished_at` and
+   now also records `save_params`); with the toggle on, `params.jsonl` is the only extra file. val_viewer's val
+   numbers on `sv9_150k` stay 22,500 / p99 3.07 / max 140.10 / 235 over 3 px / 13 over 7 px.
 
 ## Non-goals
 
@@ -63,9 +63,9 @@ It stays a local research tool for one person on the training machine.
 | line i | the record of `labels.csv` data row i (same order: `pool.imap` is ordered), one JSON object per line, UTF-8, `\n` endings |
 | record | `{"filename": "dial_0003.png", "seed": <int, the seed render_image got = _seed_for_index(seed, idx)>, "angle_deg": <int>, "tip_x": <float>, "tip_y": <float>, "sampled": <RenderResult.params>}` — the same names as the studio's Tile Save `params.json`, without the dataset-wide fields (config, img_size, generator), which live in `config.yaml` once |
 | values | `sampled` is exactly the `params` dict `render_image` returned for that image (JSON-encoded as is); `tip_x` / `tip_y` are the same rounded values as in `labels.csv` |
-| writing | the record is written in the same step that writes the image's `labels.csv` row, so a cancel, a worker error or Ctrl-C leaves exactly one record per kept image and row |
+| writing | the record is written (and flushed) in the same step that writes the image's `labels.csv` row, so a cancel, a worker error or Ctrl-C leaves exactly one record per kept image and row. *Coordinator's call:* after a hard kill the last line may be cut short; readers treat a line that is not complete JSON as "no record for this image" |
 | owned files | `params.jsonl` joins dial_*.png, labels.csv, config.yaml as a file the generator owns: it counts for the "folder not empty" check and `--overwrite` deletes it (also when the new run does not save parameters, so no stale file survives) |
-| config.yaml | the `run:` block gets `save_params: true|false` (`v7_config` ignores the run block on load, so old readers are unaffected) |
+| config.yaml | the `run:` block always gets `save_params: true|false` (`v7_config` ignores the run block on load, so old readers are unaffected) |
 | determinism | `params.jsonl` is byte-identical for 1 and N workers, like the PNGs |
 
 ## Part B: studio (`studio/`)
@@ -148,7 +148,7 @@ that scrolls on its own:
 Tests never read the real dataset; datasets are synthetic and written to temp folders; ports are free ports except the
 studio E2E's existing fixed 8799.
 - **Generator** (`tests/test_v7_gray_generator.py`, CLI like a person): `--save-params` writes aligned records equal to
-  `render_image`'s params; without it no file and byte-identical PNGs / labels; 1 vs 4 workers byte-identical;
+  `render_image`'s params; without it no file, byte-identical PNGs / labels and `config.yaml` equal apart from `run:`; 1 vs 4 workers byte-identical;
   cancel / error keep records = rows = PNGs; `--overwrite` removes a stale `params.jsonl`; a folder holding only
   `params.jsonl` counts as not empty.
 - **Studio API** (`tests/test_studio_api.py`): `save_params: true` writes the file, omitted writes none, non-boolean
@@ -169,7 +169,9 @@ studio E2E's existing fixed 8799.
 ## Acceptance on the real data (coordinator, after landing the parts together)
 
 - `python -m val_viewer` on `sv9_150k`: the val set's numbers are unchanged (above); train and all show 127,500 and
-  150,000 images; detail view says "No parameters saved for this dataset".
+  150,000 images; detail view says "No parameters saved for this dataset". *Coordinator's call:* the all-rows pass
+  batches images differently from before, so per-image errors may move by float32 rounding (~1e-5 px); the five
+  numbers are checked as written, and a count may only differ if an error lies within ~1e-4 px of 3 or 7 px.
 - In the studio, generate a small dataset (e.g. 300 images, seed 0, the `sv9_150k` config) with "save parameters"
   ticked; open it in val_viewer with the `v9_tipnet_a` weights; the detail view lists each image's parameters, and
   for a few images they equal `render_image(config, seed)` re-run by hand.
