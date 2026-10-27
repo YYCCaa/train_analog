@@ -1,0 +1,6 @@
+dih mean-map m5 K=8    train AUROC3 npz 0.95213 vs row 0.95213   AP3 npz 0.2642 vs row 0.2642
+dih mean-map m5 K=8    val   AUROC3 npz 0.96444 vs row 0.96444   AP3 npz 0.3107 vs row 0.3107
+dih mean-map m9 K=2    train AUROC3 npz 0.95145 vs row 0.95145   AP3 npz 0.1483 vs row 0.1483
+dih mean-map m9 K=2    val   AUROC3 npz 0.95442 vs row 0.95442   AP3 npz 0.2086 vs row 0.2086
+dih mean-map m9 K=8    train AUROC3 npz 0.95559 vs row 0.95559   AP3 npz 0.1865 vs row 0.1865
+dih mean-map m9 K=8    val   AUROC3 npz 0.96050 vs row 0.96050   AP3 npz 0.2327 vs row 0.2327
