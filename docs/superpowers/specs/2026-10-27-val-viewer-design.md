@@ -157,7 +157,9 @@ by running `python -m val_viewer` on the real data and using the page like a per
 - The trainer's cache exists and is valid (`sv9_150k_cache_images.npy`, 9.8 GB, built 2026-10-25), so no cache
   build is expected. The GPU is not shared at the moment; the ranking pass uses batches of at most 256.
 - Pass values: n_val 22,500; p99 3.07 px; worst error 140.1 px; 13 errors over 7 px; 235 over 3 px; per-image
-  err and conf equal the research bundle's `val_meta.npz` (computed with TF32 off) within 1e-6.
+  err and conf equal the research bundle's `val_meta.npz` (computed with TF32 off) up to float32 rounding: the
+  trainer's `decode_logits` works in float32, so tip / err agree to about 2e-5 px and conf to about 3e-6
+  (measured on Task 1: 1.4e-5 px and 2.9e-6).
 - Do **not** compare with the run's `worst_val.csv`: the trainer wrote it with bf16 autocast and TF32 on, so its
   numbers differ slightly by design.
 
