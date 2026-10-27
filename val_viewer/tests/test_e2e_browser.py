@@ -47,7 +47,7 @@ def _free_port() -> int:
 
 @pytest.fixture(scope="module")
 def served(tmp_path_factory) -> SimpleNamespace:
-    """One server per module over the fake dataset: SimpleNamespace(url: str, fd: fake_data namespace)."""
+    """One server per module over the fake dataset: SimpleNamespace(url: str, fd: fake_data namespace, log: Path of the server output)."""
     fd = build_fake_data(tmp_path_factory.mktemp("fake"))
     port = _free_port()
     log_path = tmp_path_factory.mktemp("server") / "server.log"
@@ -71,7 +71,7 @@ def served(tmp_path_factory) -> SimpleNamespace:
                 if time.monotonic() > deadline:
                     pytest.fail(f"server not healthy within {SERVER_START_S}s; log: {log_path.read_text()}")
                 time.sleep(0.3)
-            yield SimpleNamespace(url=url, fd=fd)
+            yield SimpleNamespace(url=url, fd=fd, log=log_path)
         finally:
             proc.terminate()
             try:
@@ -362,3 +362,46 @@ def test_keyboard_opens_detail_and_traps_focus(page):
     page.keyboard.press("Escape")
     expect(detail).to_be_hidden()
     assert page.evaluate("() => document.activeElement === document.querySelector(\"#col-worst .entry[data-rank='2']\")")
+
+
+SRC_JS = "els => els.map(e => e.getAttribute('src'))"  # str, reads the src attributes of the matched <img>s
+
+
+def test_png_urls_carry_the_cache_key(page, served):
+    key = api(served, "/api/summary")["key"]
+    assert key
+    want = "v=" + key
+    srcs = page.locator(".entry img").evaluate_all(SRC_JS)
+    assert len(srcs) == 96 and all(want in s for s in srcs), srcs[:3]
+    page.locator("input[name=scale][value=linear]").check()  # a scale change keeps the key on every url
+    srcs = page.locator(".entry img").evaluate_all(SRC_JS)
+    assert all(want in s for s in srcs) and all("scale=linear" in s for s in srcs if "heatmap" in s), srcs[:3]
+    page.locator("#col-best .entry[data-rank='1'] img.dial").click()
+    expect(page.locator("#detail")).to_be_visible()
+    srcs = page.locator("#detail img").evaluate_all(SRC_JS)
+    assert len(srcs) == 4 and all(want in s for s in srcs), srcs
+
+
+def test_legend_symbols_are_coloured(page):
+    def strokes(sel):
+        return page.locator(sel).evaluate_all("els => els.map(e => getComputedStyle(e).stroke)")
+
+    for legend, marker in (("#legend-true", "#col-best .entry svg.markers .true-tip"),
+                           ("#legend-pred", "#col-best .entry svg.markers .pred-tip")):
+        got = strokes(f"{legend} .fg")
+        want = strokes(f"{marker} .fg")[: len(got)]
+        assert got and all(g != "none" for g in got), got
+        assert got == want, (got, want)
+    t = strokes("#legend-true .fg")[0]
+    r, g, b = [int(v) for v in re.findall(r"\d+", t)[:3]]
+    assert g > r and g > b, t
+    p = strokes("#legend-pred .fg")[0]
+    r, g, b = [int(v) for v in re.findall(r"\d+", p)[:3]]
+    assert r > b and r >= g, p
+
+
+def test_server_log_has_no_access_lines(page, served):
+    page.wait_for_load_state("networkidle")
+    log = served.log.read_text(errors="replace")
+    assert "[rank]" in log
+    assert "GET /api/" not in log and "GET /static" not in log, log[-600:]

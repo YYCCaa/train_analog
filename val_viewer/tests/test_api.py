@@ -8,8 +8,10 @@ from __future__ import annotations
 import io
 import re
 import shutil
+import os
 import subprocess
 import sys
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -19,7 +21,8 @@ import torch
 from PIL import Image
 
 import train_v9_tip as tv
-from val_viewer.tests.conftest import make_model_file, open_data
+from val_viewer.app import data as vdata, render
+from val_viewer.tests.conftest import make_model_file, open_data  # noqa: E402
 
 # REPO_ROOT: Path, repo root (cwd of the CLI subprocesses)
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -119,12 +122,18 @@ def test_rank_cache(fake_data):
     third = open_data(fake_data)
     assert not third.cache_hit and not np.array_equal(third.err, first.err)
     assert open_data(fake_data).cache_hit
+    # labels.csv edit: the images file (size, mtime) is NOT touched here, so only the key can notice
+    data = open_data(fake_data)
+    key_args = (data.data_dir, 0.15, data._img_path, data.weights_path, "cpu")
+    stat = (os.stat(data._img_path).st_size, os.stat(data._img_path).st_mtime_ns)
+    key_before = vdata.rank_key(*key_args)
     csv = fake_data.data_dir / "labels.csv"
     lines = csv.read_text().splitlines()
     name, x, y = lines[1].split(",")
     lines[1] = f"{name},{float(x) + 1:.3f},{y}"
     csv.write_text("\n".join(lines) + "\n")
-    assert not open_data(fake_data).cache_hit
+    assert (os.stat(data._img_path).st_size, os.stat(data._img_path).st_mtime_ns) == stat
+    assert vdata.rank_key(*key_args) != key_before
 
 
 def test_weights_fallback_and_summary(fake_data):
@@ -175,3 +184,85 @@ def test_cli(fake_data, tmp_path, capsys):
     assert re.search(r"\[rank\] 30/30", capsys.readouterr().out)
     open_data(fake_data)
     assert re.search(r"^\[rank\] cached", capsys.readouterr().out, re.M)
+
+
+def only_cache_file(fd):
+    """The single rank_*.npz under fd.cache_dir -> Path (asserts there is exactly one)."""
+    files = list(fd.cache_dir.glob("rank_*.npz"))
+    assert len(files) == 1, files
+    return files[0]
+
+
+def test_summary_key_changes_with_weights(fake_data):
+    """Restart with the same inputs -> same key; retrained weights -> a different key."""
+    from fastapi.testclient import TestClient
+    from val_viewer.app.main import create_app
+    key = lambda: TestClient(create_app(open_data(fake_data))).get("/api/summary").json()["key"]
+    k1 = key()
+    assert isinstance(k1, str) and k1 and key() == k1
+    make_model_file(fake_data.run_dir / "tip.pth", 99)
+    assert key() != k1
+
+
+def test_rank_key_inputs(fake_data, tmp_path):
+    """The key reacts to labels.csv bytes (images file size + mtime fixed), device and trainer code."""
+    data = open_data(fake_data)
+    img = data._img_path
+    st = os.stat(img)
+    args = dict(data_dir=data.data_dir, val_split=0.15, img_path=img, weights_path=data.weights_path)
+    base = vdata.rank_key(device="cpu", **args)
+    assert vdata.rank_key(device="cpu", **args) == base
+    assert vdata.rank_key(device="cuda", **args) != base
+    trainer = tmp_path / "trainer.py"
+    trainer.write_text("a = 1\n")
+    t1 = vdata.rank_key(device="cpu", trainer_file=trainer, **args)
+    trainer.write_text("a = 2\n")
+    assert vdata.rank_key(device="cpu", trainer_file=trainer, **args) != t1
+    csv = fake_data.data_dir / "labels.csv"
+    csv.write_text(csv.read_text().replace("dial_00000.png,", "dial_00000.png, ", 1))
+    assert (os.stat(img).st_size, os.stat(img).st_mtime_ns) == (st.st_size, st.st_mtime_ns)
+    assert vdata.rank_key(device="cpu", **args) != base
+
+
+def test_rank_cache_with_wrong_row_is_recomputed(fake_data):
+    first = open_data(fake_data)
+    f = only_cache_file(fake_data)
+    with np.load(f) as z:
+        arrays = {k: z[k] for k in z.files}
+    assert {"tip", "err", "conf", "row", "label"} <= set(arrays)
+    arrays["row"] = arrays["row"][::-1].copy()
+    arrays["err"] = arrays["err"] + 100.0
+    np.savez(f, **arrays)
+    again = open_data(fake_data)
+    assert not again.cache_hit
+    np.testing.assert_array_equal(again.err, first.err)
+    assert open_data(fake_data).cache_hit
+
+
+def test_corrupt_rank_cache_is_recomputed(fake_data):
+    first = open_data(fake_data)
+    only_cache_file(fake_data).write_bytes(b"PK" + b"garbage" * 50)
+    again = open_data(fake_data)
+    assert not again.cache_hit
+    np.testing.assert_array_equal(again.err, first.err)
+    # a real npz cut in half (starts with PK, numpy raises zipfile.BadZipFile)
+    f = only_cache_file(fake_data)
+    f.write_bytes(f.read_bytes()[:f.stat().st_size // 2])
+    cut = open_data(fake_data)
+    assert not cut.cache_hit
+    np.testing.assert_array_equal(cut.err, first.err)
+
+
+def test_render_emits_no_deprecation_warning(client):
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        render.dial_png(client.data.image(0))
+        render.heatmap_png(client.data.logits(0), "log")
+        render.heatmap_png(client.data.logits(0), "linear")
+    assert [w for w in rec if issubclass(w.category, DeprecationWarning)] == []
+
+
+def test_trainer_cache_prefix_is_abspath(fake_data):
+    open_data(fake_data)
+    prefix = os.path.abspath(fake_data.data_dir) + "_cache"
+    assert all(os.path.exists(p) for p in tv.cache_paths(prefix))

@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> None:
     except FileNotFoundError as exc:
         parser.exit(2, "error: " + str(exc).replace(os.linesep, " ").replace("\n", " ") + "\n")
     print(f"Val viewer on http://{args.host}:{args.port}/", flush=True)
-    uvicorn.run(create_app(data), host=args.host, port=args.port, log_level="info")
+    uvicorn.run(create_app(data), host=args.host, port=args.port, log_level="info", access_log=False)
 
 
 if __name__ == "__main__":

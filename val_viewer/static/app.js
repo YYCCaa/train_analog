@@ -17,9 +17,10 @@ const ZOOM_WIN = 32, ZOOM_K = 8;
 // state: page state. n: int; scale: "log" | "linear"; tok: int, id of the newest list load;
 //   entries: {best: Entry[], worst: Entry[]}, Entry = {rank, pos, name, label:[x,y], tip:[x,y], err, conf};
 //   detail: {side: "best"|"worst", idx: int (0-based)} | null; loadedN: int|null, n of the lists on screen;
-//   pendingN: int|null, n of the load in flight; opener: HTMLElement|null, entry that opened the detail view
+//   pendingN: int|null, n of the load in flight; opener: HTMLElement|null, entry that opened the detail view;
+//   key: string, rank-cache key from /api/summary (page-load timestamp if that failed), appended as v= to PNG urls
 const state = { n: 24, scale: "log", tok: 0, entries: { best: [], worst: [] }, detail: null,
-  loadedN: null, pendingN: null, opener: null };
+  loadedN: null, pendingN: null, opener: null, key: String(Date.now()) };
 
 const $ = (sel) => document.querySelector(sel);
 const nInput = $("#n-input"), statusEl = $("#status"), detailEl = $("#detail");
@@ -60,9 +61,9 @@ function captionHtml(e) {
 }
 
 /** URL (string) of the heatmap PNG of val position pos at the current scale. */
-const heatUrl = (pos) => `/api/heatmap/${pos}.png?scale=${state.scale}`;
+const heatUrl = (pos) => `/api/heatmap/${pos}.png?scale=${state.scale}&v=${encodeURIComponent(state.key)}`;
 /** URL (string) of the dial PNG of val position pos. */
-const dialUrl = (pos) => `/api/image/${pos}.png`;
+const dialUrl = (pos) => `/api/image/${pos}.png?v=${encodeURIComponent(state.key)}`;
 
 /** One entry card (HTMLElement) for side ("best"|"worst"), entry e. */
 function buildEntry(side, e) {
@@ -248,7 +249,9 @@ $("#legend-pred").innerHTML = predSymbol();
 
 (async function init() {
   try {
-    $("#summary").textContent = summaryText(await getJson("/api/summary"));
+    const sum = await getJson("/api/summary");
+    if (sum.key) state.key = sum.key;
+    $("#summary").textContent = summaryText(sum);
   } catch (err) {
     statusEl.textContent = String(err.message || err);
   }
