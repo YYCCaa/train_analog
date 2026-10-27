@@ -6,13 +6,13 @@ local web apps (`tip_webapp/`, `grayscale_webapp/`, `studio/`). Data and trainin
 
 ## Tests
 
-Log folder: `tmp_smoke/testlogs/` (gitignored). Each run writes `tmp_smoke/testlogs/<task>/<YYYYMMDD-HHMMSS>/` via
+Logs: `tmp_smoke/testlogs/<task>/<timestamp>/` (gitignored), written by
 `python C:/Users/Administrator/.claude/hooks/wt.py testlog <task> <label> -- <command>`.
 
 Run every command from the repo root. No test needs a GPU, the network, or the real dataset; datasets are synthetic
-and written to tmp_path / tempfile.
+and written to tmp_path / tempfile. Timeouts are in seconds.
 
-| area | source files | test command | timeout (s) |
+| area | source files | test command | timeout |
 |---|---|---|---|
 | v7 config parse/validate | v7_config.py, tests/data/*.yaml | `python -m pytest -q tests/test_v7_config.py` | 60 |
 | v7 renderer | generate_synthetic_v7_mp.py, v7_config.py | `python -m pytest -q tests/test_v7_render.py` | 600 |
