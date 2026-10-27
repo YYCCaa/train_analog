@@ -184,7 +184,8 @@ export type GenerateRequest = {
   num_images: number; // int, 1..1_000_000
   seed: number; // int base seed
   workers: number | null; // int 1..cpu count, or null = auto
-  overwrite: boolean; // true -> replace existing dial_*.png / labels.csv / config.yaml
+  overwrite: boolean; // true -> replace existing dial_*.png / labels.csv / params.jsonl / config.yaml
+  save_params: boolean; // true -> also write params.jsonl (every image's sampled parameters)
 };
 
 /** Start the generation job -> Promise<{state: "running"}>; 400/409/422 -> ApiError. */

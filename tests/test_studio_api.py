@@ -353,3 +353,54 @@ def test_driveless_windows_path_400(client, monkeypatch):
     _no_job(monkeypatch, client)
     r = client.post("/api/generate", json=_gen_body("\\foo\\bar", 2))
     assert r.status_code == 400 and r.json()["errors"][0].startswith("output_dir:")
+
+
+def _read_params_lines(out):
+    """params.jsonl in folder out (str) -> list[dict], one parsed record per line."""
+    with open(os.path.join(out, "params.jsonl"), encoding="utf-8") as f:
+        return [json.loads(ln) for ln in f.read().splitlines() if ln]
+
+
+def _read_run(out):
+    """config.yaml 'run' block of folder out (str) -> dict."""
+    import yaml
+    with open(os.path.join(out, "config.yaml"), encoding="utf-8") as f:
+        return yaml.safe_load(f)["run"]
+
+
+def test_generate_save_params(client, tmp_path):
+    out = str(tmp_path / "sp")
+    r = client.post("/api/generate", json=_gen_body(out, 8, save_params=True))
+    assert r.status_code == 202
+    assert _wait_state(client, {"done", "error", "cancelled"})["state"] == "done"
+    recs = _read_params_lines(out)
+    with open(os.path.join(out, "labels.csv"), newline="") as f:
+        rows = [row["filename"] for row in csv.DictReader(f)]
+    assert len(recs) == 8 and [r_["filename"] for r_ in recs] == rows
+    assert _read_run(out)["save_params"] is True
+
+
+def test_generate_default_writes_no_params(client, tmp_path):
+    out = str(tmp_path / "nop")
+    assert client.post("/api/generate", json=_gen_body(out, 4)).status_code == 202
+    assert _wait_state(client, {"done", "error", "cancelled"})["state"] == "done"
+    assert not os.path.exists(os.path.join(out, "params.jsonl"))
+    assert _read_run(out)["save_params"] is False
+
+
+@pytest.mark.parametrize("bad", ["yes", 1])
+def test_generate_save_params_must_be_bool(client, tmp_path, bad):
+    out = tmp_path / "bad"
+    r = client.post("/api/generate", json=_gen_body(str(out), 2, save_params=bad))
+    assert r.status_code == 422 and r.json()["errors"]
+    assert not out.exists()
+
+
+def test_not_empty_counts_params_file(client, tmp_path):
+    out = tmp_path / "pe"
+    out.mkdir()
+    (out / "params.jsonl").write_text("{}\n")
+    r = client.post("/api/generate", json=_gen_body(str(out), 2))
+    assert r.status_code == 409
+    msg = r.json()["errors"][0]
+    assert "overwrite box" in msg and "params.jsonl" in msg

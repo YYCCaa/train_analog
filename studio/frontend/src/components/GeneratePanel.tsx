@@ -31,6 +31,7 @@ export default function GeneratePanel({ config }: Props) {
   const [seed, setSeed] = useState("0"); // base seed, as typed (str)
   const [workers, setWorkers] = useState(""); // worker count as typed; "" = auto (str)
   const [overwrite, setOverwrite] = useState(false); // replace old dataset files
+  const [saveParams, setSaveParams] = useState(false); // also write params.jsonl (bool)
   const [job, setJob] = useState<JobStatus | null>(null); // last polled job status
   const [message, setMessage] = useState<string[]>([]); // start/cancel errors
 
@@ -72,6 +73,7 @@ export default function GeneratePanel({ config }: Props) {
         seed: s.value,
         workers: w !== null && "value" in w ? w.value : null,
         overwrite,
+        save_params: saveParams,
       });
       setJob({ state: "running", done: 0, total: n.value, output_dir: outputDir.trim(),
         error: null });
@@ -118,6 +120,12 @@ export default function GeneratePanel({ config }: Props) {
           <input data-testid="gen-overwrite" type="checkbox" checked={overwrite}
             onChange={(e) => setOverwrite(e.target.checked)} />
           overwrite
+        </label>
+        <label className="bool"
+          title="also write params.jsonl: every image's sampled parameters (~3 KB per image)">
+          <input data-testid="gen-save-params" type="checkbox" checked={saveParams}
+            onChange={(e) => setSaveParams(e.target.checked)} />
+          save parameters
         </label>
       </div>
       <div className="gen-actions">
