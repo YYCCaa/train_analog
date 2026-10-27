@@ -49,7 +49,7 @@ def build_fake_data(tmp_path) -> SimpleNamespace:
     labels[val_idx[2]] = (2.0, 3.0)          # val position 2: tip near the corner
     names = [f"dial_{i:05d}.png" for i in range(N_IMAGES)]  # list[str] (200,)
     for name, img in zip(names, imgs):
-        Image.fromarray(img, mode="L").save(data_dir / name)
+        Image.fromarray(img).save(data_dir / name)
     with open(data_dir / "labels.csv", "w", newline="") as f:
         f.write("filename,tip_x,tip_y\n")
         for name, (x, y) in zip(names, labels):

@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -53,6 +54,22 @@ def _file_sha(path, h) -> None:
             h.update(chunk)
 
 
+def rank_key(data_dir, val_split, img_path, weights_path, device, trainer_file=None) -> str:
+    """Rank-cache key (32 hex chars) from everything the ranking depends on.
+
+    data_dir: str | Path; val_split: float; img_path: trainer images .npy (size + mtime hashed);
+    weights_path: Path; device: "cpu" | "cuda"; trainer_file: Path of train_v9_tip.py (default: the imported one)."""
+    trainer_file = trainer_file or tv.__file__
+    h = hashlib.sha256()
+    for part in (str(data_dir), f"{val_split!r}", f"v{CACHE_VERSION}", str(device),
+                 str(os.path.getsize(img_path)), str(os.stat(img_path).st_mtime_ns)):
+        h.update(part.encode() + b"\0")
+    _file_sha(Path(data_dir) / "labels.csv", h)
+    _file_sha(weights_path, h)
+    _file_sha(trainer_file, h)
+    return h.hexdigest()[:32]
+
+
 class ValData:
     """The val split of a v9 dataset, a trained TipNet and the per-image error ranking.
 
@@ -80,7 +97,7 @@ class ValData:
         cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
 
         # trainer cache (decoded PNGs) next to the data dir, same default prefix as train_v9_tip.py
-        prefix = self.data_dir.rstrip("\\/") + "_cache"     # str: trainer cache prefix
+        prefix = os.path.abspath(data_dir).rstrip("\\/") + "_cache"     # str: trainer cache prefix
         if not tv.cache_is_valid(self.data_dir, prefix):
             tv.build_cache(self.data_dir, prefix)
             if not tv.cache_is_valid(self.data_dir, prefix):
@@ -100,30 +117,26 @@ class ValData:
         self._model.to(self.device).eval()
         self._lock = threading.Lock()                       # serialises every model forward
 
-        h = hashlib.sha256()                                # rank cache key
-        for part in (self.data_dir, f"{val_split!r}", f"v{CACHE_VERSION}",
-                     str(os.path.getsize(img_path)), str(os.stat(img_path).st_mtime_ns)):
-            h.update(part.encode() + b"\0")
-        _file_sha(data_dir / "labels.csv", h)
-        _file_sha(self.weights_path, h)
-        cache_file = cache_dir / f"rank_{h.hexdigest()[:32]}.npz"  # Path
+        self.key: str = rank_key(self.data_dir, val_split, img_path, self.weights_path, self.device)
+        cache_file = cache_dir / f"rank_{self.key}.npz"     # Path
 
         self.cache_hit: bool = False
         if cache_file.is_file():
             try:
                 with np.load(cache_file) as z:
-                    tip, err, conf = z["tip"], z["err"], z["conf"]
-                if len(err) == self.n_val:
+                    tip, err, conf, row = z["tip"], z["err"], z["conf"], z["row"]
+                if (np.array_equal(row, self.row) and tip.shape == (self.n_val, 2)
+                        and err.shape == (self.n_val,) and conf.shape == (self.n_val,)):
                     self.tip, self.err, self.conf = tip, err, conf  # (n,2), (n,), (n,) float64
                     self.cache_hit = True
                     print(f"[rank] cached {cache_file.name}", flush=True)
-            except (OSError, ValueError, KeyError):
+            except (OSError, ValueError, KeyError, zipfile.BadZipFile, EOFError):
                 pass
         if not self.cache_hit:
             self.tip, self.err, self.conf = self._rank(batch)
             cache_dir.mkdir(parents=True, exist_ok=True)
             tmp = cache_file.with_suffix(".partial.npz")
-            np.savez(tmp, tip=self.tip, err=self.err, conf=self.conf)
+            np.savez(tmp, tip=self.tip, err=self.err, conf=self.conf, row=self.row, label=self.label)
             os.replace(tmp, cache_file)
 
         pos = np.arange(self.n_val)
@@ -176,8 +189,8 @@ class ValData:
                 for i, p in enumerate(order)]
 
     def summary(self) -> dict:
-        """Header numbers: run, weights file name, data_dir, n_val, p99, max_err, n_over_3, n_over_7, device."""
+        """Header numbers: run, weights file name, data_dir, n_val, p99, max_err, n_over_3, n_over_7, device, key (rank-cache key, str)."""
         return {"run": self.run_name, "weights": self.weights_path.name, "data_dir": self.data_dir,
                 "n_val": self.n_val, "p99": float(np.percentile(self.err, 99)),
                 "max_err": float(self.err.max()), "n_over_3": int((self.err > 3).sum()),
-                "n_over_7": int((self.err > 7).sum()), "device": self.device}
+                "n_over_7": int((self.err > 7).sum()), "device": self.device, "key": self.key}

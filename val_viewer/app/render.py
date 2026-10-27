@@ -19,16 +19,16 @@ COLORMAP = np.round(np.linspace([4, 6, 36], [200, 226, 255], 256)).astype(np.uin
 DECADES = 6.0
 
 
-def _png(arr, mode) -> bytes:
-    """ndarray -> PNG bytes of the given PIL mode ('L' | 'RGB')."""
+def _png(arr) -> bytes:
+    """uint8 ndarray (h, w) -> mode L PNG bytes, (h, w, 3) -> RGB PNG bytes."""
     buf = io.BytesIO()
-    Image.fromarray(arr, mode=mode).save(buf, format="PNG")
+    Image.fromarray(arr).save(buf, format="PNG")
     return buf.getvalue()
 
 
 def dial_png(img: np.ndarray) -> bytes:
     """(256, 256) uint8 -> PNG bytes, mode L."""
-    return _png(np.ascontiguousarray(img, dtype=np.uint8), "L")
+    return _png(np.ascontiguousarray(img, dtype=np.uint8))
 
 
 def heatmap_png(logits: np.ndarray, scale: str) -> bytes:
@@ -45,4 +45,4 @@ def heatmap_png(logits: np.ndarray, scale: str) -> bytes:
         raise ValueError(f"unknown scale {scale!r}")
     idx = np.minimum(np.floor(t * 255.0), 255).astype(np.int64)
     idx[t >= 1.0] = 255                              # (128,128) colour indices
-    return _png(COLORMAP[idx], "RGB")
+    return _png(COLORMAP[idx])
