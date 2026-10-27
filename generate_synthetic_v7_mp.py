@@ -296,9 +296,11 @@ bool, str, list); positions are image px unless named otherwise.
 """
 
 import argparse
+import contextlib
 import csv
 import datetime
 import glob
+import json
 import math
 import multiprocessing as mp
 import os
@@ -2226,7 +2228,9 @@ def render_image(cfg, image_seed):
 # bit-exact regardless of worker count.  Windows uses 'spawn': the cfg
 # reaches workers through Pool initializer args, stored in _WORKER.
 
-_WORKER = {}  # per-process state: {"output_dir": str, "seed_base": int, "cfg": dict}
+_WORKER = {}  # per-process state: {"output_dir": str, "seed_base": int, "cfg": dict, "save_params": bool}
+
+PARAMS_FILE = "params.jsonl"  # per-image sampled parameters, one JSON line per labels.csv row (str)
 
 
 def _seed_for_index(seed_base, idx):
@@ -2235,22 +2239,52 @@ def _seed_for_index(seed_base, idx):
     return (seed_base + idx * 2654435761) & 0xFFFFFFFF
 
 
-def _worker_init(output_dir, seed_base, cfg):
-    """Pool initializer: store output_dir (str), seed_base (int) and the
-    validated cfg (dict section -> key -> value) in this process's _WORKER."""
+def _worker_init(output_dir, seed_base, cfg, save_params=False):
+    """Pool initializer: store output_dir (str), seed_base (int), the
+    validated cfg (dict section -> key -> value) and save_params (bool: also
+    build the params.jsonl line) in this process's _WORKER."""
     _WORKER["output_dir"] = output_dir
     _WORKER["seed_base"] = seed_base
     _WORKER["cfg"] = cfg
+    _WORKER["save_params"] = save_params
+
+
+def _strict(v):
+    """Copy of the JSON-able value v with every non-finite float replaced by
+    the string "NaN" / "Infinity" / "-Infinity" (dicts and lists recursed)."""
+    if isinstance(v, float) and not math.isfinite(v):
+        return "NaN" if math.isnan(v) else ("Infinity" if v > 0 else "-Infinity")
+    if isinstance(v, dict):
+        return {k: _strict(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_strict(x) for x in v]
+    return v
+
+
+def params_line(record):
+    """One strict-JSON line (str, no trailing newline) for record (dict);
+    non-finite floats anywhere in it become the strings "NaN" / "Infinity" /
+    "-Infinity", so json.loads works on every reader."""
+    return json.dumps(_strict(record), allow_nan=False)
 
 
 def _worker_task(idx):
     """Render image idx (int), save it as dial_<idx:04d>.png in the output dir;
-    -> label row dict {filename: str, angle_deg: int, tip_x: float, tip_y: float}."""
-    res = render_image(_WORKER["cfg"], _seed_for_index(_WORKER["seed_base"], idx))
+    -> (label, line): label = row dict {filename: str, angle_deg: int,
+    tip_x: float, tip_y: float}; line = params.jsonl line (str) when the pool
+    was initialised with save_params, else None."""
+    img_seed = _seed_for_index(_WORKER["seed_base"], idx)  # seed render_image gets (int)
+    res = render_image(_WORKER["cfg"], img_seed)
     fname = f"dial_{idx:04d}.png"
     Image.fromarray(res.image).save(os.path.join(_WORKER["output_dir"], fname))
-    return {"filename": fname, "angle_deg": res.angle_deg,
-            "tip_x": round(res.tip_x, 2), "tip_y": round(res.tip_y, 2)}
+    label = {"filename": fname, "angle_deg": res.angle_deg,
+             "tip_x": round(res.tip_x, 2), "tip_y": round(res.tip_y, 2)}
+    line = None  # params.jsonl line (str) or None
+    if _WORKER.get("save_params"):
+        line = params_line({"filename": fname, "seed": img_seed,
+                            "angle_deg": label["angle_deg"], "tip_x": label["tip_x"],
+                            "tip_y": label["tip_y"], "sampled": res.params})
+    return label, line
 
 
 LABEL_FIELDS = ["filename", "angle_deg", "tip_x", "tip_y"]  # labels.csv columns (list[str])
@@ -2258,16 +2292,16 @@ GENERATOR_NAME = "generate_synthetic_v7_mp.py"  # recorded in config.yaml run bl
 
 
 class OutputDirNotEmpty(RuntimeError):
-    """Output folder already holds dial_*.png / labels.csv / config.yaml and
+    """Output folder already holds dial_*.png / labels.csv / params.jsonl / config.yaml and
     overwrite was not requested."""
 
 
 def _dataset_files(output_dir):
     """Files generate_dataset owns in output_dir -> list[str] of absolute paths
-    (dial_*.png, labels.csv, config.yaml); other files are never touched."""
+    (dial_*.png, labels.csv, params.jsonl, config.yaml); other files are never touched."""
     # escape: a '[...]' in output_dir is a folder name, not a pattern
     found = glob.glob(os.path.join(glob.escape(output_dir), "dial_*.png"))
-    for name in ("labels.csv", "config.yaml"):
+    for name in ("labels.csv", PARAMS_FILE, "config.yaml"):
         path = os.path.join(output_dir, name)
         if os.path.exists(path):
             found.append(path)
@@ -2287,17 +2321,19 @@ def check_output_dir(output_dir, overwrite):
     if existing and not overwrite:
         raise OutputDirNotEmpty(
             f"'{output_dir}' already contains dataset files "
-            f"({len(existing)} of dial_*.png/labels.csv/config.yaml); "
+            f"({len(existing)} of dial_*.png/labels.csv/params.jsonl/config.yaml); "
             f"pass --overwrite to replace them")
 
 
 def generate_dataset(cfg, output_dir, num_images, seed=0, workers=None, chunksize=4,
-                     overwrite=False, progress_cb=None, cancel_event=None):
+                     overwrite=False, progress_cb=None, cancel_event=None,
+                     save_params=False):
     """Render num_images dials into output_dir with PNGs, labels.csv, config.yaml.
 
     cfg: validated config dict; progress_cb(done, total) is called after every
     finished image; cancel_event (threading.Event) stops the run, keeping only
-    finished PNGs whose rows are in labels.csv.
+    finished PNGs whose rows are in labels.csv.  save_params (bool) also writes
+    params.jsonl: one record per labels.csv row, written in the same step.
     Returns {"completed": bool, "done": int, "output_dir": str}.
     Raises OutputDirNotEmpty if dataset files exist and overwrite is False.
     """
@@ -2309,20 +2345,31 @@ def generate_dataset(cfg, output_dir, num_images, seed=0, workers=None, chunksiz
     n_workers = max(1, min(workers or os.cpu_count() or 1, num_images))
     run = {"num_images": num_images, "seed": seed, "workers": n_workers,
            "chunksize": chunksize, "generator": GENERATOR_NAME,
-           "completed": False, "finished_at": None}
+           "save_params": bool(save_params), "completed": False, "finished_at": None}
     _write_config(cfg, output_dir, run)  # provisional, overwritten at the end
 
     written = []  # label rows already in labels.csv, list[dict]
     cancelled = False  # True once a cancel was seen or the run ended early (bool)
     pool = None  # mp.Pool when n_workers > 1, else None
     try:
-        with open(os.path.join(output_dir, "labels.csv"), "w", newline="") as f:
+        with open(os.path.join(output_dir, "labels.csv"), "w", newline="") as f,                 contextlib.ExitStack() as stack:
+            # params.jsonl handle (text file) when save_params, else None
+            pf = (stack.enter_context(open(os.path.join(output_dir, PARAMS_FILE), "w",
+                                           encoding="utf-8", newline="\n"))
+                  if save_params else None)
             writer = csv.DictWriter(f, fieldnames=LABEL_FIELDS)
             writer.writeheader()
 
-            def accept(label):
-                """Record one finished label row; True if a cancel was requested."""
+            def accept(result):
+                """Record one finished image: its label row and, when saving,
+                its params line (result: (label dict, line str|None)); True if
+                a cancel was requested."""
+                label, line = result
                 writer.writerow(label)
+                if pf is not None:
+                    pf.write(line + "\n")
+                    pf.flush()
+                f.flush()
                 written.append(label)
                 if progress_cb is not None:
                     progress_cb(len(written), num_images)
@@ -2332,16 +2379,16 @@ def generate_dataset(cfg, output_dir, num_images, seed=0, workers=None, chunksiz
             if cancel_event is not None and cancel_event.is_set():
                 cancelled = True  # cancel set before start: render nothing
             elif n_workers == 1:
-                _worker_init(output_dir, seed, cfg)
+                _worker_init(output_dir, seed, cfg, bool(save_params))
                 for idx in indices:
                     if accept(_worker_task(idx)):
                         cancelled = True
                         break
             else:
                 pool = mp.Pool(processes=n_workers, initializer=_worker_init,
-                               initargs=(output_dir, seed, cfg))
-                for label in pool.imap(_worker_task, indices, chunksize=chunksize):
-                    if accept(label):
+                               initargs=(output_dir, seed, cfg, bool(save_params)))
+                for result in pool.imap(_worker_task, indices, chunksize=chunksize):
+                    if accept(result):
                         cancelled = True
                         break
             f.flush()
@@ -2384,7 +2431,10 @@ def main():
     parser.add_argument("--chunksize", type=int, default=4,
                         help="Pool.imap chunksize (default: 4)")
     parser.add_argument("--overwrite", action="store_true",
-                        help="delete existing dial_*.png, labels.csv, config.yaml first")
+                        help="delete existing dial_*.png, labels.csv, params.jsonl, config.yaml first")
+    parser.add_argument("--save-params", action="store_true",
+                        help="also write params.jsonl: every image's sampled parameters "
+                             "(~3 KB per image)")
     args = parser.parse_args()
     if args.num_images <= 0:
         parser.error("--num-images must be a positive integer")
@@ -2404,7 +2454,7 @@ def main():
     try:
         res = generate_dataset(cfg, args.output_dir, args.num_images, seed=args.seed,
                                workers=args.workers, chunksize=args.chunksize,
-                               overwrite=args.overwrite)
+                               overwrite=args.overwrite, save_params=args.save_params)
     except OutputDirNotEmpty as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
