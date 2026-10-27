@@ -464,6 +464,48 @@ def test_generate_and_cancel(page, tmp_path):
     assert rows == len(list(out2.glob("dial_*.png")))
 
 
+def test_generate_with_save_params(page, tmp_path):
+    """The 'save parameters' box is unticked by default (no params.jsonl); ticked, the
+    folder gets one record per image, equal to what render_image gives for that seed."""
+    from generate_synthetic_v7_mp import _seed_for_index, render_image
+    box = page.get_by_test_id("gen-save-params")  # the checkbox (Locator)
+    assert box.is_visible() and not box.is_checked()
+    assert "save parameters" in page.locator("label.bool", has=box).inner_text()
+    seed = 7  # base seed typed into the panel (int)
+
+    def run(out):
+        page.get_by_test_id("gen-output-dir").fill(str(out))
+        page.get_by_test_id("gen-num-images").fill("20")
+        page.get_by_test_id("gen-seed").fill(str(seed))
+        page.get_by_test_id("gen-workers").fill("2")
+        page.get_by_test_id("gen-start").click()
+        # the status names this job's folder, so the previous run's "done" cannot satisfy it
+        page.wait_for_function(
+            "(dir) => { const s = document.querySelector('[data-testid=gen-status]');"
+            " return s.querySelector('.state').textContent === 'done'"
+            " && s.textContent.includes(dir); }",
+            arg=str(out), timeout=180_000)
+
+    a = tmp_path / "a"  # folder generated with the box unticked (Path)
+    run(a)
+    assert len(list(a.glob("dial_*.png"))) == 20
+    assert not (a / "params.jsonl").exists()
+
+    box.check()
+    b = tmp_path / "b"  # folder generated with the box ticked (Path)
+    run(b)
+    lines = (b / "params.jsonl").read_text(encoding="utf-8").splitlines()  # list[str]
+    assert len(lines) == 20
+    recs = [json.loads(ln) for ln in lines]  # list[dict]
+    with open(b / "labels.csv", newline="") as f:
+        assert [r["filename"] for r in recs] == [r["filename"] for r in csv.DictReader(f)]
+    ui_cfg = v7_config.strip_run(yaml.safe_load((b / "config.yaml").read_text(encoding="utf-8")))
+    want = render_image(ui_cfg, _seed_for_index(seed, 3)).params
+    rec3 = next(r for r in recs if r["filename"] == "dial_0003.png")
+    assert rec3["sampled"] == json.loads(json.dumps(want))
+    assert yaml.safe_load((b / "config.yaml").read_text(encoding="utf-8"))["run"]["save_params"] is True
+
+
 def test_generate_refuses_non_integer_inputs(page, tmp_path):
     """Typing garbage into Images / Seed shows an error and starts no job;
     '2.5' is not truncated to 2, '' / 'abc' are not read as 0."""

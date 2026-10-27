@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 import studio.backend  # noqa: F401  (puts repo root on sys.path)
@@ -63,6 +63,7 @@ class GenerateBody(BaseModel):
     seed: int = 0
     workers: int | None = None
     overwrite: bool = False
+    save_params: StrictBool = False  # also write params.jsonl (bool; "yes" / 1 are 422)
 
 
 def _errors(errs, status=422):
@@ -259,10 +260,13 @@ def create_app(frontend_dist=None, allowed_hosts=None):
         # worker processes for this job (int >= 1); blank -> leave one core free
         workers = body.workers if body.workers is not None else _auto_workers()
         try:
-            jobs.start(body.config, out, body.num_images, body.seed, workers, body.overwrite)
+            # kwarg only when set, so a start() stand-in with the old signature still fits
+            extra = {"save_params": True} if body.save_params else {}  # dict[str, bool]
+            jobs.start(body.config, out, body.num_images, body.seed, workers, body.overwrite,
+                       **extra)
         except gen.OutputDirNotEmpty:  # subclasses RuntimeError, so it must come first
             return _errors([f"'{out}' already contains dataset files "
-                            "(dial_*.png / labels.csv / config.yaml); "
+                            "(dial_*.png / labels.csv / params.jsonl / config.yaml); "
                             "tick the overwrite box to replace them"], 409)
         except RuntimeError as e:
             return _errors([str(e)], 409)

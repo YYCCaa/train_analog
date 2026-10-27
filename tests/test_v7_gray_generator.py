@@ -6,6 +6,7 @@ generate_dataset directly (a cancel needs an in-process threading.Event).
 """
 
 import csv
+import json
 import subprocess
 import sys
 import threading
@@ -169,3 +170,127 @@ def test_glob_metachars_in_output_dir(tmp_path):
     assert len(read_labels(target)) == 3
     assert sorted(p.name for p in target.iterdir() if p.name.startswith("dial_")) == \
         [f"dial_{i:04d}.png" for i in range(3)]
+
+
+# ── --save-params / params.jsonl ──────────────────────────────────────────
+
+def read_params(folder):
+    """params.jsonl -> list[dict], one parsed record per line."""
+    text = (Path(folder) / "params.jsonl").read_text(encoding="utf-8")
+    return [json.loads(line) for line in text.split("\n") if line]
+
+
+def test_save_params_cli(tmp_path):
+    out = tmp_path / "o"
+    r = run_cli("--output-dir", out, "--num-images", 6, "--workers", 2, "--seed", SEED,
+                "--save-params")
+    assert r.returncode == 0, r.stderr
+    rows = read_labels(out)
+    recs = read_params(out)
+    assert len(recs) == 6 == len(rows)
+    cfg = v7_config.default_config()
+    for i, (rec, row) in enumerate(zip(recs, rows)):
+        assert rec["filename"] == row["filename"]
+        assert rec["seed"] == _seed_for_index(SEED, i)
+        assert rec["angle_deg"] == int(row["angle_deg"])
+        assert rec["tip_x"] == float(row["tip_x"]) and rec["tip_y"] == float(row["tip_y"])
+        want = json.loads(json.dumps(render_image(cfg, rec["seed"]).params))
+        assert rec["sampled"] == want
+    assert read_run(out)["run"]["save_params"] is True
+
+
+def test_no_save_params_identical_outputs(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    assert run_cli("--output-dir", a, "--num-images", 6, "--workers", 2, "--seed", SEED).returncode == 0
+    assert run_cli("--output-dir", b, "--num-images", 6, "--workers", 2, "--seed", SEED,
+                   "--save-params").returncode == 0
+    assert not (a / "params.jsonl").exists() and (b / "params.jsonl").exists()
+    assert read_run(a)["run"]["save_params"] is False
+    assert (a / "labels.csv").read_bytes() == (b / "labels.csv").read_bytes()
+    for i in range(6):
+        n = f"dial_{i:04d}.png"
+        assert (a / n).read_bytes() == (b / n).read_bytes()
+    assert v7_config.strip_run(read_run(a)) == v7_config.strip_run(read_run(b))
+
+
+def test_save_params_workers_bit_exact(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    for out, w in ((a, 1), (b, 4)):
+        assert run_cli("--output-dir", out, "--num-images", 8, "--workers", w, "--seed", SEED,
+                       "--save-params").returncode == 0
+    assert (a / "params.jsonl").read_bytes() == (b / "params.jsonl").read_bytes()
+
+
+def test_cancel_and_error_keep_params_aligned(tmp_path):
+    cfg = v7_config.default_config()
+
+    def check(out):
+        pngs = {p.name for p in out.glob("dial_*.png")}
+        names = [r["filename"] for r in read_labels(out)]
+        assert [r["filename"] for r in read_params(out)] == names
+        assert pngs == set(names)
+
+    out = tmp_path / "cancel"
+    ev = threading.Event()  # cancel flag set by the progress callback
+
+    def cancel_cb(done, total):
+        if done >= 20:
+            ev.set()
+
+    res = generate_dataset(cfg, str(out), 400, seed=SEED, workers=2, save_params=True,
+                           cancel_event=ev, progress_cb=cancel_cb)
+    assert res["completed"] is False
+    check(out)
+
+    out2 = tmp_path / "error"
+
+    def err_cb(done, total):
+        if done >= 5:
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        generate_dataset(cfg, str(out2), 200, seed=SEED, workers=2, save_params=True,
+                         progress_cb=err_cb)
+    check(out2)
+
+
+def test_overwrite_and_not_empty_with_params(tmp_path):
+    out = tmp_path / "o"
+    assert run_cli("--output-dir", out, "--num-images", 3, "--workers", 1,
+                   "--save-params").returncode == 0
+    assert (out / "params.jsonl").exists()
+    r = run_cli("--output-dir", out, "--num-images", 3, "--workers", 1, "--overwrite")
+    assert r.returncode == 0, r.stderr
+    assert not (out / "params.jsonl").exists()
+
+    only = tmp_path / "only"
+    only.mkdir()
+    (only / "params.jsonl").write_text("{}\n")
+    r = run_cli("--output-dir", only, "--num-images", 2, "--workers", 1)
+    assert r.returncode == 1
+    assert "params.jsonl" in r.stderr
+
+
+def test_params_non_finite_strict_json(tmp_path, monkeypatch):
+    import generate_synthetic_v7_mp as g
+    real = g.render_image
+
+    def fake(cfg, seed):
+        res = real(cfg, seed)
+        res.params = {"a": float("nan"), "n": {"b": float("inf")},
+                      "l": [1.5, -float("inf")]}
+        return res
+
+    monkeypatch.setattr(g, "render_image", fake)
+
+    def boom(const):
+        raise AssertionError(f"non-strict constant {const}")
+
+    out = tmp_path / "o"
+    g.generate_dataset(v7_config.default_config(), str(out), 3, seed=SEED, workers=1,
+                       save_params=True)
+    lines = [ln for ln in (out / "params.jsonl").read_text(encoding="utf-8").split("\n") if ln]
+    assert len(lines) == 3
+    for ln in lines:
+        s = json.loads(ln, parse_constant=boom)["sampled"]
+        assert s == {"a": "NaN", "n": {"b": "Infinity"}, "l": [1.5, "-Infinity"]}

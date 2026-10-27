@@ -17,9 +17,10 @@ class JobRunner:
         self._output_dir = None  # str|None
         self._error = None  # str|None
 
-    def start(self, cfg, output_dir, num_images, seed, workers, overwrite):
+    def start(self, cfg, output_dir, num_images, seed, workers, overwrite, save_params=False):
         """Start a job. Raises RuntimeError if one is running, OutputDirNotEmpty
-        (synchronously) if the folder holds old data and overwrite is False."""
+        (synchronously) if the folder holds old data and overwrite is False.
+        save_params (bool): also write params.jsonl."""
         with self._lock:
             if self._state == "running":
                 raise RuntimeError("a generation job is already running")
@@ -29,7 +30,8 @@ class JobRunner:
             self._output_dir, self._error = output_dir, None
             thread = threading.Thread(
                 target=self._run, daemon=True,
-                args=(cfg, output_dir, num_images, seed, workers, overwrite, cancel))
+                args=(cfg, output_dir, num_images, seed, workers, overwrite, cancel,
+                      save_params))
             try:
                 thread.start()
             except BaseException:
@@ -42,12 +44,14 @@ class JobRunner:
         with self._lock:
             self._done, self._total = done, total
 
-    def _run(self, cfg, output_dir, num_images, seed, workers, overwrite, cancel):
+    def _run(self, cfg, output_dir, num_images, seed, workers, overwrite, cancel,
+             save_params=False):
         """Thread body: run generate_dataset, then publish the final state."""
         try:
             res = gen.generate_dataset(
                 cfg, output_dir, num_images, seed=seed, workers=workers,
-                overwrite=overwrite, progress_cb=self._progress, cancel_event=cancel)
+                overwrite=overwrite, progress_cb=self._progress, cancel_event=cancel,
+                save_params=save_params)
             state, err = ("done" if res["completed"] else "cancelled"), None
         except BaseException as e:  # report any failure to the UI
             state, err = "error", f"{type(e).__name__}: {e}"
