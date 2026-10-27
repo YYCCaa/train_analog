@@ -438,3 +438,26 @@ def test_params_index_is_cached(fake_data):
     assert len(list(fake_data.cache_dir.glob("params_*.npy"))) == 1
     again = ParamStore(fake_data.data_dir, fake_data.names, fake_data.cache_dir)  # warm: reads the cached index
     assert again.get(7) == store.get(7)
+
+
+def test_generated_params_reach_viewer(tmp_path):
+    """The generator's own params.jsonl (save_params=True) is what the viewer serves, row for row."""
+    from types import SimpleNamespace
+
+    import generate_synthetic_v7_mp as g
+    import v7_config
+    cfg = v7_config.default_config()
+    fd = SimpleNamespace(data_dir=tmp_path / "gen", run_dir=tmp_path / "run", cache_dir=tmp_path / "vv_cache")
+    g.generate_dataset(cfg, str(fd.data_dir), 40, seed=5, workers=1, save_params=True)
+    fd.run_dir.mkdir()
+    make_model_file(fd.run_dir / "tip.pth", 1234)
+    c = open_client(fd)
+    names, _ = tv.read_labels_csv(str(fd.data_dir))  # names: list[str] (40,), labels.csv order
+    assert c.get("/api/summary", params={"set": "all"}).json()["params"] == "saved"
+    for row in (0, 17, 39):
+        r = get_params(c, row)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        seed = g._seed_for_index(5, row)  # int, the image seed the generator used for this row
+        assert body["row"] == row and body["filename"] == names[row] and body["seed"] == seed
+        assert body["sampled"] == json.loads(json.dumps(g.render_image(cfg, seed).params))

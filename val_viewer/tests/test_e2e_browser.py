@@ -11,6 +11,7 @@ Screen positions are derived from the DOM the same way the page draws them:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import socket
@@ -45,13 +46,12 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-@pytest.fixture(scope="module")
-def served(tmp_path_factory) -> SimpleNamespace:
-    """One server per module over the fake dataset: SimpleNamespace(url: str, fd: fake_data namespace, log: Path of the server output)."""
-    fd = build_fake_data(tmp_path_factory.mktemp("fake"))
-    write_params_jsonl(fd)  # saved parameters: pointer.gray of row r is 100 + r
+@contextlib.contextmanager
+def serve(fd, log_path: Path):
+    """Run `python -m val_viewer` over fd (namespace with data_dir, run_dir, cache_dir: Path) until the block ends.
+
+    Yields the base url (str) once /api/health answers; the server's output goes to log_path (Path)."""
     port = _free_port()
-    log_path = tmp_path_factory.mktemp("server") / "server.log"
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(
             [sys.executable, "-m", "val_viewer", "--data-dir", str(fd.data_dir), "--run", str(fd.run_dir),
@@ -72,13 +72,23 @@ def served(tmp_path_factory) -> SimpleNamespace:
                 if time.monotonic() > deadline:
                     pytest.fail(f"server not healthy within {SERVER_START_S}s; log: {log_path.read_text()}")
                 time.sleep(0.3)
-            yield SimpleNamespace(url=url, fd=fd, log=log_path)
+            yield url
         finally:
             proc.terminate()
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+
+@pytest.fixture(scope="module")
+def served(tmp_path_factory) -> SimpleNamespace:
+    """One server per module over the fake dataset: SimpleNamespace(url: str, fd: fake_data namespace, log: Path of the server output)."""
+    fd = build_fake_data(tmp_path_factory.mktemp("fake"))
+    write_params_jsonl(fd)  # saved parameters: pointer.gray of row r is 100 + r
+    log_path = tmp_path_factory.mktemp("server") / "server.log"
+    with serve(fd, log_path) as url:
+        yield SimpleNamespace(url=url, fd=fd, log=log_path)
 
 
 @pytest.fixture(scope="module")
@@ -529,3 +539,33 @@ def test_fast_set_switch_keeps_last(page, served):
     assert entry_rows(page) == want
     assert "all 200" in page.locator("#summary").inner_text()
     assert page.locator("input[name=set][value=all]").is_checked()
+
+
+def test_generated_dataset_shows_its_parameters(browser, tmp_path):
+    """A dataset the generator wrote with save_params=True: the detail view lists each image's own pointer.gray."""
+    import generate_synthetic_v7_mp as g
+    import v7_config
+    from val_viewer.tests.conftest import make_model_file
+    cfg = v7_config.default_config()
+    fd = SimpleNamespace(data_dir=tmp_path / "gen", run_dir=tmp_path / "run", cache_dir=tmp_path / "vv_cache")
+    g.generate_dataset(cfg, str(fd.data_dir), 40, seed=5, workers=1, save_params=True)
+    fd.run_dir.mkdir()
+    make_model_file(fd.run_dir / "tip.pth", 1234)
+    with serve(fd, tmp_path / "server.log") as url:
+        n_val = api(SimpleNamespace(url=url), "/api/summary")["n"]  # int, val images of the 40
+        ctx = browser.new_context(viewport=DESKTOP)
+        ctx.set_default_timeout(WAIT_MS)
+        pg = ctx.new_page()
+        try:
+            pg.goto(url + "/")
+            expect(pg.locator("#col-worst .entry")).to_have_count(n_val)
+            pg.locator("#col-worst .entry[data-rank='1'] img.dial").click()
+            for rank in ("1", "2"):
+                if rank == "2":
+                    pg.keyboard.press("ArrowRight")
+                expect(pg.locator("#detail")).to_have_attribute("data-rank", rank)
+                row = int(pg.locator(f"#col-worst .entry[data-rank='{rank}']").get_attribute("data-row"))
+                gray = g.render_image(cfg, g._seed_for_index(5, row)).params["pointer"]["gray"]  # int
+                expect(pg.locator("#params [data-section='pointer'] [data-key='gray'] .v")).to_have_text(str(gray))
+        finally:
+            ctx.close()
