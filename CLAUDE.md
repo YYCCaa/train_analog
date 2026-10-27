@@ -1,7 +1,8 @@
 # train_dial
 
-Analog-dial autocalibration: synthetic dial generators (v3..v7), tip / ellipse models, TFLite export, and three
-local web apps (`tip_webapp/`, `grayscale_webapp/`, `studio/`). Data and training runs live outside the repo in
+Analog-dial autocalibration: synthetic dial generators (v3..v7), tip / ellipse models, TFLite export, and four
+local web apps (`tip_webapp/`, `grayscale_webapp/`, `studio/`, and `val_viewer/`: best / worst n TipNet v9 val
+images with heatmaps). Data and training runs live outside the repo in
 `../train_dial_data` (`sv9_150k`, `runs/`).
 
 ## Tests

@@ -106,4 +106,4 @@
 
 ### Task 3 (coordinator): real-data acceptance
 
-Not delegated (agents cannot read the data). After Tasks 1 and 2 are collected: `python -m val_viewer` (timeout), check the spec's pass values (n_val 22,500, p99 3.07 px, max 140.1 px, 13 over 7 px, 235 over 3 px, err / conf equal the research bundle's `val_meta.npz` within 1e-6), then use the page like a person on both columns, both scales, the markers switch and the detail view.
+Not delegated (agents cannot read the data). After Tasks 1 and 2 are collected: `python -m val_viewer` (timeout), check the spec's pass values (n_val 22,500, p99 3.07 px, max 140.1 px, 13 over 7 px, 235 over 3 px, err / conf equal the research bundle's `val_meta.npz` up to float32 rounding, about 2e-5 px and 3e-6 conf, as amended in the spec), then use the page like a person on both columns, both scales, the markers switch and the detail view.
