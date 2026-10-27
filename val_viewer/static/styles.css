@@ -1,0 +1,71 @@
+/* Val viewer styles. Dark neutral page so the grey dial, the blue heatmap and the green / orange markers
+ * keep their contrast.
+ *
+ *   header: summary line / controls row
+ *   main:   [ BEST column | WORST column ]   (>= 1100 px wide; one column below)
+ *   entry:  caption, then [ dial panel | heatmap panel ], each panel = img + svg.markers overlay
+ */
+:root {
+  --bg: #12151a; --surface: #1b1f27; --border: #2d333e; --text: #e6e9ef; --muted: #9aa3b2;
+  --true: #2ee66b;    /* true-tip marker colour (green) */
+  --pred: #ff9f1a;    /* predicted-tip marker colour (orange) */
+  --line: #ffe14d;    /* predicted -> true line */
+  --outline: #07090c; /* dark outline under every marker */
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+.top { padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.top h1 { font-size: 16px; margin: 0 0 8px; font-weight: 600; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
+.controls label { display: inline-flex; gap: 6px; align-items: center; }
+#n-input { width: 5.5em; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 3px 6px; }
+fieldset.scale { border: 0; margin: 0; padding: 0; display: inline-flex; gap: 12px; align-items: center; }
+fieldset.scale legend { float: left; padding: 0; margin-right: 12px; color: var(--muted); }
+.legend { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+.legend-sym { background: #3b3f46; border-radius: 3px; }
+#status { color: #ff8a8a; }
+
+.columns { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 12px 16px; }
+@media (min-width: 1100px) { .columns { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.col h2 { position: sticky; top: 0; z-index: 2; margin: 0 0 8px; padding: 6px 0; font-size: 13px;
+  letter-spacing: .08em; color: var(--muted); background: var(--bg); border-bottom: 1px solid var(--border); }
+.list { display: flex; flex-direction: column; gap: 14px; }
+
+.entry { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px;
+  cursor: pointer; }
+.entry:hover { border-color: #55607a; }
+.caption { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.caption .l1 { color: var(--text); }
+.caption b { color: var(--text); }
+.panels { display: flex; gap: 8px; margin-top: 6px; }
+.panel { position: relative; flex: 1 1 0; min-width: 0; max-width: 384px; aspect-ratio: 1 / 1; background: #000; }
+.panel img { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+svg.markers { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: hidden; }
+body.hide-markers svg.markers { display: none; }
+
+/* marker strokes: width in screen px (non-scaling), outline drawn first and wider */
+svg.markers .ol, .legend-sym .ol { fill: none; stroke: var(--outline); stroke-width: 3.6px; stroke-opacity: .9;
+  vector-effect: non-scaling-stroke; }
+svg.markers .fg, .legend-sym .fg { fill: none; stroke-width: 1.6px; vector-effect: non-scaling-stroke; }
+.true-tip .fg { stroke: var(--true); }
+.pred-tip .fg { stroke: var(--pred); stroke-width: 2px; }
+line.err-line { stroke: var(--line); stroke-width: 1.2px; stroke-dasharray: 4 2; vector-effect: non-scaling-stroke; }
+
+/* detail view */
+#detail { position: fixed; inset: 0; z-index: 10; overflow: auto; background: rgba(8, 10, 14, .96); }
+#detail[hidden] { display: none; }
+.detail-bar { position: sticky; top: 0; z-index: 3; display: flex; gap: 10px; align-items: center;
+  padding: 8px 16px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.detail-bar .caption { flex: 1; min-width: 0; }
+.detail-bar .caption .l1, .detail-bar .caption .l2, .detail-bar .caption .l3 { display: inline; margin-right: 14px; }
+button { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px;
+  padding: 5px 12px; font: inherit; cursor: pointer; }
+button:hover:not(:disabled) { border-color: #6d7a96; }
+button:disabled { opacity: .4; cursor: default; }
+.detail-body { padding: 14px 16px 24px; display: flex; flex-direction: column; gap: 14px; }
+.big-row, .zoom-row { display: flex; flex-wrap: wrap; gap: 14px; }
+.panel.big { flex: 0 0 512px; width: 512px; height: 512px; max-width: none; }
+.zoom { position: relative; width: 256px; height: 256px; overflow: hidden; background: #000; flex: 0 0 256px; }
+.zoom .zoom-img { position: absolute; width: 2048px; height: 2048px; max-width: none; image-rendering: pixelated; }
