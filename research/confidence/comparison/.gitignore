@@ -1,0 +1,5 @@
+# per-image score caches, rebuilt by verify_*.py (comparison_compute.py reads them)
+verify_*.npz
+# the two result figures are kept, despite the repo-wide *.png ignore
+!figC1_methods.png
+!figC2_cost_calibration.png

@@ -1,0 +1,32 @@
+[forward] val x 8 passes 59s
+[sanity] K=1 combo vs single bc: max diff 4.44e-16; K=1 dm5 vs conf 6.66e-16
+method                            split   AUROC>3px     AP>3px  AUROC>7px     95% CI   flag%all    flag%75        rho     p99@95    miss@95  AUROCjump     passes
+conf, shipped 5x5 mass            val        0.9458      0.243      0.989[0.978,0.996]       6.33       1.26      0.371       2.23          1      0.990          1
+m9, 9x9 mass                      val        0.9497      0.201      0.996[0.994,0.998]       1.47       0.44      0.409       2.32          0      0.996          1
+bc T1.5 (map vs ideal shape)      val        0.9589      0.243      0.994[0.989,0.997]       2.18       1.27      0.438       2.16          0      0.992          1
+conf_sub x m9^16                  val        0.9545      0.222      0.996[0.993,0.998]       1.35       0.68      0.419       2.21          0      0.996          1
+-KL(ideal || map) T2              val        0.9599      0.217      0.990[0.983,0.995]       3.59       1.88      0.457       2.17          0      0.984          1
+LR3 (3 features, 4 weights)       val        0.9610      0.234      0.992[0.987,0.996]       2.57       1.56      0.471       2.18          0      0.990          1
+LR36 (36 features)                val        0.9601      0.233      0.990[0.984,0.995]       3.29       1.29      0.462       2.18          0      0.976          1
+tiny CNN on the map               val        0.9567      0.216      0.940[0.877,0.986]      31.96       4.87      0.476       2.21          3      0.931          1
+dihedral mean-map m9, K=2         val        0.9544      0.209      0.997[0.995,0.998]       1.16       0.64      0.429       2.31          0      0.994          2
+dihedral mean-map m5, K=4         val        0.9604      0.285      0.995[0.990,0.999]       3.20       0.43      0.416       2.13          0      0.977          4
+dihedral mean-map m5, K=8         val        0.9644      0.311      0.995[0.989,0.999]       3.12       0.66      0.424       2.13          0      0.972          8
+dihedral mean-map m9, K=8         val        0.9605      0.233      0.997[0.994,0.999]       1.85       0.50      0.445       2.26          0      0.993          8
+bc T1.5 on dihedral mean map, K=4 val        0.9665      0.267      0.995[0.991,0.999]       2.43       0.72      0.491       2.12          0      0.985          4
+bc T1.5 on dihedral mean map, K=8 val        0.9687      0.289      0.995[0.990,0.999]       2.23       1.08      0.502       2.11          0      0.983          8
+[boot] conf, shipped 5x5 mass               dAUROC3 +0.0000 [+0.0000, +0.0000]  dAP3 +0.0000 [+0.0000, +0.0000]
+[boot] m9, 9x9 mass                         dAUROC3 +0.0041 [-0.0047, +0.0135]  dAP3 -0.0403 [-0.0650, -0.0146]
+[boot] bc T1.5 (map vs ideal shape)         dAUROC3 +0.0129 [+0.0057, +0.0213]  dAP3 +0.0001 [-0.0176, +0.0162]
+[boot] conf_sub x m9^16                     dAUROC3 +0.0087 [+0.0037, +0.0147]  dAP3 -0.0197 [-0.0410, -0.0003]
+[boot] -KL(ideal || map) T2                 dAUROC3 +0.0139 [+0.0052, +0.0245]  dAP3 -0.0253 [-0.0575, +0.0030]
+[boot] LR3 (3 features, 4 weights)          dAUROC3 +0.0150 [+0.0068, +0.0251]  dAP3 -0.0086 [-0.0321, +0.0121]
+[boot] LR36 (36 features)                   dAUROC3 +0.0142 [+0.0066, +0.0231]  dAP3 -0.0086 [-0.0376, +0.0163]
+[boot] tiny CNN on the map                  dAUROC3 +0.0106 [-0.0004, +0.0227]  dAP3 -0.0259 [-0.0639, +0.0066]
+[boot] dihedral mean-map m9, K=2            dAUROC3 +0.0086 [-0.0008, +0.0192]  dAP3 -0.0342 [-0.0653, -0.0054]
+[boot] dihedral mean-map m5, K=4            dAUROC3 +0.0145 [+0.0076, +0.0225]  dAP3 +0.0428 [+0.0120, +0.0758]
+[boot] dihedral mean-map m5, K=8            dAUROC3 +0.0186 [+0.0103, +0.0282]  dAP3 +0.0672 [+0.0333, +0.1008]
+[boot] dihedral mean-map m9, K=8            dAUROC3 +0.0146 [+0.0051, +0.0256]  dAP3 -0.0109 [-0.0457, +0.0239]
+[boot] bc T1.5 on dihedral mean map, K=4    dAUROC3 +0.0205 [+0.0107, +0.0321]  dAP3 +0.0244 [-0.0069, +0.0570]
+[boot] bc T1.5 on dihedral mean map, K=8    dAUROC3 +0.0227 [+0.0125, +0.0351]  dAP3 +0.0459 [+0.0125, +0.0794]
+[done] 212s

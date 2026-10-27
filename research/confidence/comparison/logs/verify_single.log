@@ -1,0 +1,25 @@
+C:\Users\ADMINI~1\AppData\Local\Temp\claude\C--Users-Administrator-PycharmProjects-train-dial\f292a1d6-f81e-4d2c-b353-1ee00d6e9308\scratchpad\confbundle\confbundle.py:81: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\builder\windows\pytorch\torch\csrc\utils\tensor_numpy.cpp:212.)
+  x = torch.from_numpy(np.ascontiguousarray(images_u8[s:s + batch])).to(dev)
+method                            split   AUROC>3px     AP>3px  AUROC>7px     95% CI   flag%all    flag%75        rho     p99@95    miss@95  AUROCjump     passes
+[sanity train] max |my conf - bundle conf| = 2.44e-15
+[agree train] bc15: max |mine - agent| = 2.98e-08, spearman 1.000000
+[agree train] csm16: max |mine - agent| = 2.22e-07, spearman 1.000000
+conf (shipped)                    train      0.9405      0.143      0.998[0.997,0.998]       0.24       0.24      0.363       2.06          0        nan          1
+MINE bc T1.5                      train      0.9511      0.143      0.999[0.998,0.999]       0.13       0.13      0.440       2.03          0        nan          1
+MINE conf_sub*m9^16               train      0.9469      0.133      0.999[0.999,0.999]       0.10       0.10      0.418       2.08          0        nan          1
+MINE -lse (probe)                 train      0.0882      0.003      0.001[0.001,0.002]      99.86      99.86     -0.437       2.68          1        nan          1
+MINE lmax (probe)                 train      0.9186      0.081      0.999[0.998,0.999]       0.14       0.14      0.441       2.14          0        nan          1
+[sanity val] max |my conf - bundle conf| = 2.44e-15
+[agree val] bc15: max |mine - agent| = 2.98e-08, spearman 1.000000
+[agree val] csm16: max |mine - agent| = 2.07e-07, spearman 1.000000
+conf (shipped)                    val        0.9458      0.243      0.989[0.978,0.996]       6.33       1.26      0.371       2.23          1      0.990          1
+MINE bc T1.5                      val        0.9589      0.243      0.994[0.989,0.997]       2.18       1.27      0.438       2.16          0      0.992          1
+MINE conf_sub*m9^16               val        0.9545      0.222      0.996[0.993,0.998]       1.35       0.68      0.419       2.21          0      0.996          1
+MINE -lse (probe)                 val        0.0718      0.005      0.087[0.034,0.150]     100.00      99.75     -0.448       3.10         13      0.079          1
+MINE lmax (probe)                 val        0.9330      0.156      0.923[0.867,0.969]      26.80      13.18      0.452       2.33          6      0.926          1
+[boot] bc15 - conf: dAUROC3 +0.0131 [+0.0062, +0.0209]   dAP3 -0.0002 [-0.0174, +0.0153]
+[boot] csm16 - conf: dAUROC3 +0.0086 [+0.0034, +0.0151]   dAP3 -0.0198 [-0.0397, -0.0022]
+[floor] sd over 2000: floor logit 0.18, lse 2.46; spearman(log hmed, -lse) 0.995
+[floor] P(worst > best) for median-peak prob (hmed)  0.959
+[floor] P(worst > best) for floor logit alone        0.530
+[floor] P(worst > best) for -lse alone               0.960

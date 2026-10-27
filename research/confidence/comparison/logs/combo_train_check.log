@@ -1,0 +1,8 @@
+method                            split   AUROC>3px     AP>3px  AUROC>7px     95% CI   flag%all    flag%75        rho     p99@95    miss@95  AUROCjump     passes
+conf, shipped 5x5 mass            train      0.9405      0.143      0.998[0.997,0.998]       0.24       0.24      0.363       2.06          0        nan          1
+m9, 9x9 mass                      train      0.9384      0.116      0.999[0.999,0.999]       0.10       0.10      0.398       2.17          0        nan          1
+bc T1.5 on dihedral mean map, K=1 train      0.9511      0.143      0.999[0.998,0.999]       0.13       0.13      0.440       2.03          0        nan          1
+dihedral mean-map m5, K=4         train      0.9535      0.262      1.000[0.999,1.000]       0.04       0.04      0.405       1.99          0        nan          4
+bc T1.5 on dihedral mean map, K=4 train      0.9582      0.212      1.000[0.999,1.000]       0.04       0.04      0.490       1.96          0        nan          4
+dihedral mean-map m5, K=8         train      0.9521      0.264      1.000[0.999,1.000]       0.03       0.03      0.414       1.97          0        nan          8
+bc T1.5 on dihedral mean map, K=8 train      0.9576      0.223      1.000[0.999,1.000]       0.03       0.03      0.500       1.95          0        nan          8

@@ -1,0 +1,22 @@
+C:\Users\Administrator\PycharmProjects\train_dial\.claude\worktrees\session-tip-count\research\confidence\comparison\verify_multi.py:72: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\builder\windows\pytorch\torch\csrc\utils\tensor_numpy.cpp:212.)
+  x = torch.from_numpy(np.ascontiguousarray(val["images"][s:s + BATCH])).to(dev)   # (B,256,256) u8
+[forward] 22500 images x 8 passes  58s
+[sanity] max |my clean 5x5 mass - bundle conf| = 6.66e-16
+[agree] m5_k8: max |mine - agent| = 1.25e-07, corr 1.000000
+[agree] m9_k8: max |mine - agent| = 1.46e-07, corr 1.000000
+[agree] m9_k2: max |mine - agent| = 2.54e-07, corr 1.000000
+method                            split   AUROC>3px     AP>3px  AUROC>7px     95% CI   flag%all    flag%75        rho     p99@95    miss@95  AUROCjump     passes
+conf (shipped)                    val        0.9458      0.243      0.989[0.978,0.996]       6.33       1.26      0.371       2.23          1      0.990          1
+m9                                val        0.9497      0.201      0.996[0.994,0.998]       1.47       0.44      0.409       2.32          0      0.996          1
+MINE dih mean-map m5 K=2          val        0.9576      0.251      0.991[0.983,0.997]       4.25       1.05      0.405       2.15          0      0.977          2
+MINE dih mean-map m9 K=2          val        0.9544      0.209      0.997[0.995,0.998]       1.16       0.64      0.429       2.31          0      0.994          2
+MINE dih mean-map m5 K=4          val        0.9604      0.285      0.995[0.990,0.999]       3.20       0.43      0.416       2.13          0      0.977          4
+MINE dih mean-map m9 K=4          val        0.9573      0.219      0.997[0.995,0.999]       1.65       0.46      0.439       2.29          0      0.993          4
+MINE dih mean-map m5 K=8          val        0.9644      0.311      0.995[0.989,0.999]       3.12       0.66      0.424       2.13          0      0.972          8
+MINE dih mean-map m9 K=8          val        0.9605      0.233      0.997[0.994,0.999]       1.85       0.50      0.445       2.26          0      0.993          8
+[boot] m5_k8 - conf: dAUROC3 +0.0187 [+0.0104, +0.0277]   dAP3 +0.0671 [+0.0304, +0.1025]
+[boot] m5_k4 - conf: dAUROC3 +0.0146 [+0.0076, +0.0225]   dAP3 +0.0434 [+0.0127, +0.0779]
+[boot] m9_k8 - m9: dAUROC3 +0.0107 [+0.0060, +0.0155]   dAP3 +0.0307 [+0.0071, +0.0559]
+[boot] m9_k2 - m9: dAUROC3 +0.0046 [+0.0011, +0.0088]   dAP3 +0.0065 [-0.0141, +0.0273]
+[tip] clean tip          p99 3.073  >3px 235  >7px 13
+[tip] K=8 mean-map tip   p99 2.690  >3px 164  >7px 7

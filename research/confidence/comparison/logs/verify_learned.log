@@ -1,0 +1,18 @@
+C:\Users\ADMINI~1\AppData\Local\Temp\claude\C--Users-Administrator-PycharmProjects-train-dial\f292a1d6-f81e-4d2c-b353-1ee00d6e9308\scratchpad\confbundle\confbundle.py:81: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\builder\windows\pytorch\torch\csrc\utils\tensor_numpy.cpp:212.)
+  x = torch.from_numpy(np.ascontiguousarray(images_u8[s:s + batch])).to(dev)
+method                            split   AUROC>3px     AP>3px  AUROC>7px     95% CI   flag%all    flag%75        rho     p99@95    miss@95  AUROCjump     passes
+[agree train] LR3: max |mine - agent| = 9.14e-02
+conf (shipped)                    train      0.9405      0.143      0.998[0.997,0.998]       0.24       0.24      0.363       2.06          0        nan          1
+m9                                train      0.9384      0.116      0.999[0.999,0.999]       0.10       0.10      0.398       2.17          0        nan          1
+MINE LR3                          train      0.9513      0.138      0.999[0.999,1.000]       0.09       0.09      0.465       2.04          0        nan          1
+[agree val] LR3: max |mine - agent| = 9.16e-07
+conf (shipped)                    val        0.9458      0.243      0.989[0.978,0.996]       6.33       1.26      0.371       2.23          1      0.990          1
+m9                                val        0.9497      0.201      0.996[0.994,0.998]       1.47       0.44      0.409       2.32          0      0.996          1
+MINE LR3                          val        0.9610      0.234      0.992[0.987,0.996]       2.57       1.56      0.471       2.18          0      0.990          1
+[boot] LR3 - conf: dAUROC3 +0.0153 [+0.0068, +0.0249]   dAP3 -0.0088 [-0.0301, +0.0111]
+[boot] LR3 - m9: dAUROC3 +0.0113 [+0.0068, +0.0163]   dAP3 +0.0317 [+0.0072, +0.0573]
+[calib] iso(conf) OOF: ECE15 0.0014  Brier 0.00887
+[calib] iso(m9  ) OOF: ECE15 0.0012  Brier 0.00914
+[calib] iso(LR3 ) OOF: ECE15 0.0012  Brier 0.00898
+[calib] raw conf as P:   ECE15 0.0292  Brier 0.00984
+[calib] least-confident 2 % by conf: mean conf 0.859, observed good 0.758
