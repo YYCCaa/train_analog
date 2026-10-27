@@ -1,2 +1,55 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Val viewer</title></head><body></body></html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Val viewer</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="top">
+  <h1 id="summary">Val viewer · loading…</h1>
+  <div class="controls">
+    <label>n <input id="n-input" type="number" min="1" max="1000" step="1" value="24"></label>
+    <fieldset class="scale">
+      <legend>heatmap</legend>
+      <label><input type="radio" name="scale" value="log" checked> log</label>
+      <label><input type="radio" name="scale" value="linear"> linear</label>
+    </fieldset>
+    <label><input type="checkbox" id="markers-toggle" checked> markers</label>
+    <span class="legend" aria-label="legend">
+      <svg width="26" height="26" viewBox="-13 -13 26 26" class="legend-sym" aria-hidden="true">
+        <g id="legend-true"></g></svg> true tip
+      <svg width="26" height="26" viewBox="-13 -13 26 26" class="legend-sym" aria-hidden="true">
+        <g id="legend-pred"></g></svg> predicted
+    </span>
+    <span id="status" role="status"></span>
+  </div>
+</header>
+
+<main class="columns">
+  <section id="col-best" class="col" aria-labelledby="h-best"><h2 id="h-best">BEST</h2><div class="list"></div></section>
+  <section id="col-worst" class="col" aria-labelledby="h-worst"><h2 id="h-worst">WORST</h2><div class="list"></div></section>
+</main>
+
+<div id="detail" hidden role="dialog" aria-modal="true" aria-label="Entry detail">
+  <div class="detail-bar">
+    <button id="detail-prev" type="button" aria-label="previous">&larr; prev</button>
+    <button id="detail-next" type="button" aria-label="next">next &rarr;</button>
+    <div id="detail-caption" class="caption"></div>
+    <button id="detail-close" type="button" aria-label="close">Close &times;</button>
+  </div>
+  <div class="detail-body">
+    <div class="big-row">
+      <div class="panel big"><img class="dial" alt="dial"><svg class="markers" viewBox="0 0 256 256"></svg></div>
+      <div class="panel big"><img class="heatmap" alt="heatmap"><svg class="markers" viewBox="0 0 256 256"></svg></div>
+    </div>
+    <div class="zoom-row">
+      <div class="zoom" id="zoom-dial"><img class="zoom-img" alt="dial zoom"><svg class="markers"></svg></div>
+      <div class="zoom" id="zoom-heat"><img class="zoom-img" alt="heatmap zoom"><svg class="markers"></svg></div>
+    </div>
+  </div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

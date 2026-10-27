@@ -30,9 +30,8 @@ def make_model_file(path, seed: int) -> None:
     torch.save(tv.build_model("tipnet").state_dict(), path)
 
 
-@pytest.fixture
-def fake_data(tmp_path):
-    """SimpleNamespace(data_dir: Path, run_dir: Path, cache_dir: Path, val_idx: (30,) int64 ndarray,
+def build_fake_data(tmp_path) -> SimpleNamespace:
+    """Write the fake dataset + run under tmp_path (Path); returns SimpleNamespace(data_dir: Path, run_dir: Path, cache_dir: Path, val_idx: (30,) int64 ndarray,
     labels: (200, 2) float32 (as read back from labels.csv), names: list[str] (200,))."""
     rng = np.random.default_rng(7)
     np.random.seed(7)
@@ -59,6 +58,12 @@ def fake_data(tmp_path):
     _, csv_labels = tv.read_labels_csv(str(data_dir))
     return SimpleNamespace(data_dir=data_dir, run_dir=run_dir, cache_dir=cache_dir,
                            val_idx=val_idx, labels=csv_labels, names=names)
+
+
+@pytest.fixture
+def fake_data(tmp_path):
+    """Function-scoped fake dataset: see build_fake_data."""
+    return build_fake_data(tmp_path)
 
 
 def open_data(fd, **kw) -> ValData:

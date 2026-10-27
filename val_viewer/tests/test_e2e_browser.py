@@ -1,0 +1,303 @@
+"""Browser tests: start the real `python -m val_viewer` on a fake dataset and drive the page like a person.
+
+    pytest --Popen--> python -m val_viewer --data-dir <fake> --run <fake run> --device cpu --port N
+       |                              ^
+       +--Playwright Chromium---------+   type in n, click scale / markers, click entries, arrow keys,
+                                          resize the window, scroll
+
+Screen positions are derived from the DOM the same way the page draws them:
+    panel x on screen = panel_left + (data_x) * panel_width / 256        (data_x = label + 0.5)
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from val_viewer.tests.conftest import build_fake_data
+
+sync_api = pytest.importorskip("playwright.sync_api")
+expect = sync_api.expect
+
+# REPO_ROOT: Path, the directory that contains the val_viewer package
+REPO_ROOT = Path(__file__).resolve().parents[2]
+# WAIT_MS: int, explicit timeout for every UI wait (milliseconds)
+WAIT_MS = 15_000
+# SERVER_START_S: float, how long to wait for /api/health (ranking 30 images on cpu included)
+SERVER_START_S = 90.0
+# DESKTOP: dict, default window size
+DESKTOP = {"width": 1400, "height": 1000}
+
+
+def _free_port() -> int:
+    """Ask the OS for an unused TCP port on 127.0.0.1."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@pytest.fixture(scope="module")
+def served(tmp_path_factory) -> SimpleNamespace:
+    """One server per module over the fake dataset: SimpleNamespace(url: str, fd: fake_data namespace)."""
+    fd = build_fake_data(tmp_path_factory.mktemp("fake"))
+    port = _free_port()
+    log_path = tmp_path_factory.mktemp("server") / "server.log"
+    with open(log_path, "wb") as log:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "val_viewer", "--data-dir", str(fd.data_dir), "--run", str(fd.run_dir),
+             "--cache-dir", str(fd.cache_dir), "--device", "cpu", "--port", str(port)],
+            cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT)
+        url = f"http://127.0.0.1:{port}"
+        try:
+            deadline = time.monotonic() + SERVER_START_S
+            while True:
+                if proc.poll() is not None:
+                    pytest.fail(f"server exited early (code {proc.returncode}); log: {log_path.read_text()}")
+                try:
+                    with urllib.request.urlopen(f"{url}/api/health", timeout=2) as res:
+                        if res.status == 200:
+                            break
+                except OSError:
+                    pass
+                if time.monotonic() > deadline:
+                    pytest.fail(f"server not healthy within {SERVER_START_S}s; log: {log_path.read_text()}")
+                time.sleep(0.3)
+            yield SimpleNamespace(url=url, fd=fd)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
+@pytest.fixture(scope="module")
+def browser():
+    """Headless Chromium shared by the module."""
+    with sync_api.sync_playwright() as pw:
+        b = pw.chromium.launch(headless=True)
+        yield b
+        b.close()
+
+
+@pytest.fixture
+def page(browser, served):
+    """A fresh page (1400 x 1000) on the viewer, loaded and showing the default 24 + 24 entries."""
+    ctx = browser.new_context(viewport=DESKTOP)
+    ctx.set_default_timeout(WAIT_MS)
+    pg = ctx.new_page()
+    pg.goto(served.url + "/")
+    expect(pg.locator("#col-best .entry")).to_have_count(24)
+    expect(pg.locator("#col-worst .entry")).to_have_count(24)
+    yield pg
+    ctx.close()
+
+
+def api(served, path: str):
+    """GET served.url + path and decode the JSON (list | dict)."""
+    with urllib.request.urlopen(served.url + path, timeout=30) as res:
+        return json.loads(res.read())
+
+
+def set_n(page, text: str) -> None:
+    """Type `text` into the n field and press Enter, like a person."""
+    box = page.locator("#n-input")
+    box.fill(text)
+    box.press("Enter")
+
+
+def test_page_shows_both_columns(page, served):
+    summary = api(served, "/api/summary")
+    head = page.locator("#summary").inner_text()
+    assert "30" in head and summary["run"] in head
+    first = api(served, "/api/list?side=best&n=1")[0]
+    cap = page.locator("#col-best .entry").first.locator(".caption").inner_text()
+    wanted = ["#1", f"val {first['pos']}", first["name"], f"err {first['err']:.2f} px",
+              f"conf {first['conf']:.3f}",
+              f"true ({first['label'][0]:.1f}, {first['label'][1]:.1f})",
+              f"pred ({first['tip'][0]:.1f}, {first['tip'][1]:.1f})"]
+    for w in wanted:
+        assert w in cap, f"{w!r} missing in caption {cap!r}"
+
+
+def test_change_n(page):
+    set_n(page, "5")
+    expect(page.locator("#col-best .entry")).to_have_count(5)
+    expect(page.locator("#col-worst .entry")).to_have_count(5)
+    set_n(page, "0")
+    expect(page.locator("#n-input")).to_have_value("1")
+    expect(page.locator("#col-best .entry")).to_have_count(1)
+    expect(page.locator("#col-worst .entry")).to_have_count(1)
+    set_n(page, "5000")
+    expect(page.locator("#n-input")).to_have_value("1000")
+    expect(page.locator("#col-best .entry")).to_have_count(30)
+    expect(page.locator("#col-worst .entry")).to_have_count(30)
+
+
+def _heat_pixels(page) -> list:
+    """RGBA bytes (list[int]) of the first heatmap image, read back through a canvas once it is loaded."""
+    return page.evaluate("""async () => {
+        const img = document.querySelector('#col-best .entry img.heatmap');
+        if (!img.complete || !img.naturalWidth) await new Promise(r => img.addEventListener('load', r, {once: true}));
+        const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+        const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+        return Array.from(g.getImageData(0, 0, c.width, c.height).data);
+    }""")
+
+
+def _wait_first_heatmap(page, scale: str) -> None:
+    """Wait until the first heatmap shows the `scale` ('log' | 'linear') image fully loaded."""
+    page.wait_for_function(
+        """(s) => { const i = document.querySelector('#col-best .entry img.heatmap');
+        return i.currentSrc.includes('scale=' + s) && i.complete && i.naturalWidth > 0; }""", arg=scale)
+
+
+def test_scale_switch(page):
+    expect(page.locator("#col-best .entry img.heatmap").first).to_have_attribute("src", re.compile("scale=log"))
+    _wait_first_heatmap(page, "log")
+    log_px = _heat_pixels(page)
+    page.locator("input[name=scale][value=linear]").check()
+    srcs = page.locator(".entry img.heatmap").evaluate_all("els => els.map(e => e.getAttribute('src'))")
+    assert srcs and all("scale=linear" in s for s in srcs)
+    _wait_first_heatmap(page, "linear")
+    assert _heat_pixels(page) != log_px
+    page.locator("input[name=scale][value=log]").check()
+    srcs = page.locator(".entry img.heatmap").evaluate_all("els => els.map(e => e.getAttribute('src'))")
+    assert srcs and all("scale=log" in s for s in srcs)
+    _wait_first_heatmap(page, "log")
+    assert _heat_pixels(page) == log_px
+
+
+def test_markers_toggle(page):
+    lists = []
+    page.on("request", lambda r: lists.append(r.url) if "/api/list" in r.url else None)
+    visible = page.locator("svg.markers:visible")
+    expect(visible.first).to_be_visible()
+    page.locator("#markers-toggle").uncheck()
+    expect(visible).to_have_count(0)
+    page.locator("#markers-toggle").check()
+    expect(visible.first).to_be_visible()
+    assert lists == []
+
+
+def test_marker_positions(page, served):
+    worst = api(served, "/api/list?side=worst&n=3")
+    for e in worst:
+        entry = page.locator(f"#col-worst .entry[data-rank='{e['rank']}']")
+        entry.scroll_into_view_if_needed()
+        for img_cls in ("dial", "heatmap"):
+            panel = entry.locator(f"img.{img_cls}").bounding_box()
+            svg = entry.locator(f".panel:has(img.{img_cls}) svg.markers")
+            true_tip, pred_tip = svg.locator(".true-tip"), svg.locator(".pred-tip")
+            assert float(true_tip.get_attribute("data-x")) == pytest.approx(e["label"][0] + 0.5)
+            assert float(true_tip.get_attribute("data-y")) == pytest.approx(e["label"][1] + 0.5)
+            assert float(pred_tip.get_attribute("data-x")) == pytest.approx(e["tip"][0] + 0.5)
+            assert float(pred_tip.get_attribute("data-y")) == pytest.approx(e["tip"][1] + 0.5)
+            box = true_tip.bounding_box()
+            cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+            want_x = panel["x"] + (e["label"][0] + 0.5) * panel["width"] / 256
+            want_y = panel["y"] + (e["label"][1] + 0.5) * panel["height"] / 256
+            assert abs(cx - want_x) <= 1 and abs(cy - want_y) <= 1, (img_cls, cx, cy, want_x, want_y)
+
+
+def test_detail_view(page):
+    page.locator("#col-worst .entry[data-rank='3'] img.dial").click()
+    detail = page.locator("#detail")
+    expect(detail).to_be_visible()
+    expect(detail).to_have_attribute("data-rank", "3")
+    assert detail.get_attribute("data-side") == "worst"
+    for cls in ("dial", "heatmap"):
+        box = detail.locator(f"img.{cls}").bounding_box()
+        assert abs(box["width"] - 512) <= 1 and abs(box["height"] - 512) <= 1
+    page.keyboard.press("ArrowRight")
+    expect(detail).to_have_attribute("data-rank", "4")
+    page.keyboard.press("ArrowLeft")
+    page.keyboard.press("ArrowLeft")
+    expect(detail).to_have_attribute("data-rank", "2")
+    page.keyboard.press("ArrowLeft")
+    expect(detail).to_have_attribute("data-rank", "1")
+    page.keyboard.press("ArrowLeft")
+    expect(detail).to_have_attribute("data-rank", "1")
+    page.locator("#detail-next").click()
+    expect(detail).to_have_attribute("data-rank", "2")
+    page.locator("#detail-prev").click()
+    expect(detail).to_have_attribute("data-rank", "1")
+    page.keyboard.press("Escape")
+    expect(detail).to_be_hidden()
+    page.locator("#col-worst .entry[data-rank='1'] img.dial").click()
+    expect(detail).to_be_visible()
+    page.locator("#detail-close").click()
+    expect(detail).to_be_hidden()
+
+
+def test_zoom_clamped_at_border(page):
+    set_n(page, "1000")
+    expect(page.locator("#col-best .entry")).to_have_count(30)
+    page.locator("#col-best .entry[data-pos='2'] img.dial").click()
+    detail = page.locator("#detail")
+    expect(detail).to_be_visible()
+    expect(detail).to_have_attribute("data-pos", "2")
+    zooms = detail.locator(".zoom")
+    assert zooms.count() >= 1
+    for i in range(zooms.count()):
+        z = zooms.nth(i)
+        assert z.get_attribute("data-x0") == "0" and z.get_attribute("data-y0") == "0"
+        tip = z.locator(".true-tip")
+        assert float(tip.get_attribute("data-x")) == pytest.approx(2.5)
+        assert float(tip.get_attribute("data-y")) == pytest.approx(3.5)
+        zb, tb = z.bounding_box(), tip.bounding_box()
+        cx, cy = tb["x"] + tb["width"] / 2, tb["y"] + tb["height"] / 2
+        assert abs(cx - (zb["x"] + 2.5 * zb["width"] / 32)) <= 1
+        assert abs(cy - (zb["y"] + 3.5 * zb["height"] / 32)) <= 1
+
+
+def test_layout_stacks_when_narrow(page):
+    def boxes():
+        return page.locator("#col-best").bounding_box(), page.locator("#col-worst").bounding_box()
+
+    page.set_viewport_size({"width": 1400, "height": 1000})
+    b, w = boxes()
+    assert w["x"] >= b["x"] + b["width"] - 1 and abs(w["y"] - b["y"]) <= 1
+    page.set_viewport_size({"width": 1100, "height": 1000})
+    b, w = boxes()
+    assert w["x"] >= b["x"] + b["width"] - 1 and abs(w["y"] - b["y"]) <= 1
+    assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+    page.set_viewport_size({"width": 800, "height": 1000})
+    b, w = boxes()
+    assert w["y"] >= b["y"] + b["height"] - 1
+
+
+def test_lazy_images(browser, served):
+    ctx = browser.new_context(viewport={"width": 1400, "height": 700})
+    ctx.set_default_timeout(WAIT_MS)
+    pg = ctx.new_page()
+    # With n = 30 every val image is in both columns, so the same 30 URLs serve 60 heatmap <img> elements and
+    # the browser cache may answer the second one without a request; count loaded <img> elements instead.
+    loaded_js = "document.querySelectorAll('.entry img.heatmap').length && " \
+                "[...document.querySelectorAll('.entry img.heatmap')].filter(i => i.complete && i.naturalWidth > 0).length"
+    try:
+        pg.goto(served.url + "/")
+        set_n(pg, "30")
+        expect(pg.locator("#col-worst .entry")).to_have_count(30)
+        expect(pg.locator(".entry img.heatmap")).to_have_count(60)
+        pg.wait_for_load_state("networkidle")
+        before = pg.evaluate(loaded_js)
+        assert 0 < before < 60, before
+        deadline = time.monotonic() + 30
+        n_loaded = before
+        while n_loaded < 60 and time.monotonic() < deadline:
+            pg.mouse.wheel(0, 500)  # a person scrolls down step by step
+            pg.wait_for_timeout(150)
+            n_loaded = pg.evaluate(loaded_js)
+        assert n_loaded == 60, n_loaded
+    finally:
+        ctx.close()
