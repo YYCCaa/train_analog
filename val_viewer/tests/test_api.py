@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 import shutil
 import os
@@ -22,15 +23,16 @@ from PIL import Image
 
 import train_v9_tip as tv
 from val_viewer.app import data as vdata, render
-from val_viewer.tests.conftest import make_model_file, open_data  # noqa: E402
+from val_viewer.tests.conftest import (N_IMAGES, make_model_file, open_data, params_record,  # noqa: E402
+                                       write_params_jsonl)
 
 # REPO_ROOT: Path, repo root (cwd of the CLI subprocesses)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def get_list(client, side, n):
-    """GET /api/list -> list[dict] entries."""
-    r = client.get("/api/list", params={"side": side, "n": n})
+def get_list(client, side, n, set_name="val"):
+    """GET /api/list (set_name: "val" | "train" | "all") -> list[dict] entries."""
+    r = client.get("/api/list", params={"side": side, "n": n, "set": set_name})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -43,8 +45,8 @@ def png_array(client, url):
     return im.mode, np.asarray(im)
 
 
-def test_lists_sorted(client):
-    allerr = client.data.err
+def test_lists_sorted(client, fake_data):
+    allerr = client.data.err[fake_data.val_idx]  # (30,) float64 errors of the val set
     best, worst = get_list(client, "best", 5), get_list(client, "worst", 5)
     assert [e["rank"] for e in best] == [1, 2, 3, 4, 5] == [e["rank"] for e in worst]
     be, we = [e["err"] for e in best], [e["err"] for e in worst]
@@ -52,13 +54,14 @@ def test_lists_sorted(client):
     assert be[0] == allerr.min() and we[0] == allerr.max()
 
 
-def test_full_list_and_tie_order(client):
+def test_full_list_and_tie_order(client, fake_data):
     best, worst = get_list(client, "best", 1000), get_list(client, "worst", 1000)
     for lst in (best, worst):
-        assert sorted(e["pos"] for e in lst) == list(range(30))
-        order = [e["pos"] for e in lst]
-        assert order.index(0) + 1 == order.index(1)  # tie: 0 then 1, adjacent
-        assert lst[order.index(0)]["err"] == lst[order.index(1)]["err"]
+        assert sorted(e["row"] for e in lst) == sorted(fake_data.val_idx.tolist())
+        order = [e["row"] for e in lst]
+        lo, hi = sorted((int(fake_data.val_idx[0]), int(fake_data.val_idx[1])))  # the exact-tie pair
+        assert order.index(lo) + 1 == order.index(hi)  # tie: lower row first, adjacent
+        assert lst[order.index(lo)]["err"] == lst[order.index(hi)]["err"]
 
 
 def test_numbers_match_trainer(client, fake_data):
@@ -67,8 +70,9 @@ def test_numbers_match_trainer(client, fake_data):
     model.load_state_dict(torch.load(fake_data.run_dir / "tip.pth", weights_only=True))
     model.eval()
     for e in get_list(client, "best", 1000):
-        pos, row = e["pos"], fake_data.val_idx[e["pos"]]
-        img = torch.from_numpy(data.image(pos)).unsqueeze(0)
+        row = e["row"]
+        assert e["split"] == "val" and fake_data.val_idx[e["split_pos"]] == row
+        img = torch.from_numpy(data.image(row)).unsqueeze(0)
         with torch.no_grad():
             lg = model(tv.to_input(img))
         tip = tv.decode_logits(lg)[0].numpy()
@@ -77,7 +81,7 @@ def test_numbers_match_trainer(client, fake_data):
         assert e["name"] == fake_data.names[row]
         assert abs(e["err"] - np.hypot(*(np.asarray(e["tip"]) - np.asarray(e["label"])))) < 1e-6
         # independent numpy 5x5 clipped softmax mass around the argmax cell
-        z = data.logits(pos)
+        z = data.logits(row)
         p = np.exp(z - z.max())
         p /= p.sum()
         iy, ix = np.unravel_index(z.argmax(), z.shape)
@@ -89,27 +93,27 @@ def test_bad_requests(client):
     for params in ({"side": "foo", "n": 5}, {"side": "best", "n": 0}, {"side": "best", "n": 1001}):
         assert client.get("/api/list", params=params).status_code == 422
     assert client.get("/api/heatmap/0.png", params={"scale": "foo"}).status_code == 422
-    assert client.get("/api/image/30.png").status_code == 404
-    assert client.get("/api/heatmap/30.png").status_code == 404
+    assert client.get("/api/image/200.png").status_code == 404
+    assert client.get("/api/heatmap/200.png").status_code == 404
 
 
 def test_pngs(client, fake_data):
-    mode, arr = png_array(client, "/api/image/3.png")
-    row = fake_data.val_idx[3]
+    row = int(fake_data.val_idx[3])
+    mode, arr = png_array(client, f"/api/image/{row}.png")
     ref = np.asarray(Image.open(fake_data.data_dir / fake_data.names[row]))
     assert mode == "L" and arr.shape == (256, 256) and np.array_equal(arr, ref)
-    mode, default = png_array(client, "/api/heatmap/3.png")
-    _, log = png_array(client, "/api/heatmap/3.png?scale=log")
-    _, lin = png_array(client, "/api/heatmap/3.png?scale=linear")
+    mode, default = png_array(client, f"/api/heatmap/{row}.png")
+    _, log = png_array(client, f"/api/heatmap/{row}.png?scale=log")
+    _, lin = png_array(client, f"/api/heatmap/{row}.png?scale=linear")
     assert mode == "RGB" and default.shape == (128, 128, 3)
     assert np.array_equal(default, log) and not np.array_equal(log, lin)
 
 
-def test_heatmap_brightest_at_argmax(client):
-    for pos in (0, 5, 11, 20, 29):
-        _, rgb = png_array(client, f"/api/heatmap/{pos}.png")
+def test_heatmap_brightest_at_argmax(client, fake_data):
+    for row in fake_data.val_idx[[0, 5, 11, 20, 29]].tolist():
+        _, rgb = png_array(client, f"/api/heatmap/{row}.png")
         lum = rgb.astype(float) @ [0.299, 0.587, 0.114]
-        z = client.data.logits(pos)
+        z = client.data.logits(row)
         assert np.unravel_index(lum.argmax(), lum.shape) == np.unravel_index(z.argmax(), z.shape)
 
 
@@ -142,16 +146,17 @@ def test_weights_fallback_and_summary(fake_data):
     shutil.copy(fake_data.run_dir / "best_p99.pth", fake_data.run_dir / "tip.pth")
     data = open_data(fake_data)
     s = data.summary()
-    assert s["weights"] == "tip.pth" and s["run"] == "fake_run" and s["n_val"] == 30
-    assert s["n_over_3"] == int((data.err > 3).sum()) and s["n_over_7"] == int((data.err > 7).sum())
-    assert s["p99"] == pytest.approx(np.percentile(data.err, 99)) and s["max_err"] == data.err.max()
+    err = data.err[fake_data.val_idx]  # (30,) float64 errors of the val rows
+    assert s["weights"] == "tip.pth" and s["run"] == "fake_run" and s["n_val"] == 30 and s["n"] == 30
+    assert s["n_over_3"] == int((err > 3).sum()) and s["n_over_7"] == int((err > 7).sum())
+    assert s["p99"] == pytest.approx(np.percentile(err, 99)) and s["max_err"] == err.max()
 
 
 def test_concurrent_heatmaps(client):
-    positions = [i % 10 for i in range(40)]  # list[int] (40,): requested val positions
+    rows = [i % 10 for i in range(40)]  # list[int] (40,): requested dataset rows
     with ThreadPoolExecutor(8) as ex:
-        resps = list(ex.map(lambda p: (p, client.get(f"/api/heatmap/{p}.png")), positions))
-    seen = {}  # dict[int, bytes]: first PNG bytes seen per position
+        resps = list(ex.map(lambda p: (p, client.get(f"/api/heatmap/{p}.png")), rows))
+    seen = {}  # dict[int, bytes]: first PNG bytes seen per row
     for p, r in resps:
         assert r.status_code == 200
         assert seen.setdefault(p, r.content) == r.content
@@ -181,7 +186,7 @@ def test_cli(fake_data, tmp_path, capsys):
     assert_error_exit(run_cli("--data-dir", no_csv, "--run", fake_data.run_dir, *common))
     capsys.readouterr()
     open_data(fake_data)
-    assert re.search(r"\[rank\] 30/30", capsys.readouterr().out)
+    assert re.search(r"\[rank\] 200/200", capsys.readouterr().out)
     open_data(fake_data)
     assert re.search(r"^\[rank\] cached", capsys.readouterr().out, re.M)
 
@@ -266,3 +271,170 @@ def test_trainer_cache_prefix_is_abspath(fake_data):
     open_data(fake_data)
     prefix = os.path.abspath(fake_data.data_dir) + "_cache"
     assert all(os.path.exists(p) for p in tv.cache_paths(prefix))
+
+
+# ---------------- val / train / all sets, rows, saved parameters ----------------
+
+SET_N = {"val": 30, "train": 170, "all": 200}  # dict[str, int]: images in each set of the fake dataset
+
+
+def open_client(fd, **kw):
+    """TestClient on a fresh app over the fake dataset (re-reads params.jsonl) -> TestClient with `.data`."""
+    from fastapi.testclient import TestClient
+    from val_viewer.app.main import create_app
+    data = open_data(fd, **kw)
+    c = TestClient(create_app(data))
+    c.data = data
+    return c
+
+
+def summary(client, **params):
+    """GET /api/summary (params: query dict) -> dict."""
+    r = client.get("/api/summary", params=params)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_summary_per_set(client, fake_data):
+    default, val = summary(client), summary(client, set="val")
+    assert default == val and val["n"] == 30 and val["set"] == "val"
+    err = client.data.err[fake_data.val_idx]
+    assert val["n_over_3"] == int((err > 3).sum()) and val["p99"] == pytest.approx(np.percentile(err, 99))
+    tr, al = summary(client, set="train"), summary(client, set="all")
+    assert (tr["n"], al["n"]) == (170, 200) and (tr["set"], al["set"]) == ("train", "all")
+    for s in (val, tr, al):
+        assert (s["n_train"], s["n_val"], s["n_total"]) == (170, 30, 200)
+    for k in ("n_over_3", "n_over_7"):
+        assert al[k] == val[k] + tr[k]
+    assert al["max_err"] == client.data.err.max()
+    assert val["params"] == "none"
+    write_params_jsonl(fake_data)
+    assert summary(open_client(fake_data))["params"] == "saved"
+
+
+def test_bad_set_422(client):
+    assert client.get("/api/summary", params={"set": "test"}).status_code == 422
+    assert client.get("/api/list", params={"set": "test", "side": "best", "n": 3}).status_code == 422
+
+
+def test_list_per_set(client, fake_data):
+    for name in ("train", "all"):
+        for side in ("best", "worst"):
+            lst = get_list(client, side, 1000, name)
+            assert [e["rank"] for e in lst] == list(range(1, SET_N[name] + 1))
+            assert sorted(e["row"] for e in lst) == (sorted(fake_data.train_idx.tolist()) if name == "train"
+                                                     else list(range(200)))
+            keys = [(e["err"], e["row"]) if side == "best" else (-e["err"], e["row"]) for e in lst]
+            assert keys == sorted(keys)  # error order, ties by row ascending
+            for e in lst:
+                tbl = fake_data.train_idx if e["split"] == "train" else fake_data.val_idx
+                assert e["split"] in (("train",) if name == "train" else ("train", "val"))
+                assert tbl[e["split_pos"]] == e["row"] and e["name"] == fake_data.names[e["row"]]
+    assert {e["split"] for e in get_list(client, "best", 1000, "all")} == {"train", "val"}
+    val = get_list(client, "worst", 1000, "val")  # n larger than the set: the whole set, ranked 1..30
+    assert len(val) == 30 and [e["rank"] for e in val] == list(range(1, 31))
+    assert get_list(client, "best", 5) == get_list(client, "best", 5, "val")
+
+
+def test_rows_address_images(client, fake_data):
+    row = int(fake_data.train_idx[7])
+    mode, arr = png_array(client, f"/api/image/{row}.png")
+    assert mode == "L" and np.array_equal(arr, np.asarray(Image.open(fake_data.data_dir / fake_data.names[row])))
+    mode, heat = png_array(client, f"/api/heatmap/{row}.png")
+    assert mode == "RGB" and heat.shape == (128, 128, 3)
+    for url in ("/api/image/200.png", "/api/heatmap/200.png", "/api/params/200"):
+        assert client.get(url).status_code == 404, url
+    assert client.get(f"/api/image/{row}.png").headers["cache-control"] == "max-age=3600"
+
+
+def test_rank_cache_all_rows(fake_data, capsys):
+    first = open_data(fake_data)
+    assert "[rank] 200/200" in capsys.readouterr().out and not first.cache_hit
+    assert first.err.shape == (N_IMAGES,) and (first.err > 0).all()
+    second = open_data(fake_data)
+    assert second.cache_hit and re.search(r"^\[rank\] cached", capsys.readouterr().out, re.M)
+    np.testing.assert_array_equal(first.err, second.err)
+    f = only_cache_file(fake_data)  # a v1-style file (val rows only) under the current name is ignored
+    with np.load(f) as z:
+        v1 = {k: z[k][fake_data.val_idx] for k in ("tip", "err", "conf", "label")}
+    np.savez(f, row=fake_data.val_idx, **v1)
+    third = open_data(fake_data)
+    assert not third.cache_hit and third.err.shape == (N_IMAGES,)
+    np.testing.assert_array_equal(third.err, first.err)
+
+
+def get_params(client, row):
+    """GET /api/params/{row} -> Response."""
+    return client.get(f"/api/params/{row}")
+
+
+def test_params_outcomes(fake_data):
+    c = open_client(fake_data)
+    r = get_params(c, 5)
+    assert r.status_code == 404 and r.json()["detail"] == "no parameters saved for this dataset"
+
+    write_params_jsonl(fake_data)
+    c = open_client(fake_data)
+    for row in (0, 5, 199):
+        r = get_params(c, row)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"row": row, **params_record(fake_data, row)}
+    assert r.json()["sampled"]["pointer"]["gray"] == 100 + 199
+
+    # a file lacking the last two rows: only those rows are "no parameters for this image"
+    write_params_jsonl(fake_data, rows=range(198))
+    c = open_client(fake_data)
+    assert get_params(c, 197).status_code == 200
+    for row in (198, 199):
+        r = get_params(c, row)
+        assert r.status_code == 404 and r.json()["detail"] == "no parameters saved for this image"
+
+    # a record whose file name is another image's: 409 naming it, other rows fine
+    def wrong_name(row, rec):
+        if row == 9:
+            rec["filename"] = "dial_00008.png"
+            return rec
+    write_params_jsonl(fake_data, mutate=wrong_name)
+    c = open_client(fake_data)
+    r = get_params(c, 9)
+    assert r.status_code == 409 and "dial_00008.png" in r.json()["detail"]
+    assert get_params(c, 8).status_code == 200
+
+    # last line cut mid-JSON (hard kill): 404 for that row, 200 for the others
+    path = write_params_jsonl(fake_data)
+    path.write_bytes(path.read_bytes().rstrip(b"\n")[:-40])
+    c = open_client(fake_data)
+    r = get_params(c, 199)
+    assert r.status_code == 404 and r.json()["detail"] == "no parameters saved for this image"
+    assert all(get_params(c, row).status_code == 200 for row in (0, 100, 198))
+
+    # CRLF endings and a trailing blank line
+    path = write_params_jsonl(fake_data)
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n") + b"\r\n")
+    c = open_client(fake_data)
+    assert all(get_params(c, row).status_code == 200 for row in range(200))
+    assert get_params(c, 199).json()["sampled"]["pointer"]["gray"] == 299
+
+    # non-finite values are strings in the file and stay strings; a bare NaN token is returned as a string too
+    def nan_value(row, rec):
+        if row == 3:
+            rec["sampled"]["pointer"]["gray"] = "NaN"
+            rec["sampled"]["glares"] = "Infinity"
+            return rec
+        if row == 4:
+            return json.dumps(params_record(fake_data, 4)).replace('"gray": 104', '"gray": NaN', 1)
+    write_params_jsonl(fake_data, mutate=nan_value)
+    c = open_client(fake_data)
+    body = get_params(c, 3).json()
+    assert body["sampled"]["pointer"]["gray"] == "NaN" and body["sampled"]["glares"] == "Infinity"
+    assert get_params(c, 4).json()["sampled"]["pointer"]["gray"] == "NaN"
+
+
+def test_params_index_is_cached(fake_data):
+    from val_viewer.app.params import ParamStore
+    write_params_jsonl(fake_data)
+    store = ParamStore(fake_data.data_dir, fake_data.names, fake_data.cache_dir)
+    assert store.get(7)["sampled"]["pointer"]["gray"] == 107
+    assert len(list(fake_data.cache_dir.glob("params_*.npy"))) == 1
+    again = ParamStore(fake_data.data_dir, fake_data.names, fake_data.cache_dir)  # warm: reads the cached index
+    assert again.get(7) == store.get(7)

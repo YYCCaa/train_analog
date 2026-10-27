@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -32,7 +34,7 @@ def make_model_file(path, seed: int) -> None:
 
 def build_fake_data(tmp_path) -> SimpleNamespace:
     """Write the fake dataset + run under tmp_path (Path); returns SimpleNamespace(data_dir: Path, run_dir: Path, cache_dir: Path, val_idx: (30,) int64 ndarray,
-    labels: (200, 2) float32 (as read back from labels.csv), names: list[str] (200,))."""
+    train_idx: (170,) int64 ndarray (dataset row of each train position), labels: (200, 2) float32 (as read back from labels.csv), names: list[str] (200,))."""
     rng = np.random.default_rng(7)
     np.random.seed(7)
     data_dir = tmp_path / "fake_ds"
@@ -41,7 +43,7 @@ def build_fake_data(tmp_path) -> SimpleNamespace:
     run_dir.mkdir(parents=True)
     cache_dir = tmp_path / "vv_cache"
 
-    val_idx = tv.split_indices(N_IMAGES, 0.15)[1].numpy()  # (30,) int64: dataset row of each val position
+    train_idx, val_idx = (t.numpy() for t in tv.split_indices(N_IMAGES, 0.15))  # (170,), (30,) int64 dataset rows
     imgs = rng.integers(0, 256, size=(N_IMAGES, 256, 256), dtype=np.uint8)  # (200, 256, 256) uint8
     labels = rng.uniform(5, 250, size=(N_IMAGES, 2)).round(3)  # (200, 2) float64 tip x, y
     imgs[val_idx[1]] = imgs[val_idx[0]]      # val positions 0 and 1: identical image ...
@@ -57,7 +59,32 @@ def build_fake_data(tmp_path) -> SimpleNamespace:
     make_model_file(run_dir / "tip.pth", 1234)
     _, csv_labels = tv.read_labels_csv(str(data_dir))
     return SimpleNamespace(data_dir=data_dir, run_dir=run_dir, cache_dir=cache_dir,
-                           val_idx=val_idx, labels=csv_labels, names=names)
+                           train_idx=train_idx, val_idx=val_idx, labels=csv_labels, names=names)
+
+
+def params_record(fd, row: int) -> dict:
+    """The fake params.jsonl record (dict) of dataset row `row`: pointer.gray is 100 + row."""
+    return {"filename": fd.names[row], "seed": 1000 + row, "angle_deg": row % 360,
+            "tip_x": float(fd.labels[row][0]), "tip_y": float(fd.labels[row][1]),
+            "sampled": {"pointer": {"gray": 100 + row, "forbidden": [[74, 144]]},
+                        "glares": {"items": [{"gray": 200 + row, "x": 5}, {"gray": 10, "x": 6}]},
+                        "angle": row % 360}}
+
+
+def write_params_jsonl(fd, rows=None, mutate=None) -> Path:
+    """Write <fd.data_dir>/params.jsonl, one JSON line per dataset row -> its Path.
+
+    rows: iterable[int] | None, the rows that get a line (default all 200; the others are left out, so later
+    lines shift up); mutate: callable(row: int, rec: dict) -> dict | str | None, may replace a record (dict) or its
+    whole line (str), returning None keeps the record."""
+    lines = []  # list[str]: one text line per written row
+    for row in (range(N_IMAGES) if rows is None else rows):
+        rec = params_record(fd, row)
+        out = mutate(row, rec) if mutate else None
+        lines.append(out if isinstance(out, str) else json.dumps(out if out is not None else rec))
+    path = fd.data_dir / "params.jsonl"
+    path.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
+    return path
 
 
 @pytest.fixture

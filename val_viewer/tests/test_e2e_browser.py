@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from val_viewer.tests.conftest import build_fake_data
+from val_viewer.tests.conftest import build_fake_data, write_params_jsonl
 
 sync_api = pytest.importorskip("playwright.sync_api")
 expect = sync_api.expect
@@ -32,8 +32,8 @@ expect = sync_api.expect
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # WAIT_MS: int, explicit timeout for every UI wait (milliseconds)
 WAIT_MS = 15_000
-# SERVER_START_S: float, how long to wait for /api/health (ranking 30 images on cpu included)
-SERVER_START_S = 90.0
+# SERVER_START_S: float, how long to wait for /api/health (ranking all 200 images on cpu included)
+SERVER_START_S = 150.0
 # DESKTOP: dict, default window size
 DESKTOP = {"width": 1400, "height": 1000}
 
@@ -49,6 +49,7 @@ def _free_port() -> int:
 def served(tmp_path_factory) -> SimpleNamespace:
     """One server per module over the fake dataset: SimpleNamespace(url: str, fd: fake_data namespace, log: Path of the server output)."""
     fd = build_fake_data(tmp_path_factory.mktemp("fake"))
+    write_params_jsonl(fd)  # saved parameters: pointer.gray of row r is 100 + r
     port = _free_port()
     log_path = tmp_path_factory.mktemp("server") / "server.log"
     with open(log_path, "wb") as log:
@@ -121,7 +122,7 @@ def test_page_shows_both_columns(page, served):
     assert "30" in head and summary["run"] in head
     first = api(served, "/api/list?side=best&n=1")[0]
     cap = page.locator("#col-best .entry").first.locator(".caption").inner_text()
-    wanted = ["#1", f"val {first['pos']}", first["name"], f"err {first['err']:.2f} px",
+    wanted = ["#1", f"val {first['split_pos']}", first["name"], f"err {first['err']:.2f} px",
               f"conf {first['conf']:.3f}",
               f"true ({first['label'][0]:.1f}, {first['label'][1]:.1f})",
               f"pred ({first['tip'][0]:.1f}, {first['tip'][1]:.1f})"]
@@ -239,13 +240,14 @@ def test_detail_view(page):
     expect(detail).to_be_hidden()
 
 
-def test_zoom_clamped_at_border(page):
+def test_zoom_clamped_at_border(page, served):
     set_n(page, "1000")
     expect(page.locator("#col-best .entry")).to_have_count(30)
-    page.locator("#col-best .entry[data-pos='2'] img.dial").click()
+    row = int(served.fd.val_idx[2])  # dataset row of val position 2 (its tip is at (2, 3))
+    page.locator(f"#col-best .entry[data-row='{row}'] img.dial").click()
     detail = page.locator("#detail")
     expect(detail).to_be_visible()
-    expect(detail).to_have_attribute("data-pos", "2")
+    expect(detail).to_have_attribute("data-row", str(row))
     zooms = detail.locator(".zoom")
     assert zooms.count() >= 1
     for i in range(zooms.count()):
@@ -405,3 +407,125 @@ def test_server_log_has_no_access_lines(page, served):
     log = served.log.read_text(errors="replace")
     assert "[rank]" in log
     assert "GET /api/" not in log and "GET /static" not in log, log[-600:]
+
+
+# ---------------- val / train / all, saved parameters ----------------
+
+def pick_set(page, name: str) -> None:
+    """Click the radio of set `name` ('val' | 'train' | 'all') like a person."""
+    page.locator(f"input[name=set][value={name}]").check()
+
+
+def entry_rows(page, side: str = "best") -> list:
+    """data-row (list[str]) of the entries of column `side`, top to bottom."""
+    return page.locator(f"#col-{side} .entry").evaluate_all("els => els.map(e => e.dataset.row)")
+
+
+def entry_tags(page, side: str = "best") -> list:
+    """Text of the train / val tag (list[str]) of each entry of column `side`."""
+    return page.locator(f"#col-{side} .entry .tag").evaluate_all("els => els.map(e => e.textContent.trim())")
+
+
+def test_set_switch(page, served):
+    first_val = entry_rows(page)
+    assert set(entry_tags(page)) == {"val"}
+    pick_set(page, "train")
+    expect(page.locator("#summary")).to_contain_text("train 170")
+    expect(page.locator("#col-best .entry")).to_have_count(24)
+    assert set(entry_tags(page)) == {"train"} and set(entry_tags(page, "worst")) == {"train"}
+    want = [str(e["row"]) for e in api(served, "/api/list?set=train&side=best&n=24")]
+    assert entry_rows(page) == want
+    pick_set(page, "all")
+    expect(page.locator("#summary")).to_contain_text("all 200 (train 170 · val 30)")
+    expect(page.locator("#col-best .entry")).to_have_count(24)
+    both = entry_tags(page) + entry_tags(page, "worst")
+    assert set(both) == {"train", "val"}, both
+    pick_set(page, "val")
+    expect(page.locator("#summary")).to_contain_text(re.compile(r"· val 30 ·"))  # not the all-header's "val 30)"
+    expect(page.locator("#col-best .entry")).to_have_count(24)
+    assert entry_rows(page) == first_val and set(entry_tags(page)) == {"val"}
+
+
+def param_gray(page):
+    """Text of the pointer.gray value shown in the Parameters column (str)."""
+    return page.locator("#params [data-section='pointer'] [data-key='gray'] .v").inner_text()
+
+
+def test_detail_shows_params(page, served):
+    worst = api(served, "/api/list?side=worst&n=2")
+    page.locator("#col-worst .entry[data-rank='1'] img.dial").click()
+    expect(page.locator("#detail")).to_be_visible()
+    expect(page.locator("#params [data-section='pointer']")).to_be_visible()
+    expect(page.locator("#params [data-key='gray'] .v").first).to_have_text(str(100 + worst[0]["row"]))
+    assert param_gray(page) == str(100 + worst[0]["row"])
+    page.keyboard.press("ArrowRight")
+    expect(page.locator("#detail")).to_have_attribute("data-rank", "2")
+    expect(page.locator("#params [data-section='pointer'] [data-key='gray'] .v")).to_have_text(
+        str(100 + worst[1]["row"]))
+    head = page.locator("#params").inner_text()
+    assert f"seed {1000 + worst[1]['row']}" in head
+
+
+def test_detail_no_params_message(page):
+    page.route("**/api/params/*", lambda route: route.fulfill(
+        status=404, content_type="application/json",
+        body=json.dumps({"detail": "no parameters saved for this dataset"})))
+    page.locator("#col-worst .entry[data-rank='1'] img.dial").click()
+    expect(page.locator("#detail")).to_be_visible()
+    expect(page.locator("#params")).to_contain_text("No parameters saved for this dataset")
+    expect(page.locator("#params")).to_contain_text("studio")
+    assert page.locator("#params [data-section]").count() == 0
+
+
+def test_params_layout_narrow(page):
+    page.set_viewport_size({"width": 800, "height": 1000})
+    page.locator("#col-worst .entry[data-rank='1'] img.dial").click()
+    expect(page.locator("#detail")).to_be_visible()
+    expect(page.locator("#params [data-section='pointer']")).to_be_visible()
+    zoom_bottom = max(page.locator(f"#detail {sel}").bounding_box()["y"]
+                      + page.locator(f"#detail {sel}").bounding_box()["height"]
+                      for sel in (".big-row", ".zoom-row"))
+    assert page.locator("#params").bounding_box()["y"] >= zoom_bottom - 1
+    assert page.evaluate("document.documentElement.scrollWidth") <= 800
+    page.set_viewport_size({"width": 1400, "height": 1000})  # wide: the column sits to the right of the panels
+    big = page.locator("#detail .big-row").bounding_box()
+    assert page.locator("#params").bounding_box()["x"] >= big["x"] + big["width"] - 1
+
+
+def test_captions_tag_split(page, served):
+    pick_set(page, "all")
+    set_n(page, "1000")
+    expect(page.locator("#col-best .entry")).to_have_count(200)
+    lst = api(served, "/api/list?set=all&side=best&n=1000")
+    for split in ("train", "val"):
+        e = next(e for e in lst if e["split"] == split)
+        cap = page.locator(f"#col-best .entry[data-row='{e['row']}'] .caption").inner_text()
+        assert f"{split} {e['split_pos']}" in cap, cap
+        tag = page.locator(f"#col-best .entry[data-row='{e['row']}'] .tag").inner_text().strip()
+        assert tag == split
+
+
+def test_fast_set_switch_keeps_last(page, served):
+    held = []  # list[Route]: set=train responses held back until the person has moved on
+
+    def hold_train(route):
+        held.append(route)
+
+    page.route(re.compile(r"/api/(list|summary)\?.*set=train"), hold_train)
+    pick_set(page, "train")
+    for _ in range(100):
+        if len(held) >= 3:
+            break
+        page.wait_for_timeout(100)
+    assert len(held) >= 3, len(held)  # summary + best + worst of the train load are in flight
+    pick_set(page, "all")
+    expect(page.locator("#summary")).to_contain_text("all 200")
+    expect(page.locator("#col-best .entry")).to_have_count(24)
+    for route in held:  # now the late train answers arrive
+        route.continue_()
+    page.wait_for_timeout(1000)
+    assert set(entry_tags(page)) | set(entry_tags(page, "worst")) == {"train", "val"}
+    want = [str(e["row"]) for e in api(served, "/api/list?set=all&side=best&n=24")]
+    assert entry_rows(page) == want
+    assert "all 200" in page.locator("#summary").inner_text()
+    assert page.locator("input[name=set][value=all]").is_checked()

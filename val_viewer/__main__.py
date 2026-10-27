@@ -1,4 +1,4 @@
-"""Entry point: `python -m val_viewer [--data-dir D] [--run R] ...` ranks the val split, then serves the page."""
+"""Entry point: `python -m val_viewer [--data-dir D] [--run R] ...` ranks every dataset row, then serves the page."""
 
 from __future__ import annotations
 

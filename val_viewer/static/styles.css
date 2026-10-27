@@ -4,6 +4,7 @@
  *   header: summary line / controls row
  *   main:   [ BEST column | WORST column ]   (>= 1100 px wide; one column below)
  *   entry:  caption, then [ dial panel | heatmap panel ], each panel = img + svg.markers overlay
+ *   detail: [ panels + zooms | Parameters column ] (> 1360 px wide; the column moves below otherwise)
  */
 :root {
   --bg: #12151a; --surface: #1b1f27; --border: #2d333e; --text: #e6e9ef; --muted: #9aa3b2;
@@ -64,8 +65,30 @@ button { background: var(--bg); color: var(--text); border: 1px solid var(--bord
   padding: 5px 12px; font: inherit; cursor: pointer; }
 button:hover:not(:disabled) { border-color: #6d7a96; }
 button:disabled { opacity: .4; cursor: default; }
-.detail-body { padding: 14px 16px 24px; display: flex; flex-direction: column; gap: 14px; }
+.detail-body { padding: 14px 16px 24px; display: grid; grid-template-columns: max-content minmax(280px, 1fr);
+  gap: 14px; align-items: start; }
+.detail-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+@media (max-width: 1360px) { .detail-body { grid-template-columns: minmax(0, 1fr); } }
 .big-row, .zoom-row { display: flex; flex-wrap: wrap; gap: 14px; }
 .panel.big { flex: 0 0 512px; width: 512px; height: 512px; max-width: none; }
 .zoom { position: relative; width: 256px; height: 256px; overflow: hidden; background: #000; flex: 0 0 256px; }
 .zoom .zoom-img { position: absolute; width: 2048px; height: 2048px; max-width: none; image-rendering: pixelated; }
+
+/* train / val tag in captions: text, not colour alone */
+.tag { display: inline-block; padding: 0 5px; margin-right: 2px; border: 1px solid var(--muted); border-radius: 3px;
+  font-size: 11px; line-height: 16px; color: var(--muted); }
+.tag-train { border-color: #7aa7ff; color: #9bbcff; }
+.tag-val { border-color: #e0b04a; color: #ecc470; }
+
+/* Parameters column of the detail view: scrolls on its own beside the panels, flows below them when narrow */
+#params { min-width: 0; max-height: calc(100vh - 90px); overflow: auto; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 12.5px;
+  position: sticky; top: 56px; }
+@media (max-width: 1360px) { #params { max-height: none; position: static; } }
+#params .p-head { color: var(--text); margin-bottom: 6px; overflow-wrap: anywhere; }
+#params .p-msg { color: var(--muted); }
+#params details { border-top: 1px solid var(--border); padding: 3px 0; }
+#params summary { cursor: pointer; font-weight: 600; }
+.prow { display: flex; gap: 10px; padding: 1px 0 1px 14px; }
+.prow .k { flex: 0 1 45%; color: var(--muted); overflow-wrap: anywhere; }
+.prow .v { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }

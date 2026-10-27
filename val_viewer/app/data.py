@@ -1,16 +1,20 @@
-"""Validation data, model and the cached error ranking of the TipNet v9 val split.
+"""Dataset data, model and the cached error ranking of every row of a TipNet v9 dataset.
 
     <data-dir>/labels.csv + PNGs --tv.build_cache--> <data-dir>_cache_images.npy (N,256,256) uint8
                                                      <data-dir>_cache_meta.npz
-    tv.split_indices(N, val_split) ----> val_idx (n_val,) int64: dataset row of each val position
+    tv.split_indices(N, val_split) ----> train_idx (n_train,), val_idx (n_val,) int64: dataset row of each position
     <run>/tip.pth | best_p99.pth ------> TipNet (eval) on `device`
 
-    ranking pass (batches of `batch` val images, no_grad, float64 softmax)
+    ranking pass (batches of `batch` consecutive rows 0..N-1, no_grad, float64 softmax)
         logits (B,1,128,128) --tv.decode_logits--> tip (B,2)   err = |tip - label|
                              --softmax, 5x5 mass around argmax--> conf (B,)
         stored in <cache_dir>/rank_<sha256 key>.npz; a warm start loads it instead.
 
-Position `pos` (0..n_val-1) is the index into the val split; every public method takes it.
+    <data-dir>/params.jsonl (optional) --ParamStore--> saved sampled parameters of one row
+
+An image is addressed by its dataset `row` (0..N-1, the labels.csv data-row index) everywhere. A set is
+"val" (val rows), "train" (train rows) or "all"; inside a set best = ascending error, worst = descending
+error, ties by row ascending.
 """
 
 from __future__ import annotations
@@ -25,13 +29,16 @@ import numpy as np
 import torch
 
 import train_v9_tip as tv
+from .params import ParamStore
 
-# CACHE_VERSION: int, bump when the ranking maths changes so old rank caches are ignored
-CACHE_VERSION = 1
+# CACHE_VERSION: int, bump when the ranking maths or the cached rows change so old rank caches are ignored
+CACHE_VERSION = 2
 # DEFAULT_CACHE_DIR: Path, where rank_<key>.npz files live by default (gitignored)
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache"
 # CONF_WIN: int, side of the window (heatmap cells) whose softmax mass is `conf`
 CONF_WIN = 5
+# SETS: tuple[str, ...], the image sets the viewer can rank within
+SETS = ("val", "train", "all")
 
 # Match the trainer's numerics exactly (no TF32, no autocast).
 torch.backends.cudnn.allow_tf32 = False
@@ -71,13 +78,15 @@ def rank_key(data_dir, val_split, img_path, weights_path, device, trainer_file=N
 
 
 class ValData:
-    """The val split of a v9 dataset, a trained TipNet and the per-image error ranking.
+    """A v9 dataset (train + val rows), a trained TipNet and the per-image error ranking over every row.
 
-    Attributes (n = n_val; all numpy, indexed by val position):
-        n_val: int; names: list[str] (n,); label: (n, 2) float64 true tip (x, y) px;
-        tip: (n, 2) float64 predicted tip px; err: (n,) float64 px; conf: (n,) float64 in [0, 1];
-        row: (n,) int64 dataset row of each position; cache_hit: bool (rank cache reused);
-        weights_path: Path; run_name: str; device: str; data_dir: str.
+    Attributes (N = n_total; all numpy, indexed by dataset row):
+        n_total, n_train, n_val: int; names: list[str] (N,); label: (N, 2) float64 true tip (x, y) px;
+        tip: (N, 2) float64 predicted tip px; err: (N,) float64 px; conf: (N,) float64 in [0, 1];
+        split: (N,) str "train" | "val"; split_pos: (N,) int64 position of the row inside its split
+        (train_idx[split_pos] == row for train rows, val_idx[split_pos] == row for val rows);
+        train_idx: (n_train,) int64, val_idx: (n_val,) int64 dataset rows; cache_hit: bool (rank cache reused);
+        weights_path: Path; run_name: str; device: str; data_dir: str; params: ParamStore.
     """
 
     def __init__(self, data_dir, run_dir, val_split=0.15, cache_dir=None, device="auto", batch=256):
@@ -105,11 +114,20 @@ class ValData:
         img_path, _ = tv.cache_paths(prefix)
         self._img_path: str = img_path  # trainer images .npy, opened per read (a held memmap blocks a rebuild on Windows)
         all_names, all_labels = tv.read_labels_csv(self.data_dir)  # list[str] (N,), (N, 2) float32
-        _, val_idx = tv.split_indices(len(all_names), val_split)
-        self.row: np.ndarray = val_idx.numpy().astype(np.int64)    # (n_val,) int64
-        self.n_val: int = len(self.row)
-        self.names: list[str] = [all_names[r] for r in self.row]
-        self.label: np.ndarray = all_labels[self.row].astype(np.float64)  # (n_val, 2)
+        self.n_total: int = len(all_names)
+        train_idx, val_idx = tv.split_indices(self.n_total, val_split)
+        self.train_idx: np.ndarray = train_idx.numpy().astype(np.int64)  # (n_train,) int64 dataset rows
+        self.val_idx: np.ndarray = val_idx.numpy().astype(np.int64)      # (n_val,) int64 dataset rows
+        self.n_train: int = len(self.train_idx)
+        self.n_val: int = len(self.val_idx)
+        self.names: list[str] = all_names
+        self.label: np.ndarray = all_labels.astype(np.float64)  # (N, 2)
+        self.split: np.ndarray = np.full(self.n_total, "train", dtype="<U5")  # (N,) str
+        self.split[self.val_idx] = "val"
+        self.split_pos: np.ndarray = np.zeros(self.n_total, dtype=np.int64)   # (N,) int64
+        self.split_pos[self.train_idx] = np.arange(self.n_train)
+        self.split_pos[self.val_idx] = np.arange(self.n_val)
+        self._rows = np.arange(self.n_total, dtype=np.int64)  # (N,) int64, 0..N-1 (what the rank cache stores as `row`)
 
         self._model = tv.build_model("tipnet")              # nn.Module, eval mode, on self.device
         state = torch.load(self.weights_path, map_location="cpu", weights_only=True)
@@ -121,13 +139,14 @@ class ValData:
         cache_file = cache_dir / f"rank_{self.key}.npz"     # Path
 
         self.cache_hit: bool = False
+        n = self.n_total
         if cache_file.is_file():
             try:
                 with np.load(cache_file) as z:
                     tip, err, conf, row = z["tip"], z["err"], z["conf"], z["row"]
-                if (np.array_equal(row, self.row) and tip.shape == (self.n_val, 2)
-                        and err.shape == (self.n_val,) and conf.shape == (self.n_val,)):
-                    self.tip, self.err, self.conf = tip, err, conf  # (n,2), (n,), (n,) float64
+                if (np.array_equal(row, self._rows) and tip.shape == (n, 2)
+                        and err.shape == (n,) and conf.shape == (n,)):
+                    self.tip, self.err, self.conf = tip, err, conf  # (N,2), (N,), (N,) float64
                     self.cache_hit = True
                     print(f"[rank] cached {cache_file.name}", flush=True)
             except (OSError, ValueError, KeyError, zipfile.BadZipFile, EOFError):
@@ -136,22 +155,29 @@ class ValData:
             self.tip, self.err, self.conf = self._rank(batch)
             cache_dir.mkdir(parents=True, exist_ok=True)
             tmp = cache_file.with_suffix(".partial.npz")
-            np.savez(tmp, tip=self.tip, err=self.err, conf=self.conf, row=self.row, label=self.label)
+            np.savez(tmp, tip=self.tip, err=self.err, conf=self.conf, row=self._rows, label=self.label)
             os.replace(tmp, cache_file)
 
-        pos = np.arange(self.n_val)
-        # (n_val,) int64 positions: best = ascending (err, pos); worst = descending err, ascending pos
-        self._order = {"best": np.lexsort((pos, self.err)), "worst": np.lexsort((pos, -self.err))}
+        self.params: ParamStore = ParamStore(self.data_dir, self.names, cache_dir)  # saved parameters, if any
+        # dict[str, (n_set,) int64]: dataset rows of each set, ascending
+        self._set_rows = {"val": np.sort(self.val_idx), "train": np.sort(self.train_idx), "all": self._rows}
+        # dict[(set, side), (n_set,) int64]: rows of the set ordered best = ascending (err, row),
+        # worst = descending err, ascending row
+        self._order = {}
+        for name, rows in self._set_rows.items():
+            e = self.err[rows]
+            self._order[name, "best"] = rows[np.lexsort((rows, e))]
+            self._order[name, "worst"] = rows[np.lexsort((rows, -e))]
 
     def _rank(self, batch):
-        """Forward every val image -> (tip (n,2), err (n,), conf (n,)) float64."""
-        n = self.n_val
+        """Forward every row -> (tip (N,2), err (N,), conf (N,)) float64."""
+        n = self.n_total
         tip = np.zeros((n, 2))   # float64 predicted tips
         conf = np.zeros(n)       # float64 5x5 softmax mass
         r = CONF_WIN // 2
         for s in range(0, n, batch):
             mm = np.load(self._img_path, mmap_mode="r")     # (N,256,256) uint8 memmap
-            x = torch.from_numpy(np.array(mm[self.row[s:s + batch]])).to(self.device)  # (B,256,256) uint8
+            x = torch.from_numpy(np.array(mm[s:s + batch])).to(self.device)  # (B,256,256) uint8
             del mm
             with self._lock, torch.no_grad():
                 logits = self._model(tv.to_input(x))        # (B,1,128,128) float32
@@ -164,33 +190,37 @@ class ValData:
                 iy, ix = divmod(int(a), w)
                 conf[s + b] = p[b, max(iy - r, 0):iy + r + 1, max(ix - r, 0):ix + r + 1].sum()
             print(f"[rank] {min(s + batch, n)}/{n}", flush=True)
-        err = np.hypot(*(tip - self.label).T)               # (n,) float64
+        err = np.hypot(*(tip - self.label).T)               # (N,) float64
         return tip, err, conf
 
-    def image(self, pos: int) -> np.ndarray:
-        """Val position -> (256, 256) uint8 dial image."""
+    def image(self, row: int) -> np.ndarray:
+        """Dataset row -> (256, 256) uint8 dial image."""
         mm = np.load(self._img_path, mmap_mode="r")  # (N,256,256) uint8 memmap, closed on return
-        return np.array(mm[self.row[pos]])
+        return np.array(mm[row])
 
-    def logits(self, pos: int) -> np.ndarray:
-        """Val position -> (128, 128) float64 logits of one forward pass (thread-safe)."""
-        x = torch.from_numpy(self.image(pos)).unsqueeze(0).to(self.device)  # (1,256,256) uint8
+    def logits(self, row: int) -> np.ndarray:
+        """Dataset row -> (128, 128) float64 logits of one forward pass (thread-safe)."""
+        x = torch.from_numpy(self.image(row)).unsqueeze(0).to(self.device)  # (1,256,256) uint8
         with self._lock, torch.no_grad():
             out = self._model(tv.to_input(x))               # (1,1,128,128) float32
         return out[0, 0].double().cpu().numpy()
 
-    def entries(self, side: str, n: int) -> list[dict]:
-        """side 'best' | 'worst', n (int >= 1) -> up to n entry dicts
-        {rank (1-based), pos, name, label [x, y], tip [x, y], err, conf}."""
-        order = self._order[side][:n]
-        return [{"rank": i + 1, "pos": int(p), "name": self.names[p],
-                 "label": [float(v) for v in self.label[p]], "tip": [float(v) for v in self.tip[p]],
-                 "err": float(self.err[p]), "conf": float(self.conf[p])}
-                for i, p in enumerate(order)]
+    def entries(self, set_name: str, side: str, n: int) -> list[dict]:
+        """set_name 'val' | 'train' | 'all', side 'best' | 'worst', n (int >= 1) -> up to n entry dicts
+        {rank (1-based), row, split ('train' | 'val'), split_pos, name, label [x, y], tip [x, y], err, conf}."""
+        order = self._order[set_name, side][:n]
+        return [{"rank": i + 1, "row": int(r), "split": str(self.split[r]), "split_pos": int(self.split_pos[r]),
+                 "name": self.names[r], "label": [float(v) for v in self.label[r]],
+                 "tip": [float(v) for v in self.tip[r]], "err": float(self.err[r]), "conf": float(self.conf[r])}
+                for i, r in enumerate(order)]
 
-    def summary(self) -> dict:
-        """Header numbers: run, weights file name, data_dir, n_val, p99, max_err, n_over_3, n_over_7, device, key (rank-cache key, str)."""
+    def summary(self, set_name: str = "val") -> dict:
+        """Header numbers: run, weights file name, data_dir, set, n (images in the set), n_train, n_val, n_total,
+        p99, max_err, n_over_3, n_over_7 (of that set), device, key (rank-cache key, str),
+        params ('saved' | 'none')."""
+        err = self.err[self._set_rows[set_name]]  # (n_set,) float64
         return {"run": self.run_name, "weights": self.weights_path.name, "data_dir": self.data_dir,
-                "n_val": self.n_val, "p99": float(np.percentile(self.err, 99)),
-                "max_err": float(self.err.max()), "n_over_3": int((self.err > 3).sum()),
-                "n_over_7": int((self.err > 7).sum()), "device": self.device, "key": self.key}
+                "set": set_name, "n": len(err), "n_train": self.n_train, "n_val": self.n_val,
+                "n_total": self.n_total, "p99": float(np.percentile(err, 99)), "max_err": float(err.max()),
+                "n_over_3": int((err > 3).sum()), "n_over_7": int((err > 7).sum()), "device": self.device,
+                "key": self.key, "params": "saved" if self.params.available else "none"}

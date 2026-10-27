@@ -10,6 +10,12 @@
 <header class="top">
   <h1 id="summary">Val viewer · loading…</h1>
   <div class="controls">
+    <fieldset class="scale" id="set-switch">
+      <legend>set</legend>
+      <label><input type="radio" name="set" value="val" checked> val</label>
+      <label><input type="radio" name="set" value="train"> train</label>
+      <label><input type="radio" name="set" value="all"> all</label>
+    </fieldset>
     <label>n <input id="n-input" type="number" min="1" max="1000" step="1" value="24"></label>
     <fieldset class="scale">
       <legend>heatmap</legend>
@@ -40,6 +46,7 @@
     <button id="detail-close" type="button" aria-label="close">Close &times;</button>
   </div>
   <div class="detail-body">
+    <div class="detail-main">
     <div class="big-row">
       <div class="panel big"><img class="dial" alt="dial"><svg class="markers" viewBox="0 0 256 256"></svg></div>
       <div class="panel big"><img class="heatmap" alt="heatmap"><svg class="markers" viewBox="0 0 256 256"></svg></div>
@@ -48,6 +55,8 @@
       <div class="zoom" id="zoom-dial"><img class="zoom-img" alt="dial zoom"><svg class="markers"></svg></div>
       <div class="zoom" id="zoom-heat"><img class="zoom-img" alt="heatmap zoom"><svg class="markers"></svg></div>
     </div>
+    </div>
+    <aside id="params" aria-label="Parameters" aria-live="polite"></aside>
   </div>
 </div>
 <script src="/static/app.js"></script>
