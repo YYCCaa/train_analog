@@ -46,40 +46,40 @@ def png_array(client, url):
     return im.mode, np.asarray(im)
 
 
-def test_lists_sorted(client, fake_data):
-    allerr = client.data.err[fake_data.val_idx]  # (30,) float64 errors of the val set
-    best, worst = get_list(client, "best", 5), get_list(client, "worst", 5)
+def test_lists_sorted(shared_client, shared_fake_data):
+    allerr = shared_client.data.err[shared_fake_data.val_idx]  # (30,) float64 errors of the val set
+    best, worst = get_list(shared_client, "best", 5), get_list(shared_client, "worst", 5)
     assert [e["rank"] for e in best] == [1, 2, 3, 4, 5] == [e["rank"] for e in worst]
     be, we = [e["err"] for e in best], [e["err"] for e in worst]
     assert be == sorted(be) and we == sorted(we, reverse=True)
     assert be[0] == allerr.min() and we[0] == allerr.max()
 
 
-def test_full_list_and_tie_order(client, fake_data):
-    best, worst = get_list(client, "best", 1000), get_list(client, "worst", 1000)
+def test_full_list_and_tie_order(shared_client, shared_fake_data):
+    best, worst = get_list(shared_client, "best", 1000), get_list(shared_client, "worst", 1000)
     for lst in (best, worst):
-        assert sorted(e["row"] for e in lst) == sorted(fake_data.val_idx.tolist())
+        assert sorted(e["row"] for e in lst) == sorted(shared_fake_data.val_idx.tolist())
         order = [e["row"] for e in lst]
-        lo, hi = sorted((int(fake_data.val_idx[0]), int(fake_data.val_idx[1])))  # the exact-tie pair
+        lo, hi = sorted((int(shared_fake_data.val_idx[0]), int(shared_fake_data.val_idx[1])))  # the exact-tie pair
         assert order.index(lo) + 1 == order.index(hi)  # tie: lower row first, adjacent
         assert lst[order.index(lo)]["err"] == lst[order.index(hi)]["err"]
 
 
-def test_numbers_match_trainer(client, fake_data):
-    data = client.data
+def test_numbers_match_trainer(shared_client, shared_fake_data):
+    data = shared_client.data
     model = tv.build_model("tipnet")
-    model.load_state_dict(torch.load(fake_data.run_dir / "tip.pth", weights_only=True))
+    model.load_state_dict(torch.load(shared_fake_data.run_dir / "tip.pth", weights_only=True))
     model.eval()
-    for e in get_list(client, "best", 1000):
+    for e in get_list(shared_client, "best", 1000):
         row = e["row"]
-        assert e["split"] == "val" and fake_data.val_idx[e["split_pos"]] == row
+        assert e["split"] == "val" and shared_fake_data.val_idx[e["split_pos"]] == row
         img = torch.from_numpy(data.image(row)).unsqueeze(0)
         with torch.no_grad():
             lg = model(tv.to_input(img))
         tip = tv.decode_logits(lg)[0].numpy()
         np.testing.assert_allclose(e["tip"], tip, atol=1e-4)
-        np.testing.assert_allclose(e["label"], fake_data.labels[row], atol=1e-6)
-        assert e["name"] == fake_data.names[row]
+        np.testing.assert_allclose(e["label"], shared_fake_data.labels[row], atol=1e-6)
+        assert e["name"] == shared_fake_data.names[row]
         assert abs(e["err"] - np.hypot(*(np.asarray(e["tip"]) - np.asarray(e["label"])))) < 1e-6
         # independent numpy 5x5 clipped softmax mass around the argmax cell
         z = data.logits(row)
@@ -90,31 +90,31 @@ def test_numbers_match_trainer(client, fake_data):
         assert abs(e["conf"] - conf) < 1e-6
 
 
-def test_bad_requests(client):
+def test_bad_requests(shared_client):
     for params in ({"side": "foo", "n": 5}, {"side": "best", "n": 0}, {"side": "best", "n": 1001}):
-        assert client.get("/api/list", params=params).status_code == 422
-    assert client.get("/api/heatmap/0.png", params={"scale": "foo"}).status_code == 422
-    assert client.get("/api/image/200.png").status_code == 404
-    assert client.get("/api/heatmap/200.png").status_code == 404
+        assert shared_client.get("/api/list", params=params).status_code == 422
+    assert shared_client.get("/api/heatmap/0.png", params={"scale": "foo"}).status_code == 422
+    assert shared_client.get("/api/image/200.png").status_code == 404
+    assert shared_client.get("/api/heatmap/200.png").status_code == 404
 
 
-def test_pngs(client, fake_data):
-    row = int(fake_data.val_idx[3])
-    mode, arr = png_array(client, f"/api/image/{row}.png")
-    ref = np.asarray(Image.open(fake_data.data_dir / fake_data.names[row]))
+def test_pngs(shared_client, shared_fake_data):
+    row = int(shared_fake_data.val_idx[3])
+    mode, arr = png_array(shared_client, f"/api/image/{row}.png")
+    ref = np.asarray(Image.open(shared_fake_data.data_dir / shared_fake_data.names[row]))
     assert mode == "L" and arr.shape == (256, 256) and np.array_equal(arr, ref)
-    mode, default = png_array(client, f"/api/heatmap/{row}.png")
-    _, log = png_array(client, f"/api/heatmap/{row}.png?scale=log")
-    _, lin = png_array(client, f"/api/heatmap/{row}.png?scale=linear")
+    mode, default = png_array(shared_client, f"/api/heatmap/{row}.png")
+    _, log = png_array(shared_client, f"/api/heatmap/{row}.png?scale=log")
+    _, lin = png_array(shared_client, f"/api/heatmap/{row}.png?scale=linear")
     assert mode == "RGB" and default.shape == (128, 128, 3)
     assert np.array_equal(default, log) and not np.array_equal(log, lin)
 
 
-def test_heatmap_brightest_at_argmax(client, fake_data):
-    for row in fake_data.val_idx[[0, 5, 11, 20, 29]].tolist():
-        _, rgb = png_array(client, f"/api/heatmap/{row}.png")
+def test_heatmap_brightest_at_argmax(shared_client, shared_fake_data):
+    for row in shared_fake_data.val_idx[[0, 5, 11, 20, 29]].tolist():
+        _, rgb = png_array(shared_client, f"/api/heatmap/{row}.png")
         lum = rgb.astype(float) @ [0.299, 0.587, 0.114]
-        z = client.data.logits(row)
+        z = shared_client.data.logits(row)
         assert np.unravel_index(lum.argmax(), lum.shape) == np.unravel_index(z.argmax(), z.shape)
 
 
@@ -153,10 +153,10 @@ def test_weights_fallback_and_summary(fake_data):
     assert s["p99"] == pytest.approx(np.percentile(err, 99)) and s["max_err"] == err.max()
 
 
-def test_concurrent_heatmaps(client):
+def test_concurrent_heatmaps(shared_client):
     rows = [i % 10 for i in range(40)]  # list[int] (40,): requested dataset rows
     with ThreadPoolExecutor(8) as ex:
-        resps = list(ex.map(lambda p: (p, client.get(f"/api/heatmap/{p}.png")), rows))
+        resps = list(ex.map(lambda p: (p, shared_client.get(f"/api/heatmap/{p}.png")), rows))
     seen = {}  # dict[int, bytes]: first PNG bytes seen per row
     for p, r in resps:
         assert r.status_code == 200
@@ -259,12 +259,12 @@ def test_corrupt_rank_cache_is_recomputed(fake_data):
     np.testing.assert_array_equal(cut.err, first.err)
 
 
-def test_render_emits_no_deprecation_warning(client):
+def test_render_emits_no_deprecation_warning(shared_client):
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
-        render.dial_png(client.data.image(0))
-        render.heatmap_png(client.data.logits(0), "log")
-        render.heatmap_png(client.data.logits(0), "linear")
+        render.dial_png(shared_client.data.image(0))
+        render.heatmap_png(shared_client.data.logits(0), "log")
+        render.heatmap_png(shared_client.data.logits(0), "linear")
     assert [w for w in rec if issubclass(w.category, DeprecationWarning)] == []
 
 
@@ -313,39 +313,39 @@ def test_summary_per_set(client, fake_data):
     assert summary(open_client(fake_data))["params"] == "saved"
 
 
-def test_bad_set_422(client):
-    assert client.get("/api/summary", params={"set": "test"}).status_code == 422
-    assert client.get("/api/list", params={"set": "test", "side": "best", "n": 3}).status_code == 422
+def test_bad_set_422(shared_client):
+    assert shared_client.get("/api/summary", params={"set": "test"}).status_code == 422
+    assert shared_client.get("/api/list", params={"set": "test", "side": "best", "n": 3}).status_code == 422
 
 
-def test_list_per_set(client, fake_data):
+def test_list_per_set(shared_client, shared_fake_data):
     for name in ("train", "all"):
         for side in ("best", "worst"):
-            lst = get_list(client, side, 1000, name)
+            lst = get_list(shared_client, side, 1000, name)
             assert [e["rank"] for e in lst] == list(range(1, SET_N[name] + 1))
-            assert sorted(e["row"] for e in lst) == (sorted(fake_data.train_idx.tolist()) if name == "train"
+            assert sorted(e["row"] for e in lst) == (sorted(shared_fake_data.train_idx.tolist()) if name == "train"
                                                      else list(range(200)))
             keys = [(e["err"], e["row"]) if side == "best" else (-e["err"], e["row"]) for e in lst]
             assert keys == sorted(keys)  # error order, ties by row ascending
             for e in lst:
-                tbl = fake_data.train_idx if e["split"] == "train" else fake_data.val_idx
+                tbl = shared_fake_data.train_idx if e["split"] == "train" else shared_fake_data.val_idx
                 assert e["split"] in (("train",) if name == "train" else ("train", "val"))
-                assert tbl[e["split_pos"]] == e["row"] and e["name"] == fake_data.names[e["row"]]
-    assert {e["split"] for e in get_list(client, "best", 1000, "all")} == {"train", "val"}
-    val = get_list(client, "worst", 1000, "val")  # n larger than the set: the whole set, ranked 1..30
+                assert tbl[e["split_pos"]] == e["row"] and e["name"] == shared_fake_data.names[e["row"]]
+    assert {e["split"] for e in get_list(shared_client, "best", 1000, "all")} == {"train", "val"}
+    val = get_list(shared_client, "worst", 1000, "val")  # n larger than the set: the whole set, ranked 1..30
     assert len(val) == 30 and [e["rank"] for e in val] == list(range(1, 31))
-    assert get_list(client, "best", 5) == get_list(client, "best", 5, "val")
+    assert get_list(shared_client, "best", 5) == get_list(shared_client, "best", 5, "val")
 
 
-def test_rows_address_images(client, fake_data):
-    row = int(fake_data.train_idx[7])
-    mode, arr = png_array(client, f"/api/image/{row}.png")
-    assert mode == "L" and np.array_equal(arr, np.asarray(Image.open(fake_data.data_dir / fake_data.names[row])))
-    mode, heat = png_array(client, f"/api/heatmap/{row}.png")
+def test_rows_address_images(shared_client, shared_fake_data):
+    row = int(shared_fake_data.train_idx[7])
+    mode, arr = png_array(shared_client, f"/api/image/{row}.png")
+    assert mode == "L" and np.array_equal(arr, np.asarray(Image.open(shared_fake_data.data_dir / shared_fake_data.names[row])))
+    mode, heat = png_array(shared_client, f"/api/heatmap/{row}.png")
     assert mode == "RGB" and heat.shape == (128, 128, 3)
     for url in ("/api/image/200.png", "/api/heatmap/200.png", "/api/params/200"):
-        assert client.get(url).status_code == 404, url
-    assert client.get(f"/api/image/{row}.png").headers["cache-control"] == "max-age=3600"
+        assert shared_client.get(url).status_code == 404, url
+    assert shared_client.get(f"/api/image/{row}.png").headers["cache-control"] == "max-age=3600"
 
 
 def test_rank_cache_all_rows(fake_data, capsys):
@@ -550,3 +550,4 @@ def test_hand_edited_params_file(fake_data):
     path.write_bytes(b"\xef\xbb\xbf" + write_params_jsonl(fake_data).read_bytes())  # UTF-8 BOM before row 0
     r = get_params(open_client(fake_data), 0)
     assert r.status_code == 200 and r.json() == {"row": 0, **params_record(fake_data, 0)}
+

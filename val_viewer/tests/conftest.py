@@ -107,3 +107,23 @@ def client(fake_data):
     c = TestClient(create_app(data))
     c.data = data
     return c
+
+
+@pytest.fixture(scope="module")
+def shared_fake_data(tmp_path_factory):
+    """Module-scoped fake dataset (SimpleNamespace, see build_fake_data), built once per test file.
+
+    For READ-ONLY tests only: they must not write under data_dir / run_dir / cache_dir."""
+    return build_fake_data(tmp_path_factory.mktemp("shared_vv"))
+
+
+@pytest.fixture(scope="module")
+def shared_client(shared_fake_data):
+    """Module-scoped TestClient (cpu) over shared_fake_data, ranked once; `.data` is the ValData behind it.
+
+    For READ-ONLY tests only (GET requests, reading `.data`); anything that re-opens, writes or corrupts
+    the dataset, run, cache or params.jsonl must use the function-scoped `client` / `fake_data`."""
+    data = open_data(shared_fake_data)
+    c = TestClient(create_app(data))
+    c.data = data
+    return c
