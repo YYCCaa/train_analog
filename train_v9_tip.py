@@ -9,7 +9,7 @@ label.  The old files are left untouched.
 Data flow (shapes per batch, B = --batch-size, S = 256, H = W = 128):
 
     <data-dir>/dial_*.png + labels.csv        (fixed dataset, never written)
-          |  first run: mp.Pool PNG decode            build_cache()
+          |  first run, or labels.csv newer than the .npy: mp.Pool PNG decode   build_cache()
           v
     <data-dir>_cache_images.npy  uint8 (N, S, S)      memmap-able .npy
     <data-dir>_cache_meta.npz    filenames (N,) str, labels (N, 2) float32
@@ -195,9 +195,24 @@ def build_cache(data_dir, cache_prefix, workers=None, chunk=512):
     print(f"[cache] done in {fmt_secs(time.time() - t0)}")
 
 
+def cache_is_stale(data_dir, cache_prefix):
+    """True if the images .npy exists but labels.csv is newer than it.
+
+    The generator rewrites labels.csv on every run and the cache is built afterwards, so a newer labels.csv
+    means the dataset was regenerated (possibly with the same seed: identical labels, new pixels).
+    """
+    img_path, _ = cache_paths(cache_prefix)    # str: images .npy
+    if not os.path.exists(img_path):
+        return False
+    # int ns: mtimes of labels.csv and of the cache images
+    return os.stat(os.path.join(data_dir, "labels.csv")).st_mtime_ns > os.stat(img_path).st_mtime_ns
+
+
 def cache_is_valid(data_dir, cache_prefix):
-    """True if the cache files exist and match labels.csv (N, first/last filename, labels)."""
+    """True if the cache files exist, match labels.csv (N, first/last filename, labels) and are not stale."""
     img_path, meta_path = cache_paths(cache_prefix)
+    if cache_is_stale(data_dir, cache_prefix):
+        return False
     if not (os.path.exists(img_path) and os.path.exists(meta_path)):
         return False
     names, labels = read_labels_csv(data_dir)
@@ -214,16 +229,24 @@ def cache_is_valid(data_dir, cache_prefix):
             and np.array_equal(c_labels, labels))
 
 
+def ensure_cache(data_dir, cache_prefix, workers=None):
+    """Build the cache unless it is valid (missing, mismatched or older than labels.csv); then re-check."""
+    if cache_is_stale(data_dir, cache_prefix):
+        img_path, _ = cache_paths(cache_prefix)    # str: images .npy
+        print(f"[cache] labels.csv is newer than {img_path}: rebuilding", flush=True)
+    if not cache_is_valid(data_dir, cache_prefix):
+        build_cache(data_dir, cache_prefix, workers=workers)
+        if not cache_is_valid(data_dir, cache_prefix):
+            raise RuntimeError("cache build finished but does not match labels.csv")
+
+
 def load_cache(data_dir, cache_prefix, limit=None, workers=None):
     """Build the cache if missing/stale, then load it into RAM.
 
     Returns (images uint8 torch (n, S, S) CPU, labels float32 torch (n, 2),
     filenames list[str] (n,)), n = min(N, limit).  One RAM copy of the images.
     """
-    if not cache_is_valid(data_dir, cache_prefix):
-        build_cache(data_dir, cache_prefix, workers=workers)
-        if not cache_is_valid(data_dir, cache_prefix):
-            raise RuntimeError("cache build finished but does not match labels.csv")
+    ensure_cache(data_dir, cache_prefix, workers=workers)
     img_path, meta_path = cache_paths(cache_prefix)
     meta = np.load(meta_path)
     mm = np.load(img_path, mmap_mode="r")             # (N, S, S) uint8 memmap

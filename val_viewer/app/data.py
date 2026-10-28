@@ -108,17 +108,7 @@ class ValData:
         # trainer cache (decoded PNGs) next to the data dir, same default prefix as train_v9_tip.py
         prefix = os.path.abspath(data_dir).rstrip("\\/") + "_cache"     # str: trainer cache prefix
         img_path, _ = tv.cache_paths(prefix)  # str: trainer images .npy
-        valid = tv.cache_is_valid(self.data_dir, prefix)  # bool: names / labels / shape match labels.csv
-        if valid and os.stat(data_dir / "labels.csv").st_mtime_ns > os.stat(img_path).st_mtime_ns:
-            # The trainer's check cannot see a dataset regenerated in place with the same seed (labels.csv stays
-            # byte-identical, only the pixels change). The generator rewrites labels.csv on every run, before the
-            # cache is built, so a labels.csv newer than the cache means the decoded pixels may be old.
-            print(f"[cache] labels.csv is newer than {img_path}: rebuilding", flush=True)
-            valid = False
-        if not valid:
-            tv.build_cache(self.data_dir, prefix)
-            if not tv.cache_is_valid(self.data_dir, prefix):
-                raise RuntimeError("cache build finished but does not match labels.csv")
+        tv.ensure_cache(self.data_dir, prefix)  # builds when missing / mismatched / labels.csv newer (trainer rule)
         self._img_path: str = img_path  # trainer images .npy, opened per read (a held memmap blocks a rebuild on Windows)
         all_names, all_labels = tv.read_labels_csv(self.data_dir)  # list[str] (N,), (N, 2) float32
         self.n_total: int = len(all_names)

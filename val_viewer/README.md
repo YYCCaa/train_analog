@@ -30,8 +30,9 @@ The key covers data dir, val split, `labels.csv`, the decoded-image cache, the w
 `train_v9_tip.py`, so a change of any of them re-ranks by itself. A corrupt or mismatching file is
 recomputed. To clear it, delete `val_viewer/.cache/` (or whatever `--cache-dir` points to).
 The decoded PNGs also live in the trainer's `<data-dir>_cache_*` files, built once if missing. The trainer's own
-validity check (N, first / last name, labels) cannot see a dataset regenerated in place with the same seed and only
-a different look, so the viewer also rebuilds that cache when `labels.csv` is newer than `<data-dir>_cache_images.npy`
+validity check (`train_v9_tip.cache_is_valid`, which the viewer uses as is) also treats the cache as stale when
+`labels.csv` is newer than `<data-dir>_cache_images.npy`, so a dataset regenerated in place with the same seed and only
+a different look is rebuilt
 (it prints `[cache] labels.csv is newer than ...: rebuilding`). The rebuilt file has a new mtime, so the rank cache
 key changes and the rows are ranked again. A plain restart leaves both caches alone.
 
