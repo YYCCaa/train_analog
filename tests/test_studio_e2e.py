@@ -16,6 +16,9 @@ import pytest
 import yaml
 
 import v7_config
+# hole-circle check of saved triangles: TRI_HOLE_SLACK (float px) and
+# tri_hole_gaps(sampled dict) -> list[float] px gaps, one per triangle item
+from tests.test_studio_api import TRI_HOLE_SLACK, tri_hole_gaps
 
 playwright_sync = pytest.importorskip("playwright.sync_api")
 
@@ -1161,3 +1164,110 @@ def test_saved_tile_tip_has_no_ball(page, tmp_path):
         print("tile %d widths from the label: %s" % (i, [round(v, 2) for v in w]))
         assert all(b >= a - 0.5 for a, b in zip(w, w[1:])), (i, w)
         assert w[-1] > w[0], (i, w)
+
+
+# ── tri_artifacts.clear_distance: triangles kept d px off pointer, hub and hole ──
+
+# data-param of the clear-distance control (str)
+_CLEAR = "tri_artifacts.clear_distance"
+
+
+def _clear_box(page):
+    """The clear-distance number box (Locator), scrolled into view the way a
+    person scrolls the panel down to the tri_artifacts section; fails at once
+    when the page has no such control."""
+    box = _num(page, _CLEAR)  # number input (Locator)
+    assert box.count() == 1, f"no {_CLEAR} number box on the page"
+    box.scroll_into_view_if_needed()
+    return box
+
+
+def _six_triangles(page):
+    """Type 6 into triangles-per-image lo (hi is already 6): 6 triangles per tile."""
+    lo = _num(page, "tri_artifacts.count_range", "lo")  # number input (Locator)
+    lo.scroll_into_view_if_needed()
+    _commit_and_wait(page, lo, "6")
+    assert _num(page, "tri_artifacts.count_range", "hi").input_value() == "6"
+
+
+def _check_saved_triangles(params, d):
+    """A saved tile's params.json (dict) at clear distance d (float px): six
+    triangles, each placed (whole, or trimmed after all 64 tries), and every
+    whole one's polygon >= d - TRI_HOLE_SLACK px off the hole circle."""
+    tri = params["sampled"]["tri_artifacts"]  # dict
+    assert tri["n"] == 6 and len(tri["items"]) == 6, tri
+    for it in tri["items"]:
+        assert it["placed"] is True and it["pixels"] >= 1, it
+        assert it["trimmed"] is False or it["tries"] == 64, it
+        assert len(it["verts"]) == 3, it
+    for it, gap in zip(tri["items"], tri_hole_gaps(params["sampled"])):  # gap: float px
+        if not it["trimmed"]:  # a trimmed one is painted only up to the zone
+            assert gap >= d - TRI_HOLE_SLACK, (params["seed"], gap, it)
+
+
+def test_clear_distance_control_at_default(page):
+    # a person opens the studio and scrolls to the tri_artifacts section
+    ctl = page.locator(f'section[data-section="tri_artifacts"] [data-param="{_CLEAR}"]')
+    assert ctl.count() == 1, "tri_artifacts shows no clear_distance control"
+    ctl.scroll_into_view_if_needed()
+    assert ctl.is_visible()
+    assert "clear_distance" in ctl.locator(".param-name").inner_text()
+    assert ("No triangle pixel within this distance of the pointer, hub circle or "
+            "mounting hole (px); 0 = only off them.") in ctl.locator(".help").inner_text()
+    assert _clear_box(page).input_value() == "16"
+    slider = ctl.locator("input[type=range]")  # its slider (Locator)
+    assert [slider.get_attribute(a) for a in ("min", "max", "step")] == ["0", "80", "0.5"]
+    assert slider.input_value() == "16"
+    assert _reset_btn(page, _CLEAR).is_disabled()
+
+
+def test_clear_distance_keeps_saved_triangles_off_hole(page, tmp_path):
+    # six triangles per tile, then the clear distance typed up from 16 to 40
+    _six_triangles(page)
+    before = _tile_srcs(page)  # tile srcs at clear distance 16, list[str] (9)
+    _commit_and_wait(page, _clear_box(page), "40")
+    after = _tile_srcs(page)  # tile srcs at clear distance 40, list[str] (9)
+    assert all(a != b for a, b in zip(before, after)), "a tile did not change"
+    # Save on three tiles: what each saved image was drawn with
+    for i in range(3):
+        _, _, params, text = _save_tile(page, i, tmp_path / f"clear{i}")  # dict, str
+        assert params["config"]["tri_artifacts"]["clear_distance"] == 40.0
+        assert yaml.safe_load(text)["tri_artifacts"]["clear_distance"] == 40.0
+        _check_saved_triangles(params, 40.0)
+
+
+def test_clear_distance_reset_restores_tiles(page):
+    _six_triangles(page)
+    before = _tile_srcs(page)  # tile srcs before 40 is typed, list[str] (9)
+    box = _clear_box(page)  # number input (Locator)
+    btn = _reset_btn(page, _CLEAR)  # its reset button (Locator)
+    assert btn.is_disabled()
+    _commit_and_wait(page, box, "40")
+    assert btn.is_enabled() and _tile_srcs(page) != before
+    old = _applied_seq(page)
+    btn.click()
+    _wait_applied_after(page, old)
+    assert box.input_value() == "16"
+    assert btn.is_disabled()
+    assert _tile_srcs(page) == before
+
+
+def test_clear_distance_saved_yaml_and_old_yaml(page, tmp_path):
+    box = _clear_box(page)  # number input (Locator)
+    _commit_and_wait(page, box, "40")
+    text = _save_yaml(page, tmp_path / "clear40.yaml")  # str, downloaded YAML
+    saved = yaml.safe_load(text)  # dict, section -> key -> value
+    assert saved["tri_artifacts"]["clear_distance"] == 40.0
+    assert saved["glares"]["clear_distance"] == 12.0  # the glare key is a different one
+    # an old file: the same settings written before tri_artifacts.clear_distance existed
+    del saved["tri_artifacts"]["clear_distance"]
+    old_yaml = tmp_path / "old_tri.yaml"  # Path
+    old_yaml.write_text(yaml.safe_dump(saved, sort_keys=False), encoding="utf-8")
+    old = _applied_seq(page)
+    page.get_by_test_id("load-yaml").set_input_files(str(old_yaml))
+    _wait_applied_after(page, old)
+    assert box.input_value() == "16"
+    assert _reset_btn(page, _CLEAR).is_disabled()
+    assert _num(page, "glares.clear_distance").input_value() == "12"
+    assert page.get_by_test_id("config-errors").inner_text().strip() == ""
+    assert page.get_by_test_id("config-warnings").count() == 0

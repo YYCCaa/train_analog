@@ -148,3 +148,4 @@ tri_artifacts:
   gray_range: [65, 184]  # [lo, hi] int; from 3 channel means randint(50,200) -> luma p1-p99
   pixel_var: 5  # int scalar; per-pixel noise around the mean (+/-)
   vertex_dist_range: [0.3, 1.0]  # [lo, hi] float; vertex distance / size
+  clear_distance: 16.0  # float scalar; no triangle pixel within this distance of the pointer, hub circle or mounting hole (px); 0 = only off them

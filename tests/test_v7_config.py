@@ -458,3 +458,51 @@ def test_range_types_match_draw_kind():
     for name in INT_RANGES:
         assert schema[name]["type"] == "int_range", name
         assert all(isinstance(x, int) for x in cfg[name]), name
+
+
+# ---------------------------------------------------------- tri clear_distance
+def test_tri_clear_distance_default_and_schema():
+    # the shipped default keeps triangles 16 px off the pointer; the studio slider
+    # is a float 0-80 px (0 = triangles only kept off the pointer itself)
+    assert vc.default_config()["tri_artifacts"]["clear_distance"] == 16.0
+    leaf = vc.load_schema()["tri_artifacts"]["clear_distance"]  # dict, schema leaf
+    assert (leaf["type"], leaf["min"], leaf["max"], leaf["step"]) == ("float", 0, 80, 0.5)
+    assert leaf["help"] == ("No triangle pixel within this distance of the pointer, hub "
+                            "circle or mounting hole (px); 0 = only off them.")
+
+
+# an old config's tri_artifacts section (str YAML), written before clear_distance existed
+OLD_TRI_TEXT = ("tri_artifacts:\n  enabled: true\n  count_range: [0, 6]\n  size_range: [15, 40]\n"
+                "  gray_range: [65, 184]\n  pixel_var: 5\n  vertex_dist_range: [0.3, 1]\n")
+
+
+@pytest.mark.parametrize("source", ["text", "user_sample_config.yaml"])
+def test_old_tri_section_gets_default_clear_distance(source):
+    # an old dataset's config.yaml (no clear_distance) loads quietly with the default 16
+    if source == "text":
+        text = OLD_TRI_TEXT  # str, YAML
+    else:
+        with open(os.path.join(DATA_DIR, source), encoding="utf-8") as f:
+            text = f.read()
+    assert "clear_distance" not in yaml.safe_load(text)["tri_artifacts"]
+    cfg, warns = vc.parse_config_text_with_warnings(text)
+    assert cfg["tri_artifacts"]["clear_distance"] == 16.0
+    assert not _warned(warns, "tri_artifacts"), warns
+    assert vc.parse_config_text(text)["tri_artifacts"]["clear_distance"] == 16.0
+    migrated, _ = vc.migrate_config(yaml.safe_load(text))  # dict, lenient load
+    assert migrated["tri_artifacts"]["clear_distance"] == 16.0
+
+
+@pytest.mark.parametrize("bad,fixed", [(-3, 0), (500, 80)])
+def test_tri_clear_distance_out_of_range(bad, fixed):
+    text = f"tri_artifacts:\n  clear_distance: {bad}\n"  # str, YAML
+    # lenient load: clamped into [0, 80] with a warning naming the key
+    cfg, warns = vc.parse_config_text_with_warnings(text)
+    assert cfg["tri_artifacts"]["clear_distance"] == fixed
+    w = _warned(warns, "tri_artifacts.clear_distance:")  # list[str]
+    assert w and "clamped" in w[0], warns
+    # strict validation rejects the raw value as out of range (not as unknown)
+    with pytest.raises(vc.ConfigError) as ei:
+        vc.validate_config(vc.merge_config(vc.default_config(), yaml.safe_load(text)))
+    errs = [e for e in ei.value.errors if e.startswith("tri_artifacts.clear_distance")]
+    assert errs and "outside [0, 80]" in errs[0], ei.value.errors
