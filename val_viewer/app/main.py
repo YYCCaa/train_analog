@@ -6,7 +6,8 @@
     GET /api/list?set&side&n  best|worst entries of the set (422 bad set / side / n outside 1..1000)
     GET /api/image/{row}.png  256x256 mode L dial        (404 row outside 0..N-1)
     GET /api/heatmap/{row}.png?scale=log|linear          128x128 RGB (422 bad scale)
-    GET /api/params/{row}     saved parameter record of the row (404 no file / no record, 409 wrong file name)
+    GET /api/params/{row}     saved parameter record of the row (404 no file / no record, 409 wrong file name or tip /
+                              file changed since start)
 
 Model forwards are serialised by the lock inside ValData; handlers are sync so FastAPI runs them
 in its thread pool, and the PNG routes are safe under many concurrent requests.
@@ -23,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import render
 from .data import ValData
-from .params import NoParamsFile, NoRecord, RecordMismatch
+from .params import NoParamsFile, NoRecord, ParamsChanged, RecordMismatch
 
 # STATIC_DIR: Path, folder holding index.html and the page's css / js
 STATIC_DIR = Path(__file__).resolve().parents[1] / "static"
@@ -75,11 +76,15 @@ def create_app(data: ValData) -> FastAPI:
     def params(row: int) -> dict:
         check_row(row)
         try:
-            return {"row": row, **data.params.get(row)}
+            return {**data.params.get(row), "row": row}  # the real row wins over a hand-edited "row"
         except NoParamsFile:
             raise HTTPException(status_code=404, detail="no parameters saved for this dataset") from None
         except NoRecord:
             raise HTTPException(status_code=404, detail="no parameters saved for this image") from None
+        except ParamsChanged:
+            raise HTTPException(
+                status_code=409,
+                detail="params.jsonl changed on disk since the viewer started; restart the viewer") from None
         except RecordMismatch as exc:
             raise HTTPException(
                 status_code=409,

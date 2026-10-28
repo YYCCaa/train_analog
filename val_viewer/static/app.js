@@ -18,13 +18,15 @@ const N_MIN = 1, N_MAX = 1000;
 const ZOOM_WIN = 32, ZOOM_K = 8;
 
 // state: page state. n: int; set: "val" | "train" | "all", the chosen image set; scale: "log" | "linear";
+//   shownSet: "val" | "train" | "all", the set whose lists are on screen (the radio returns to it when a load fails);
+//   collapsed: Set<string>, names of the Parameters sections the person collapsed (kept across steps / entries);
 //   tok: int, id of the newest load (summary + lists); ptok: int, id of the newest parameters request;
 //   entries: {best: Entry[], worst: Entry[]},
 //   Entry = {rank, row (dataset row), split ("train"|"val"), split_pos, name, label:[x,y], tip:[x,y], err, conf};
 //   detail: {side: "best"|"worst", idx: int (0-based)} | null; loadedN: int|null, n of the lists on screen;
 //   pendingN: int|null, n of the load in flight; opener: HTMLElement|null, entry that opened the detail view;
 //   key: string, rank-cache key from /api/summary (page-load timestamp if that failed), appended as v= to PNG urls
-const state = { n: 24, set: "val", scale: "log", tok: 0, ptok: 0, entries: { best: [], worst: [] }, detail: null,
+const state = { n: 24, set: "val", shownSet: "val", collapsed: new Set(), scale: "log", tok: 0, ptok: 0, entries: { best: [], worst: [] }, detail: null,
   loadedN: null, pendingN: null, opener: null, key: String(Date.now()) };
 
 const $ = (sel) => document.querySelector(sel);
@@ -105,29 +107,32 @@ async function getJson(url) {
   return r.json();
 }
 
-/** Load the summary and both lists of state.set for state.n and show them together; a stale response
- *  (older request, e.g. an earlier set) is dropped whole. A failed summary alone does not block the lists. */
+/** Load the summary and both lists of state.set for state.n and show them together, all or nothing: a stale
+ *  response (older request, e.g. an earlier set) is dropped whole; if any of the three requests fails nothing
+ *  is applied, the set radio goes back to the set on screen and the error shows in the status line. */
 async function loadLists() {
   const tok = ++state.tok;
   const n = state.n, set = state.set;  // n: int, set: string, what this load asks for
   state.pendingN = n;
-  let sumErr = "";  // string, message of a failed summary request
   try {
     const [sum, best, worst] = await Promise.all([
-      getJson(`/api/summary?set=${set}`).catch((err) => { sumErr = String(err.message || err); return null; }),
+      getJson(`/api/summary?set=${set}`),
       getJson(`/api/list?set=${set}&side=best&n=${n}`), getJson(`/api/list?set=${set}&side=worst&n=${n}`)]);
     if (tok !== state.tok) return;
-    if (sum) {
-      if (sum.key) state.key = sum.key;
-      $("#summary").textContent = summaryText(sum);
-    }
+    if (sum.key) state.key = sum.key;
+    $("#summary").textContent = summaryText(sum);
     state.entries = { best, worst };
     state.loadedN = state.pendingN = n;
+    state.shownSet = set;
     closeDetail();
     renderLists();
-    statusEl.textContent = sumErr;
+    statusEl.textContent = "";
   } catch (err) {
-    if (tok === state.tok) { state.pendingN = null; statusEl.textContent = String(err.message || err); }
+    if (tok !== state.tok) return;
+    state.pendingN = null;
+    state.set = state.shownSet;
+    document.querySelector(`input[name=set][value=${state.shownSet}]`).checked = true;
+    statusEl.textContent = String(err.message || err);
   }
 }
 
@@ -135,8 +140,9 @@ async function loadLists() {
 function summaryText(s) {
   const f = (v) => v.toLocaleString("en-US");
   const size = s.set === "all" ? `all ${f(s.n)} (train ${f(s.n_train)} · val ${f(s.n_val)})` : `${s.set} ${f(s.n)}`;
+  const p99 = s.p99 === null ? "–" : s.p99.toFixed(2);  // an empty set has no p99 (en dash)
   return `Val viewer · TipNet v9 (${s.run}, ${s.weights}) · ${size}`
-    + ` · p99 ${s.p99.toFixed(2)} px · >3 px ${s.n_over_3} · >7 px ${s.n_over_7}`;
+    + ` · p99 ${p99} px · >3 px ${s.n_over_3} · >7 px ${s.n_over_7}`;
 }
 
 /** Apply the n field: clamp to 1..1000, show the value used, reload when it changed. */
@@ -245,11 +251,20 @@ function renderParams(rec) {
   for (const sec of Object.keys(sampled)) {
     const rows = [];  // Array<[name, text]> of this section
     if (isDict(sampled[sec])) flatten("", sampled[sec], rows); else flatten(sec, sampled[sec], rows);
-    html += `<details open data-section="${esc(sec)}"><summary>${esc(sec)}</summary>`
+    html += `<details${state.collapsed.has(sec) ? "" : " open"} data-section="${esc(sec)}"><summary>${esc(sec)}</summary>`
       + rows.map(([k, v]) => `<div class="prow" data-key="${esc(k)}"><span class="k">${esc(k)}</span>`
         + `<span class="v">${esc(v)}</span></div>`).join("") + `</details>`;
   }
   box.innerHTML = html;
+}
+
+/** Remember which sections the person collapsed: read the open state of the <details> on screen into
+ *  state.collapsed (a re-opened section leaves the set). Read synchronously before every re-render, so a key
+ *  press right after a click cannot outrun it. */
+function syncCollapsed() {
+  for (const d of $("#params").querySelectorAll("details[data-section]")) {
+    if (d.open) state.collapsed.delete(d.dataset.section); else state.collapsed.add(d.dataset.section);
+  }
 }
 
 /** Show one muted message line (string) in the Parameters column; "no parameters saved ..." gets the studio hint. */
@@ -262,6 +277,7 @@ function renderParamsMessage(text) {
 /** Fetch and show the parameters of entry e; a stale answer (the detail moved on) is dropped. */
 async function loadParams(e) {
   const tok = ++state.ptok;
+  syncCollapsed();
   $("#params").innerHTML = `<div class="p-msg">Loading parameters…</div>`;
   try {
     const r = await fetch(`/api/params/${e.row}`);
@@ -316,8 +332,8 @@ $("#detail-close").addEventListener("click", closeDetail);
 document.addEventListener("keydown", (ev) => {
   if (!state.detail) return;
   if (ev.key === "Escape") closeDetail();
-  else if (ev.key === "Tab") {  // focus trap: cycle through the enabled buttons of the dialog
-    const btns = [...detailEl.querySelectorAll("button:not(:disabled)")];
+  else if (ev.key === "Tab") {  // focus trap: cycle through the enabled buttons, the Parameters column and its toggles
+    const btns = [...detailEl.querySelectorAll("button:not(:disabled), #params, #params summary")];
     const i = btns.indexOf(document.activeElement);
     ev.preventDefault();
     btns[(i + (ev.shiftKey ? -1 : 1) + btns.length) % btns.length].focus();

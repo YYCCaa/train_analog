@@ -24,12 +24,16 @@ dir, `labels.csv`, run dir or weights file exits with code 2 and one `error:` li
 ## First start and the rank cache
 
 The first start runs a ranking pass over every dataset row (train and val) and prints `[rank] done/total` lines
-(about 2-3 minutes on the GPU for 150,000 images). The result (predicted tip, error, confidence, rows) is
+(measured: about 30 s on the GPU for 150,000 images). The result (predicted tip, error, confidence, rows) is
 cached in `val_viewer/.cache/rank_<key>.npz`; a warm start loads it in about 1 s (`[rank] cached ...`).
 The key covers data dir, val split, `labels.csv`, the decoded-image cache, the weights, the device and
 `train_v9_tip.py`, so a change of any of them re-ranks by itself. A corrupt or mismatching file is
 recomputed. To clear it, delete `val_viewer/.cache/` (or whatever `--cache-dir` points to).
-The decoded PNGs also live in the trainer's `<data-dir>_cache_*` files, built once if missing.
+The decoded PNGs also live in the trainer's `<data-dir>_cache_*` files, built once if missing. The trainer's own
+validity check (N, first / last name, labels) cannot see a dataset regenerated in place with the same seed and only
+a different look, so the viewer also rebuilds that cache when `labels.csv` is newer than `<data-dir>_cache_images.npy`
+(it prints `[cache] labels.csv is newer than ...: rebuilding`). The rebuilt file has a new mtime, so the rank cache
+key changes and the rows are ranked again. A plain restart leaves both caches alone.
 
 ## Controls
 
@@ -55,8 +59,13 @@ section (collapsible; it moves below the panels in a narrow window). They come f
 parameters** in the Generate panel. A dataset generated without it shows "No parameters saved for this
 dataset". The viewer never loads the file whole: it seeks to one line per request through a line-offset index
 cached next to the rank cache (`params_<key>.npy`), accepts CRLF endings, treats a torn last line as "no
-parameters saved for this image", and refuses (HTTP 409) a record whose `filename` differs from the image's.
-`GET /api/params/{row}` returns the record.
+parameters saved for this image", and refuses (HTTP 409) a record whose `filename` differs from the image's or whose `tip_x` / `tip_y` is more than
+0.001 px away from the row's `labels.csv` tip (a `params.jsonl` of another run has the same names). It re-checks the
+file's size and mtime on every request: a file edited since the viewer started answers 409 `params.jsonl changed on
+disk since the viewer started; restart the viewer`, a deleted one answers 404 `no parameters saved for this dataset`.
+`GET /api/params/{row}` returns the record (its `row` is always the requested dataset row; a non-finite number such
+as `1e999` comes back as the string `"Infinity"` / `"-Infinity"`, a leading UTF-8 BOM is ignored). Sections the
+person collapsed stay collapsed while stepping or opening another entry.
 
 The image URLs carry the rank-cache key (`v=<key>`), so a restart on other weights or data never shows
 stale pictures from the browser cache.

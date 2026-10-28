@@ -497,6 +497,8 @@ def test_params_layout_narrow(page):
                       for sel in (".big-row", ".zoom-row"))
     assert page.locator("#params").bounding_box()["y"] >= zoom_bottom - 1
     assert page.evaluate("document.documentElement.scrollWidth") <= 800
+    # #detail is position: fixed with its own scrollbar, so overflow shows up there, not on the document
+    assert page.evaluate("() => { const d = document.querySelector('#detail'); return d.scrollWidth <= d.clientWidth; }")
     page.set_viewport_size({"width": 1400, "height": 1000})  # wide: the column sits to the right of the panels
     big = page.locator("#detail .big-row").bounding_box()
     assert page.locator("#params").bounding_box()["x"] >= big["x"] + big["width"] - 1
@@ -515,25 +517,32 @@ def test_captions_tag_split(page, served):
         assert tag == split
 
 
+def wait_until(page, cond, what: str, timeout_s: float = 15.0) -> None:
+    """Poll the python callable cond() -> bool every 50 ms until it is true (page.wait_for_timeout lets playwright
+    deliver route and request events meanwhile); fail with `what` after timeout_s."""
+    deadline = time.monotonic() + timeout_s
+    while not cond():
+        if time.monotonic() > deadline:
+            pytest.fail(f"timed out waiting for {what}")
+        page.wait_for_timeout(50)
+
+
 def test_fast_set_switch_keeps_last(page, served):
-    held = []  # list[Route]: set=train responses held back until the person has moved on
+    held = []      # list[Route]: set=train requests held back until the person has moved on
+    finished = []  # list[str]: urls of set=train requests whose response has been fully received
 
-    def hold_train(route):
-        held.append(route)
-
-    page.route(re.compile(r"/api/(list|summary)\?.*set=train"), hold_train)
+    page.route(re.compile(r"/api/(list|summary)\?.*set=train"), lambda route: held.append(route))
+    page.on("requestfinished", lambda req: finished.append(req.url) if "set=train" in req.url else None)
     pick_set(page, "train")
-    for _ in range(100):
-        if len(held) >= 3:
-            break
-        page.wait_for_timeout(100)
-    assert len(held) >= 3, len(held)  # summary + best + worst of the train load are in flight
+    wait_until(page, lambda: len(held) >= 3, "summary + best + worst of the train load to be in flight")
     pick_set(page, "all")
     expect(page.locator("#summary")).to_contain_text("all 200")
     expect(page.locator("#col-best .entry")).to_have_count(24)
+    n_held = len(held)  # int: held requests, all released below
     for route in held:  # now the late train answers arrive
         route.continue_()
-    page.wait_for_timeout(1000)
+    wait_until(page, lambda: len(finished) >= n_held, "every held train response to finish")
+    page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")  # page handled them
     assert set(entry_tags(page)) | set(entry_tags(page, "worst")) == {"train", "val"}
     want = [str(e["row"]) for e in api(served, "/api/list?set=all&side=best&n=24")]
     assert entry_rows(page) == want
@@ -569,3 +578,108 @@ def test_generated_dataset_shows_its_parameters(browser, tmp_path):
                 expect(pg.locator("#params [data-section='pointer'] [data-key='gray'] .v")).to_have_text(str(gray))
         finally:
             ctx.close()
+
+
+# ---------------- review fixes: collapse memory, tab order, set switch failures, empty set ----------------
+
+def section_open(page, name: str) -> bool:
+    """True if the Parameters section `name` (str) is currently open."""
+    return page.evaluate("(n) => document.querySelector(`#params details[data-section='${n}']`).open", name)
+
+
+def test_collapsed_sections_stay_collapsed(page, served):
+    worst = api(served, "/api/list?side=worst&n=3")
+    page.locator("#col-worst .entry[data-rank='1'] img.dial").click()
+    expect(page.locator("#params [data-section='pointer']")).to_be_visible()
+    page.locator("#params [data-section='pointer'] summary").click()
+    assert not section_open(page, "pointer") and section_open(page, "glares")
+    page.keyboard.press("ArrowRight")
+    expect(page.locator("#detail")).to_have_attribute("data-rank", "2")
+    expect(page.locator("#params [data-key='gray'] .v").first).to_have_text(str(100 + worst[1]["row"]))
+    assert not section_open(page, "pointer") and section_open(page, "glares")
+    page.keyboard.press("Escape")
+    expect(page.locator("#detail")).to_be_hidden()
+    page.locator("#col-worst .entry[data-rank='3'] img.dial").click()
+    expect(page.locator("#params [data-key='gray'] .v").first).to_have_text(str(100 + worst[2]["row"]))
+    assert not section_open(page, "pointer") and section_open(page, "glares")
+    page.locator("#params [data-section='pointer'] summary").click()  # open it again: the memory forgets it
+    page.keyboard.press("ArrowLeft")
+    expect(page.locator("#detail")).to_have_attribute("data-rank", "2")
+    expect(page.locator("#params [data-key='gray'] .v").first).to_have_text(str(100 + worst[1]["row"]))
+    assert section_open(page, "pointer")
+
+
+def test_tab_reaches_parameters_and_summaries(page):
+    detail = page.locator("#detail")
+    inside = "() => !!document.activeElement.closest('#detail')"
+    _focus_entry_by_tab(page, "best", 1)
+    page.keyboard.press("Enter")
+    expect(detail).to_be_visible()
+    expect(page.locator("#params details").first).to_be_visible()
+    seen_params, seen_summary = False, False
+    for _ in range(14):
+        page.keyboard.press("Tab")
+        assert page.evaluate(inside)
+        seen_params |= page.evaluate("() => document.activeElement.id === 'params'")
+        if page.evaluate("() => document.activeElement.matches('#params summary')"):
+            seen_summary = True
+            break
+    assert seen_params, "Tab never reached #params"
+    assert seen_summary, "Tab never reached a section summary"
+    name = page.evaluate("() => document.activeElement.parentElement.dataset.section")  # str: focused section
+    assert section_open(page, name)
+    page.keyboard.press("Enter")
+    assert not section_open(page, name)
+    for _ in range(20):
+        page.keyboard.press("Shift+Tab")
+        assert page.evaluate(inside)
+    for _ in range(20):
+        page.keyboard.press("Tab")
+        assert page.evaluate(inside)
+
+
+def fail_once(page, pattern: str, hits: list) -> None:
+    """Route urls matching glob `pattern` so that the first request answers HTTP 500 and later ones pass;
+    every request seen is appended to hits (list[str])."""
+    def handler(route):
+        hits.append(route.request.url)
+        if len(hits) == 1:
+            route.fulfill(status=500, content_type="application/json", body=json.dumps({"detail": "boom"}))
+        else:
+            route.continue_()
+    page.route(pattern, handler)
+
+
+@pytest.mark.parametrize("failing", ["list", "summary"])
+def test_failed_set_switch_changes_nothing_and_retries(page, failing):
+    first_rows = entry_rows(page)
+    hits = []  # list[str]: urls of the routed requests
+    fail_once(page, f"**/api/{failing}?*set=train*", hits)
+    pick_set(page, "train")
+    expect(page.locator("#status")).not_to_have_text("")
+    expect(page.locator("input[name=set][value=val]")).to_be_checked()
+    assert set(entry_tags(page)) == {"val"} and entry_rows(page) == first_rows
+    assert re.search(r"· val 30 ·", page.locator("#summary").inner_text())
+    pick_set(page, "train")  # click the same radio again: a retry
+    expect(page.locator("#summary")).to_contain_text("train 170")
+    expect(page.locator("#col-best .entry")).to_have_count(24)
+    assert set(entry_tags(page)) == {"train"} and set(entry_tags(page, "worst")) == {"train"}
+    expect(page.locator("#status")).to_have_text("")
+    assert page.locator("input[name=set][value=train]").is_checked()
+
+
+def test_empty_set_renders_without_errors(page, served):
+    errors = []  # list[str]: uncaught page errors
+    page.on("pageerror", lambda exc: errors.append(str(exc)))
+    empty = {**api(served, "/api/summary?set=train"), "n": 0, "p99": None, "max_err": None,
+             "n_over_3": 0, "n_over_7": 0}  # dict: summary of a train set with no image
+    page.route("**/api/summary?*set=train*", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(empty)))
+    page.route("**/api/list?*set=train*", lambda route: route.fulfill(
+        status=200, content_type="application/json", body="[]"))
+    pick_set(page, "train")
+    expect(page.locator("#summary")).to_contain_text("train 0")
+    expect(page.locator("#summary")).to_contain_text("p99 – px")
+    expect(page.locator(".entry")).to_have_count(0)
+    expect(page.locator("#status")).to_have_text("")
+    assert errors == []
