@@ -2352,7 +2352,8 @@ def generate_dataset(cfg, output_dir, num_images, seed=0, workers=None, chunksiz
     cancelled = False  # True once a cancel was seen or the run ended early (bool)
     pool = None  # mp.Pool when n_workers > 1, else None
     try:
-        with open(os.path.join(output_dir, "labels.csv"), "w", newline="") as f,                 contextlib.ExitStack() as stack:
+        with open(os.path.join(output_dir, "labels.csv"), "w", newline="") as f, \
+                contextlib.ExitStack() as stack:
             # params.jsonl handle (text file) when save_params, else None
             pf = (stack.enter_context(open(os.path.join(output_dir, PARAMS_FILE), "w",
                                            encoding="utf-8", newline="\n"))
@@ -2422,7 +2423,7 @@ def main():
     parser.add_argument("--config", default=None,
                         help="YAML config merged over configs/v7_default.yaml")
     parser.add_argument("--output-dir", default=OUTPUT_DIR,
-                        help=f"directory for PNGs, labels.csv, config.yaml (default: {OUTPUT_DIR})")
+                        help=f"directory for PNGs, labels.csv, params.jsonl (with --save-params), config.yaml (default: {OUTPUT_DIR})")
     parser.add_argument("--num-images", type=int, default=NUM_IMAGES,
                         help=f"number of images (default: {NUM_IMAGES})")
     parser.add_argument("--seed", type=int, default=0, help="base RNG seed (default: 0)")

@@ -211,6 +211,22 @@ def test_no_save_params_identical_outputs(tmp_path):
         n = f"dial_{i:04d}.png"
         assert (a / n).read_bytes() == (b / n).read_bytes()
     assert v7_config.strip_run(read_run(a)) == v7_config.strip_run(read_run(b))
+    # run blocks (dict): equal except run.save_params (the option under test) and
+    # run.finished_at (str timestamp, differs per run)
+    run_a, run_b = read_run(a)["run"], read_run(b)["run"]
+    assert run_a["save_params"] is False and run_b["save_params"] is True
+    for run in (run_a, run_b):
+        run.pop("save_params")
+        run.pop("finished_at")
+    assert run_a == run_b
+
+
+def test_help_lists_params_output_and_flag():
+    out = run_cli("--help").stdout  # str, full --help text
+    assert "--save-params" in out
+    # argparse wraps help text, so collapse whitespace before looking for the --output-dir sentence
+    flat = " ".join(out.split())
+    assert "labels.csv, params.jsonl (with --save-params), config.yaml" in flat
 
 
 def test_save_params_workers_bit_exact(tmp_path):

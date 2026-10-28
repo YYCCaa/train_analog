@@ -67,7 +67,7 @@ passes all three checks as it is.
  +-------------------------------------+                 +-----------------+-----------------+
                                                                            |
                                                                            v
-                                             <output_dir>/dial_0000.png ... labels.csv config.yaml
+                                             <output_dir>/dial_0000.png ... labels.csv [params.jsonl] config.yaml
 ```
 
 Preview tile seed `S` is pixel-identical to the disk image whose per-image seed
@@ -102,8 +102,10 @@ is `S` under the same config, because both paths call `render_image`.
   the base seed, and the workers (blank = all cores but one, so the preview
   stays responsive). Then press Start. Images, seed and workers must be whole
   numbers. Anything else (`abc`, `2.5`, an empty Images or Seed box) is
-  listed in red and no job starts. A missing folder is created. A folder that already holds
-  `dial_*.png` / `labels.csv` / `config.yaml` is refused unless *overwrite* is
+  listed in red and no job starts. A missing folder is created. Tick *save
+  parameters* to also write `params.jsonl` (about 3 KB per image, one record
+  per `labels.csv` row). A folder that already holds
+  `dial_*.png` / `labels.csv` / `params.jsonl` / `config.yaml` is refused unless *overwrite* is
   ticked. With overwrite, only those files are removed. Cancel stops the run
   and leaves a consistent folder: the `labels.csv` rows match the PNGs, and
   `config.yaml` has `run.completed: false`.
@@ -116,7 +118,8 @@ Only to the folder typed into the Generate panel:
 |---|---|
 | `dial_0000.png` ... | 256x256 single-channel PNGs |
 | `labels.csv` | `filename, angle_deg, tip_x, tip_y` |
-| `config.yaml` | full render config plus a `run:` block (`num_images`, `seed`, `workers`, `completed`, timestamp) |
+| `params.jsonl` | only with *save parameters*: one JSON record of sampled parameters per `labels.csv` row, same order |
+| `config.yaml` | full render config plus a `run:` block (`num_images`, `seed`, `workers`, `save_params`, `completed`, timestamp) |
 
 To reproduce a dataset from the CLI:
 `python generate_synthetic_v7_mp.py --config <folder>/config.yaml ...`.
