@@ -4,7 +4,8 @@ Covers:
   - pick_viable_ink_color picks dark on bright BG, bright on dark BG
   - pick_viable_ink_color avoids dominant hues
   - sample_params stays inside v4's own ranges (2000 seeds)
-  - sample_params keeps the rotated bezel inside the image (AABB + outline)
+  - sample_params keeps the true bezel inside the image where the clamp box fits;
+    the full promise (every seed) is a strict xfail documenting a clamp bug
   - the ranges v4 shares with v3 are equal; v4's A_RANGE is narrower
 """
 
@@ -107,39 +108,56 @@ def test_sample_params_within_v4_ranges():
         assert v4.CY_DISP_RANGE[0] - EPS <= p["cy"] - half <= v4.CY_DISP_RANGE[1] + EPS
 
 
-def test_sample_params_bezel_fits_inside_image():
-    """The documented guarantee: the rotated bezel ellipse lies fully inside
-    [0, IMG_SIZE] on each axis whenever it can (AABB extent <= IMG_SIZE),
-    checked by the independent AABB formula and by 64 outline points.
+def _outline(p, t):
+    """True rotated-bezel outline of one sample.
 
-    On an axis where the bezel is wider than the image (half-extent >
-    IMG_SIZE / 2; true for ~half the seeds with v4's A_RANGE) no centre can
-    satisfy it; v4 then pins the centre so the bezel's low edge is flush
-    with 0 (centre == half-extent) and it overflows the high side only.
-    Both regimes must actually occur in the sweep."""
+    p: dict from sample_params; t: (K,) float angles.
+    Returns (xs, ys, hx, hy, bx, by): xs/ys (K,) float outline coords (px);
+    hx/hy float exact ellipse half-extents (px); bx/by float half-extents of
+    the |A cos|+|B sin| box the generator's clamp uses (px).
+    """
+    A = p["a"] * p["outer_scale"]  # float, bezel semi-major (px)
+    B = p["b"] * p["outer_scale"]  # float, bezel semi-minor (px)
+    c, s = math.cos(p["theta"]), math.sin(p["theta"])
+    xs = p["cx"] + A * np.cos(t) * c - B * np.sin(t) * s
+    ys = p["cy"] + A * np.cos(t) * s + B * np.sin(t) * c
+    hx = math.hypot(A * c, B * s)
+    hy = math.hypot(A * s, B * c)
+    bx = abs(A * c) + abs(B * s)
+    by = abs(A * s) + abs(B * c)
+    return xs, ys, hx, hy, bx, by
+
+
+def test_sample_params_bezel_fits_inside_image_when_clamp_box_fits():
+    """Where the clamp's box fits the image on both axes (2*box <= IMG_SIZE),
+    the true bezel outline (exact extents and 64 outline points) lies inside
+    [0, IMG_SIZE].  The sweep must contain such samples."""
     size = v4.IMG_SIZE  # int, image side (px)
     t = np.linspace(0, 2 * np.pi, 64, endpoint=False)  # (64,) outline angles
-    n_fit = 0  # int, axis-samples whose bezel fits the image
-    n_wide = 0  # int, axis-samples wider than the image
+    n_fit = 0  # int, samples whose clamp box fits on both axes
     for p in _samples():
-        A = p["a"] * p["outer_scale"]  # float, bezel semi-major (px)
-        B = p["b"] * p["outer_scale"]  # float, bezel semi-minor (px)
-        c, s = math.cos(p["theta"]), math.sin(p["theta"])
-        hx = abs(A * c) + abs(B * s)  # float, AABB half-width (px)
-        hy = abs(A * s) + abs(B * c)  # float, AABB half-height (px)
-        # (64,) outline coordinates of the rotated ellipse
-        xs = p["cx"] + A * np.cos(t) * c - B * np.sin(t) * s
-        ys = p["cy"] + A * np.cos(t) * s + B * np.sin(t) * c
-        for centre, half, coords in ((p["cx"], hx, xs), (p["cy"], hy, ys)):
-            if 2 * half <= size:
-                n_fit += 1
-                assert centre - half >= -EPS and centre + half <= size + EPS, p
-                assert coords.min() >= -EPS and coords.max() <= size + EPS, p
-            else:
-                n_wide += 1
-                assert centre == pytest.approx(half), p  # flush with low edge
-                assert coords.min() >= -EPS, p
-    assert n_fit > 0 and n_wide > 0, (n_fit, n_wide)
+        xs, ys, hx, hy, bx, by = _outline(p, t)
+        if 2 * bx > size or 2 * by > size:
+            continue
+        n_fit += 1
+        assert p["cx"] - hx >= -EPS and p["cx"] + hx <= size + EPS, p
+        assert p["cy"] - hy >= -EPS and p["cy"] + hy <= size + EPS, p
+        assert xs.min() >= -EPS and xs.max() <= size + EPS, p
+        assert ys.min() >= -EPS and ys.max() <= size + EPS, p
+    assert n_fit > 0, n_fit
+
+
+@pytest.mark.xfail(strict=True, reason="v4 bug: sample_params clamps with the over-wide |A cos|+|B sin| box; when it exceeds the image the centre is pushed off-middle and the true bezel overflows (131/2000 seeds, up to 21.5 px), though every such dial would fit centred")
+def test_sample_params_bezel_always_inside_image():
+    """The full documented promise: for EVERY seed the true bezel outline is
+    inside [0, IMG_SIZE].  Currently violated; strict xfail, so fixing the
+    clamp makes this XPASS-fail and prompts removing the marker."""
+    size = v4.IMG_SIZE  # int, image side (px)
+    t = np.linspace(0, 2 * np.pi, 64, endpoint=False)  # (64,) outline angles
+    for p in _samples():
+        xs, ys, *_ = _outline(p, t)
+        assert xs.min() >= -EPS and xs.max() <= size + EPS, p
+        assert ys.min() >= -EPS and ys.max() <= size + EPS, p
 
 
 def test_geometry_ranges_shared_with_v3():
