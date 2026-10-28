@@ -21,8 +21,11 @@ Whole suite: `python tests/run_all.py` (under `testlog`: `... testlog <task> sui
 It runs every `tests/test_*.py` and `*/tests/test_*.py` as parallel `python -m pytest` processes (16 at a time, slow
 files split into round-robin shards by its `SPLIT` table, longest first by its `WEIGHT` table), one log per process
 in `tmp_smoke/testlogs/run_all/<timestamp>/`, and ends with one line `run_all: ... in <s> s ... -> PASS | FAIL`.
-`--list` shows the processes without running them; positional files run only those; `--split FILE=K`, `--jobs N`,
-`--timeout S`, `--threads T` override the defaults. Plain `python -m pytest` still works but runs serially (~11 min).
+Browser E2E files (name contains `e2e`) run at normal CPU priority, every other file below normal, so their app
+servers and Chromium answer within Playwright's waits while CPU-bound tests run (`--flat-priority` turns this off).
+Typical run: ~85-95 s for ~505 tests. `--list` shows the processes without running them; positional files run only
+those; `--split FILE=K`, `--jobs N`, `--timeout S`, `--threads T` override the defaults. Plain `python -m pytest`
+still works but runs serially (~11 min).
 `.wtflow.json` makes `WT verify` run the whole suite this way.
 
 | area | source files | test command | timeout |
