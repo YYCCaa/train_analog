@@ -229,19 +229,29 @@ def cache_is_valid(data_dir, cache_prefix):
             and np.array_equal(c_labels, labels))
 
 
+FUTURE_TOLERANCE_NS = 2 * 10**9   # int ns: slack for coarse file-system clocks before an mtime counts as "future"
+
+
+def _raise_labels_in_future(data_dir):
+    """Raise the RuntimeError for a labels.csv whose mtime lies in the future (str data_dir)."""
+    ns = os.stat(os.path.join(data_dir, "labels.csv")).st_mtime_ns   # int: labels.csv mtime in ns
+    when = datetime.datetime.fromtimestamp(ns / 1e9).isoformat(timespec="seconds")  # str: local ISO time
+    raise RuntimeError(f"labels.csv is dated in the future ({when}); "
+                       "fix the clock or touch labels.csv, then start again")
+
+
 def ensure_cache(data_dir, cache_prefix, workers=None):
     """Build the cache unless it is valid (missing, mismatched or older than labels.csv); then re-check."""
+    # a future-dated labels.csv could never be older than a fresh cache: fail before decoding anything
+    if os.stat(os.path.join(data_dir, "labels.csv")).st_mtime_ns > time.time_ns() + FUTURE_TOLERANCE_NS:
+        _raise_labels_in_future(data_dir)
     if cache_is_stale(data_dir, cache_prefix):
         img_path, _ = cache_paths(cache_prefix)    # str: images .npy
         print(f"[cache] labels.csv is newer than {img_path}: rebuilding", flush=True)
     if not cache_is_valid(data_dir, cache_prefix):
         build_cache(data_dir, cache_prefix, workers=workers)
-        if cache_is_stale(data_dir, cache_prefix):
-            # labels.csv is still newer than the cache written just now: its mtime lies in the future
-            ns = os.stat(os.path.join(data_dir, "labels.csv")).st_mtime_ns   # int: labels.csv mtime in ns
-            when = datetime.datetime.fromtimestamp(ns / 1e9).isoformat(timespec="seconds")  # str: local ISO time
-            raise RuntimeError(f"labels.csv is dated in the future ({when}); "
-                               "fix the clock or touch labels.csv, then start again")
+        if cache_is_stale(data_dir, cache_prefix):   # fallback: still newer than the cache written just now
+            _raise_labels_in_future(data_dir)
         if not cache_is_valid(data_dir, cache_prefix):
             raise RuntimeError("cache build finished but does not match labels.csv")
 

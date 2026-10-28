@@ -296,12 +296,18 @@ def test_cli_rebuilds_cache_after_in_place_regeneration(tmp_path):
     assert "[cache] building" not in log
 
 
-def test_ensure_cache_reports_labels_dated_in_the_future(tmp_path):
+def test_ensure_cache_reports_labels_dated_in_the_future(tmp_path, capsys):
     data = tmp_path / "ds"                       # Path: tiny 6-image dataset
     prefix = str(data) + "_cache"                # str: cache prefix
     _write_pngs(data, 6)
     tv.ensure_cache(str(data), prefix)
+    img_path, _ = tv.cache_paths(prefix)                 # str: cache images .npy
+    before = os.stat(img_path).st_mtime_ns               # int ns: cache mtime before the failing call
+    capsys.readouterr()                                  # drop the output of the first build
     t = os.stat(data / "labels.csv").st_mtime_ns + 3600 * 10**9   # int ns: one hour ahead
     os.utime(data / "labels.csv", ns=(t, t))
     with pytest.raises(RuntimeError, match="labels.csv is dated in the future"):
         tv.ensure_cache(str(data), prefix)
+    # the error comes before any decoding: no rebuild started, the npy is untouched
+    assert "[cache] building" not in capsys.readouterr().out
+    assert os.stat(img_path).st_mtime_ns == before
