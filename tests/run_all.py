@@ -12,11 +12,20 @@ up to --jobs at a time, longest first. Standard library only (no pytest-xdist / 
     one unit = [python, -m, pytest, -q, -p, no:cacheprovider, (-p, run_all_shard, --shard, i/K,) FILE], cwd = root,
                OMP/MKL/OPENBLAS/NUMEXPR_NUM_THREADS = --threads (unless already set), stdin = /dev/null
 
+    CPU priority (is_interactive(); --flat-priority = everything normal):
+
+        file name contains "e2e"  ──►  interactive  ──►  normal priority        pytest + its app server + Chromium
+        (browser E2E tests)                                                     answer within Playwright's 5-15 s waits
+        any other test file       ──►  background   ──►  below normal           render pools, TFLite conversions and
+                                                         (inherited by every    training only get the CPU the browser
+                                                          child process)        tests leave over
+
 Usage (from the repo root):
     python tests/run_all.py                         # whole suite
     python tests/run_all.py --list                  # show the units in scheduled order, run nothing
     python tests/run_all.py tests/test_v7_render.py # only that file (still split into its shards)
     python tests/run_all.py --split tests/test_v7_render.py=1 --jobs 4 --timeout 900
+    python tests/run_all.py --flat-priority           # every unit at normal CPU priority
 
 Exit code: 0 every unit passed, 1 anything failed / timed out / a file ran no tests / Ctrl+C, 2 usage error.
 """
@@ -65,6 +74,10 @@ WEIGHT = {
     "tests/test_v7_gray_generator.py": 15,
     "tests/test_studio_api.py": 8,
 }
+# INTERACTIVE_MARK: str, a test file whose NAME contains this is a browser E2E file (see is_interactive)
+INTERACTIVE_MARK = "e2e"
+# BACKGROUND_NICE: int, POSIX niceness added to non-interactive units (Windows: BELOW_NORMAL_PRIORITY_CLASS)
+BACKGROUND_NICE = 10
 # DEFAULT_WEIGHT: float, expected seconds of a file missing from WEIGHT
 DEFAULT_WEIGHT = 30.0
 # THREAD_VARS: tuple[str, ...], native thread-pool sizes capped by --threads in the children's environment
@@ -97,6 +110,15 @@ COUNT_KEYS = ("passed", "failed", "skipped", "errors", "xfailed", "xpassed")
 
 # ── units ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+def is_interactive(file: str) -> bool:
+    """THE priority rule: True (bool) when test file `file` (str, root-relative posix path) is a browser E2E file,
+    i.e. its file name contains INTERACTIVE_MARK ("e2e": tests/test_studio_e2e.py, */tests/test_e2e_browser.py).
+    Its pytest, the app server it starts and Chromium must answer within Playwright's 5-15 s waits, so such a unit
+    keeps normal CPU priority; every other unit (CPU-bound render pools, TFLite conversions, training) is started
+    below normal priority, unless --flat-priority."""
+    return INTERACTIVE_MARK in posixpath.basename(file)
+
+
 @dataclass(frozen=True)
 class Unit:
     """One pytest process: a whole test file (k == 1) or shard `shard` of `k` of it."""
@@ -115,6 +137,11 @@ class Unit:
     def display(self) -> str:
         """Human label (str), e.g. `tests/test_v7_render.py [3/8]` (1-based shard number of K)."""
         return self.file if self.shard is None else f"{self.file} [{self.shard + 1}/{self.k}]"
+
+    @property
+    def interactive(self) -> bool:
+        """True (bool) when this unit belongs to a browser E2E file (keeps normal priority, see is_interactive)."""
+        return is_interactive(self.file)
 
 
 @dataclass
@@ -191,7 +218,11 @@ def parse_split(text: str) -> tuple[str, int]:
 def build_parser() -> argparse.ArgumentParser:
     """The command-line parser (argparse.ArgumentParser)."""
     p = argparse.ArgumentParser(
-        prog="run_all.py", description="Run the test suite as parallel pytest processes (one per file / shard).")
+        prog="run_all.py",
+        description="Run the test suite as parallel pytest processes (one per file / shard). CPU priority: units of "
+                    f"browser E2E files (file name contains {INTERACTIVE_MARK!r}) keep normal priority so their app "
+                    "server and Chromium answer in time; every other unit, with all its child processes, runs below "
+                    "normal priority (--flat-priority turns this off).")
     p.add_argument("files", nargs="*", metavar="FILE",
                    help="test files to run (relative to --root); default: every tests/test_*.py and */tests/test_*.py")
     p.add_argument("--root", default=None, help=f"project root (default: {DEFAULT_ROOT})")
@@ -205,7 +236,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="run FILE as K round-robin shards (repeatable; K=1 = whole; overrides the built-in table)")
     p.add_argument("--log-dir", default=None,
                    help="folder for the per-unit logs (default: <root>/tmp_smoke/testlogs/run_all/<YYYYMMDD-HHMMSS>)")
-    p.add_argument("--list", action="store_true", help="print the units in scheduled order and exit")
+    p.add_argument("--flat-priority", action="store_true",
+                   help=f"start every unit at normal CPU priority (default: only units of files whose name contains "
+                        f"{INTERACTIVE_MARK!r}, the browser E2E tests, do; the others run below normal)")
+    p.add_argument("--list", action="store_true",
+                   help="print the units in scheduled order (weight, 'interactive' marker, name) and exit")
     return p
 
 
@@ -245,19 +280,33 @@ def unit_cmd(unit: Unit) -> list[str]:
     return cmd + [unit.file]
 
 
-def start_unit(unit: Unit, root: Path, log_dir: Path, env: dict[str, str]) -> Running:
+def _lower_own_priority() -> None:
+    """POSIX preexec_fn, runs in the child before pytest starts: add BACKGROUND_NICE to its niceness (inherited by
+    everything it starts)."""
+    os.nice(BACKGROUND_NICE)
+
+
+def start_unit(unit: Unit, root: Path, log_dir: Path, env: dict[str, str], low_priority: bool) -> Running:
     """Start `unit` (Unit) in `root` (Path) with environment `env` (dict[str, str]), output to
-    `log_dir`/<unit name>.log (a header naming the command comes first). Returns the Running handle."""
+    `log_dir`/<unit name>.log (a header naming the command comes first). `low_priority` (bool): start it below
+    normal CPU priority (Windows BELOW_NORMAL_PRIORITY_CLASS, POSIX nice +BACKGROUND_NICE; its child processes
+    inherit it); else it keeps the runner's priority. Returns the Running handle."""
     log = log_dir / f"{unit.name}.log"
     cmd = unit_cmd(unit)
     log_fh = open(log, "wb")
     log_fh.write(f"{LOG_MARK} unit {unit.name} ({unit.display})\n{LOG_MARK} cwd {root}\n"
+                 f"{LOG_MARK} priority {'below normal' if low_priority else 'normal (runner priority)'}\n"
                  f"{LOG_MARK} cmd {subprocess.list2cmdline(cmd)}\n".encode(LOG_ENCODING, "replace"))
     log_fh.flush()
     if os.name == "nt":  # own process group: the console's Ctrl+C reaches only the runner, which kills the trees
-        extra = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP  # int, CreateProcess creation flags
+        if low_priority:
+            flags |= subprocess.BELOW_NORMAL_PRIORITY_CLASS
+        extra = {"creationflags": flags}
     else:                # own session = own process group, killed as a whole with os.killpg
         extra = {"start_new_session": True}
+        if low_priority:
+            extra["preexec_fn"] = _lower_own_priority
     try:
         proc = subprocess.Popen(cmd, cwd=str(root), env=env, stdin=subprocess.DEVNULL, stdout=log_fh,
                                 stderr=subprocess.STDOUT, **extra)
@@ -340,11 +389,13 @@ def finish(run: Running, status: str | None, timeout: float) -> Result:
 
 
 def run_pool(units: list[Unit], root: Path, log_dir: Path, jobs: int, timeout: float,
-             envs: tuple[dict[str, str], dict[str, str]], on_done: Callable[[Result], None]) -> tuple[list[Result], bool]:
+             envs: tuple[dict[str, str], dict[str, str]], on_done: Callable[[Result], None],
+             flat_priority: bool = False) -> tuple[list[Result], bool]:
     """Run `units` (list[Unit], scheduled order) with at most `jobs` (int) alive at once; a unit running longer than
     `timeout` (float, s) has its process tree killed (TIMEOUT). `envs`: (whole-file env, sharded env). `on_done`
-    (callable(Result)) is called as each unit ends. On Ctrl+C every running tree is killed. Returns (results:
-    list[Result] in finishing order, interrupted: bool)."""
+    (callable(Result)) is called as each unit ends. Non-interactive units start below normal CPU priority unless
+    `flat_priority` (bool). On Ctrl+C every running tree is killed. Returns (results: list[Result] in finishing
+    order, interrupted: bool)."""
     pending = list(units)  # list[Unit], not started yet (scheduled order)
     running = []           # list[Running], alive processes
     results = []           # list[Result], finished units
@@ -352,7 +403,8 @@ def run_pool(units: list[Unit], root: Path, log_dir: Path, jobs: int, timeout: f
         while pending or running:
             while pending and len(running) < jobs:
                 unit = pending.pop(0)
-                running.append(start_unit(unit, root, log_dir, envs[unit.shard is not None]))
+                low = not flat_priority and not unit.interactive  # bool, start this unit below normal priority
+                running.append(start_unit(unit, root, log_dir, envs[unit.shard is not None], low))
             time.sleep(POLL_S)
             for run in list(running):
                 if run.proc.poll() is not None:
@@ -498,19 +550,24 @@ def main(argv: list[str] | None = None) -> int:
         if not files:
             parser.error(f"no tests/test_*.py or */tests/test_*.py under {root}")
     units = make_units(files, split)  # list[Unit], in scheduled (longest-first) order
+    # priority_note: str, how CPU priority is assigned in this run (header of --list and of a run)
+    priority_note = ("priority flat (every unit normal)" if args.flat_priority else
+                     f"priority: interactive (file name has {INTERACTIVE_MARK!r}) normal, others below normal")
 
     if args.list:
-        print(f"run_all --list: {len(units)} units from {len(files)} files, jobs {args.jobs}, root {root}")
+        print(f"run_all --list: {len(units)} units from {len(files)} files, jobs {args.jobs}, {priority_note}, "
+              f"root {root}")
         width = max(len(u.display) for u in units)  # int, label column width
         for u in units:
-            print(f"{u.weight:8.1f} s  {u.display:<{width}}  ({u.name})")
+            mark = "interactive" if u.interactive else "-"  # str, priority-class marker column
+            print(f"{u.weight:8.1f} s  {mark:<11}  {u.display:<{width}}  ({u.name})")
         return 0
 
     log_dir = Path(os.path.abspath(args.log_dir)) if args.log_dir else default_log_dir(root)  # Path, per-unit logs
     log_dir.mkdir(parents=True, exist_ok=True)
     envs = child_envs(args.threads)  # tuple[dict[str, str], dict[str, str]], (whole-file env, sharded env)
     print(f"run_all: {len(units)} units from {len(files)} files, jobs {args.jobs}, timeout {args.timeout:g} s, "
-          f"threads {args.threads or 'unchanged'}, logs {log_dir}", flush=True)
+          f"threads {args.threads or 'unchanged'}, {priority_note}, logs {log_dir}", flush=True)
     width = len(str(len(units)))  # int, digits of the unit counter
     done = [0]  # list[int], finished-unit counter (mutable for the callback)
 
@@ -521,7 +578,8 @@ def main(argv: list[str] | None = None) -> int:
               f"{counts_text(res, args.timeout)}", flush=True)
 
     t0 = time.monotonic()  # float, start of the run
-    results, interrupted = run_pool(units, root, log_dir, args.jobs, args.timeout, envs, on_done)
+    results, interrupted = run_pool(units, root, log_dir, args.jobs, args.timeout, envs, on_done,
+                                    flat_priority=args.flat_priority)
     if interrupted:
         print("run_all: interrupted (Ctrl+C), every running unit's process tree was killed", flush=True)
     passed = summarize(results, units, time.monotonic() - t0, args.jobs, args.timeout, interrupted)
