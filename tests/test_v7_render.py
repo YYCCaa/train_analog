@@ -372,15 +372,15 @@ def test_triangles_paint_off_pointer_inside_boundary():
 # so the gray-0 / gray-255 pixel difference is exactly the painted triangle set
 _TRI_CLEAR = {"tri_artifacts.count_range": [6, 6], **_NO_JITTER,
               "background.dial_circle_blur": False}
-# px (float) the RENDERED pointer footprint may reach past the set P the
-# generator measures from (stretched pointer mask | analytic hole ellipse):
-#   - the image is stretched bicubic, P nearest: the 4-tap kernel reaches 2 px
-#     past an edge per axis, 2 * sqrt(2) = 2.83 px on a diagonal (the axis-only
-#     2 px of _erode(ptr, 2) above)
-#   - the drawn hole (Pillow's inclusive-bbox ellipse) is up to ~1.5 px larger
-#     than the analytic ellipse in P (2.00 px measured with the stretch off)
-# measured worst over 40 default seeds: 4.24 px (tmp_smoke/testlogs/tri-clear-gen)
-_PTR_SPREAD = 4.5
+# px (float) the RENDERED pointer footprint may reach past the set P_d the
+# generator measures from for d > 0 (P | P_drawn: the pointer + hub + hole as
+# drawn, stretched bicubic like the image, any coverage).  What is left is the
+# bicubic kernel's negative lobes: a pixel 1-2 px outside an edge gets a small
+# overshoot (it differs between pointer gray 0 and 255) while its coverage is
+# <= 0.  Measured worst over 40 seeds: 2.24 px (offset (2, 1)) with the default
+# stretch, 0.00 px with the stretch off (tmp_smoke/testlogs/tri-clear-gen,
+# label spread2); + 0.25 px margin
+_PTR_SPREAD = 2.5
 
 
 def _tri_footprint(cfg, seed):

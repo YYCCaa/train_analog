@@ -212,10 +212,26 @@ unchanged.  params["jitter"] records the factors, <kind>_max (None when
 unbounded) and capped (dict of bool per kind: the range was shortened).
 
 Triangle artifacts (step 12), d = tri_artifacts.clear_distance.  P = the
-stretched (cut) pointer mask incl. the hub disc | the stretched hole ellipse;
-Z_d = the pixels whose centre lies within d (Euclidean, pixel centres) of a P
-pixel (clear_zone; Z_0 = P); V = inside B & ~Z_d, the centre domain and the
-paint clip.  Per triangle the draws are, in order: gray, centre (ONE draw from
+stretched (cut) pointer mask (NEAREST) incl. the hub disc | the analytic
+stretched hole ellipse (also step 13's overlay erase / shadow exclusion).  The
+image shows a little more than P: Pillow's hole ellipse (inclusive bbox) is up
+to ~1.5 px larger and the bicubic stretch spreads every edge.  So for d > 0 the
+zone is measured from what is DRAWN:
+
+    pre-stretch canvas C x C            stretched like the image
+    ┌──────────────────┐   affine,     ┌──────────────────┐
+    │     ▲            │   BICUBIC     │     ▲            │   P_drawn = > 0 there
+    │    ╱█╲  cut ptr  │  ─────────►   │    ▒█▒           │   (any coverage);
+    │   (hub)  mask    │               │   ▒(█)▒          │   ▒ = what P misses
+    │  ( hole ) step 7 │               │  ▒( █ )▒         │
+    └──────────────────┘               └──────────────────┘
+
+    P_d = P | P_drawn (d > 0),  P_0 = P
+    Z_d = the pixels whose centre lies within d (Euclidean, pixel centres) of a
+          P_d pixel (clear_zone);  Z_0 = P
+    V   = inside B & ~Z_d, the centre domain and the paint clip
+
+Per triangle the draws are, in order: gray, centre (ONE draw from
 V, row-major flat index randrange(|V|)), size, 3 vertices (angle, distance);
 the triangle is translated so its centroid sits on the centre, which is always
 inside it.  With d > 0 the WHOLE raster must clear Z_d, else only the centre
@@ -230,7 +246,7 @@ is redrawn (one more randrange, same shape) and the triangle moved there:
        │  ░░░ (hub)  ░╱───╲       │        │  ░░░ (hub)  ░░░          │
        │    ░░░░░░░░░░            │        │    ░░░░░░░░░░            │
        └──────────────────────────┘        └──────────────────────────┘
-        █ P   ░ Z_d minus P (d px wide)   c ∈ V = B minus Z_d, centroid G := c
+        █ P_d   ░ Z_d minus P_d (d px wide)   c ∈ V = B minus Z_d, centroid G := c
 
     try 1 .. 64: raster ∩ Z_d = ∅ -> painted = raster ∩ B (whole, trimmed False)
     all 64 reach Z_d             -> painted = 64th raster ∩ V (trimmed True)
@@ -2064,9 +2080,11 @@ def render_image(cfg, image_seed):
                       "gray_fallback": gray_info["fallback"],
                       "headroom": headroom, "headroom_ok": gray_info["headroom_ok"]}
 
-    # hole drawn BEFORE the pre-pointer snapshot so it survives the cut-tip restore
-    ImageDraw.Draw(img).ellipse([hole_cx - hole_r, hole_cy - hole_r,
-                                 hole_cx + hole_r, hole_cy + hole_r], fill=hole_gray)
+    # hole drawn BEFORE the pre-pointer snapshot so it survives the cut-tip restore;
+    # hole_box: [x0, y0, x1, y1] float canvas px, Pillow's ellipse bbox (step 12
+    # redraws it for the triangles' drawn blocked set)
+    hole_box = [hole_cx - hole_r, hole_cy - hole_r, hole_cx + hole_r, hole_cy + hole_r]
+    ImageDraw.Draw(img).ellipse(hole_box, fill=hole_gray)
 
     C = cfg["cut_tip"]
     cut_r = rngs["cut_tip"][0].randint(*C["radius_range"])  # int px
@@ -2212,10 +2230,22 @@ def render_image(cfg, image_seed):
     tri_items = []
     rec["tri_artifacts"].update(n=n_tris, items=tri_items)
     tv = T["pixel_var"]
-    clear = float(T["clear_distance"])  # float px, d: no triangle pixel within d of P
-    # Z_d, (C, C) bool: pixels within d (pixel-centre Euclidean) of P; d = 0 is
-    # P itself (the old placement, no fit check)
-    zone = clear_zone(ptr_blocked, clear) if clear > 0 else ptr_blocked
+    clear = float(T["clear_distance"])  # float px, d: no triangle pixel within d of the pointer
+    if clear > 0:
+        # P_drawn: the pointer + hub + hole AS DRAWN, on a blank pre-stretch
+        # canvas: the hole with step 7's own bbox, OR the cut pointer mask
+        # (incl. the hub disc), stretched like the image (BICUBIC) and kept
+        # wherever any coverage lands (> 0); it covers Pillow's ellipse rim and
+        # the resampled edge that the analytic hole / NEAREST mask of P miss
+        drawn = Image.new("L", ptr_mask.size, 0)  # "L" (C, C), pre-stretch hole
+        ImageDraw.Draw(drawn).ellipse(hole_box, fill=255)
+        drawn = Image.fromarray(np.maximum(np.asarray(drawn), np.asarray(ptr_mask)))
+        p_drawn = np.asarray(drawn.transform(size2, Image.AFFINE, affine,
+                                             resample=Image.BICUBIC)) > 0  # (C, C) bool, P_drawn
+        # Z_d, (C, C) bool: pixels within d (pixel-centre Euclidean) of P_d = P | P_drawn
+        zone = clear_zone(ptr_blocked | p_drawn, clear)
+    else:
+        zone = ptr_blocked  # (C, C) bool, Z_0 = P: the old placement, no fit check
     # V, (C, C) bool: inside B and off Z_d, the centre domain and the paint
     # clip.  B sits where the displacement puts it, so the centres depend on
     # the displacement: the triangles are the one content layer that is not a
