@@ -59,12 +59,14 @@ SPLIT = {
 # NEVER_SPLIT: frozenset[str], files that must run as one process (fixed port 8799; its server may build the frontend)
 NEVER_SPLIT = frozenset({"tests/test_studio_e2e.py"})
 # WEIGHT: dict[str, float], expected seconds per test file (root-relative posix path) when run alone, whole
-# (measured 2026-10-27; a file's shards each get weight / K)
+# (measured 2026-10-27; a file's shards each get weight / K, so a split file whose slow tests sit in a few shards is
+# given K x its slowest shard instead: test_export_v9_tflite (3 shards each run a ~40 s TFLite conversion) and
+# test_train_v9 (one shard holds the ~45 s four-CLI-run test) start in the first wave instead of the tail)
 WEIGHT = {
+    "tests/test_export_v9_tflite.py": 240,
     "tests/test_v7_render.py": 205,
-    "tests/test_export_v9_tflite.py": 106,
+    "tests/test_train_v9.py": 135,
     "tests/test_studio_e2e.py": 75,
-    "tests/test_train_v9.py": 62,
     "tests/test_train_gray.py": 48,
     "val_viewer/tests/test_api.py": 28,
     "val_viewer/tests/test_e2e_browser.py": 26,
@@ -72,7 +74,17 @@ WEIGHT = {
     "tests/test_run_all.py": 18,
     "tests/test_v7_look.py": 15,
     "tests/test_v7_gray_generator.py": 15,
+    "tests/test_autocal_models.py": 11,
+    "tip_webapp/tests/test_inference.py": 10,
     "tests/test_studio_api.py": 8,
+    "grayscale_webapp/tests/test_e2e_browser.py": 8,
+    "tests/test_v7_config.py": 6,
+    "tip_webapp/tests/test_api.py": 6,
+    "tests/test_autocal_dataset.py": 5,
+    "tests/test_autocal_math.py": 5,
+    "tests/test_v4_generator.py": 3,
+    "grayscale_webapp/tests/test_api.py": 2.4,
+    "grayscale_webapp/tests/test_converter.py": 1.3,
 }
 # INTERACTIVE_MARK: str, a test file whose NAME contains this is a browser E2E file (see is_interactive)
 INTERACTIVE_MARK = "e2e"
