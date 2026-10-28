@@ -77,11 +77,15 @@ def make_root(tmp_path: Path, files: dict[str, str], name: str = "root") -> Path
     return root
 
 
-def run_runner(*args: str, env: dict[str, str] | None = None, timeout: float = 240) -> subprocess.CompletedProcess:
+def run_runner(*args: str, env: dict[str, str] | None = None, timeout: float = 240,
+               normal_priority: bool = False) -> subprocess.CompletedProcess:
     """Run `python tests/run_all.py *args` like a user would; returns the CompletedProcess (stdout: str, stderr
-    merged into stdout, decoded with the locale encoding the runner prints in)."""
+    merged into stdout, decoded with the locale encoding the runner prints in). `normal_priority` (bool): on Windows
+    start the runner at normal CPU priority, as from a plain console, even when this test itself runs below normal
+    (e.g. as a unit of the real suite)."""
+    extra = {"creationflags": subprocess.NORMAL_PRIORITY_CLASS} if normal_priority and os.name == "nt" else {}
     return subprocess.run([sys.executable, str(RUNNER), *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, errors="replace", timeout=timeout, env=env, cwd=str(REPO))
+                          text=True, errors="replace", timeout=timeout, env=env, cwd=str(REPO), **extra)
 
 
 def last_line(out: str) -> str:
@@ -373,3 +377,71 @@ def test_usage_errors_exit_2(tmp_path, args, named):
     error_line = next(ln for ln in res.stdout.splitlines() if "error:" in ln)  # str, argparse's error line
     assert named in error_line, res.stdout
     assert not log_dir.exists(), res.stdout
+
+
+# ── CPU priority: browser E2E files normal, everything else below normal ─────────────────────────────────────────
+
+# PRIO_TEST: str, fake test (format with out=<path>) writing its own interpreter's CPU priority to `out`:
+# Windows priority class (int, 0x20 normal / 0x4000 below normal), POSIX nice value (int)
+PRIO_TEST = """
+    import os, pathlib
+
+    def _priority():
+        if os.name == "nt":
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            k32.GetCurrentProcess.restype = ctypes.c_void_p
+            k32.GetPriorityClass.argtypes = [ctypes.c_void_p]
+            k32.GetPriorityClass.restype = ctypes.c_uint32
+            return k32.GetPriorityClass(k32.GetCurrentProcess())
+        return os.nice(0)
+
+    def test_record_priority():
+        pathlib.Path({out!r}).write_text(str(_priority()))
+"""
+
+
+def expected_priorities() -> tuple[int, int]:
+    """(normal, below normal) priority values (tuple[int, int]) the fake PRIO_TEST reports for a runner started by
+    run_runner(normal_priority=True): Windows priority classes; POSIX this process's nice value and that + 10."""
+    if os.name == "nt":
+        return 0x20, 0x4000  # NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS
+    base = os.nice(0)  # int, nice value the runner inherits from this test
+    return base, min(base + 10, 19)
+
+
+def make_prio_root(tmp_path: Path) -> tuple[Path, Path]:
+    """Root (Path) with a browser-E2E-named file tests/test_e2e_x.py and a plain tests/test_y.py, both PRIO_TEST;
+    returns (root, marks folder (Path) where each writes <file stem>.txt)."""
+    marks = tmp_path / "prio"
+    marks.mkdir()
+    root = make_root(tmp_path, {
+        "tests/test_e2e_x.py": PRIO_TEST.format(out=str(marks / "test_e2e_x.txt")),
+        "tests/test_y.py": PRIO_TEST.format(out=str(marks / "test_y.txt")),
+    })
+    return root, marks
+
+
+@pytest.mark.parametrize("flat", [False, True], ids=["default", "flat-priority"])
+def test_non_e2e_units_run_below_normal(tmp_path, flat):
+    """User runs the runner on a root with tests/test_e2e_x.py and tests/test_y.py -> the e2e file's test ran at
+    normal CPU priority, the other below normal, exit 0; with --flat-priority both ran at normal priority."""
+    root, marks = make_prio_root(tmp_path)
+    extra = ["--flat-priority"] if flat else []  # list[str], optional flag
+    res = run_runner("--root", str(root), "--log-dir", str(tmp_path / "logs"), *extra, normal_priority=True)
+    assert res.returncode == 0, res.stdout
+    assert re.search(r"\b2 passed\b", last_line(res.stdout)), res.stdout
+    normal, below = expected_priorities()
+    got = {p.stem: int(p.read_text()) for p in marks.glob("*.txt")}  # dict[str, int], file stem -> priority seen
+    assert got == {"test_e2e_x": normal, "test_y": normal if flat else below}, (got, res.stdout)
+
+
+def test_list_marks_interactive_units(tmp_path):
+    """User runs --list on that root -> the e2e unit is marked interactive, the other is not."""
+    root, _ = make_prio_root(tmp_path)
+    res = run_runner("--root", str(root), "--list", timeout=60)
+    assert res.returncode == 0, res.stdout
+    e2e_line = next(ln for ln in res.stdout.splitlines() if "tests/test_e2e_x.py" in ln)  # str, its --list row
+    other_line = next(ln for ln in res.stdout.splitlines() if "tests/test_y.py" in ln)  # str, its --list row
+    assert "interactive" in e2e_line, res.stdout
+    assert "interactive" not in other_line, res.stdout
