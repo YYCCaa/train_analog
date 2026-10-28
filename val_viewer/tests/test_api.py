@@ -12,6 +12,7 @@ import shutil
 import os
 import subprocess
 import sys
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -461,3 +462,91 @@ def test_generated_params_reach_viewer(tmp_path):
         seed = g._seed_for_index(5, row)  # int, the image seed the generator used for this row
         assert body["row"] == row and body["filename"] == names[row] and body["seed"] == seed
         assert body["sampled"] == json.loads(json.dumps(g.render_image(cfg, seed).params))
+
+
+# ---------------- review fixes: stale cache, foreign records, file changes, empty set, hand edits ----------------
+
+def test_regenerated_dataset_rebuilds_image_cache(fake_data, capsys):
+    """Same names and same labels.csv text, new pixels: a newer labels.csv makes the viewer re-decode the PNGs."""
+    open_data(fake_data)
+    capsys.readouterr()
+    row = 3
+    old = np.asarray(Image.open(fake_data.data_dir / fake_data.names[row])).copy()  # (256,256) uint8
+    new = (255 - old).astype(np.uint8)  # (256,256) uint8, different pixels
+    Image.fromarray(new).save(fake_data.data_dir / fake_data.names[row])
+    img_cache = tv.cache_paths(os.path.abspath(fake_data.data_dir) + "_cache")[0]  # str: decoded-image .npy
+    t_cache = time.time() - 100  # float s: the cache was built a while ago ...
+    t_csv = t_cache + 50         # float s: ... and the generator rewrote labels.csv after that (but before now)
+    os.utime(img_cache, (t_cache, t_cache))
+    os.utime(fake_data.data_dir / "labels.csv", (t_csv, t_csv))
+    c = open_client(fake_data)
+    out = capsys.readouterr().out
+    assert "[cache] labels.csv is newer than" in out and img_cache in out and "[rank] 200/200" in out
+    assert not c.data.cache_hit
+    r = c.get(f"/api/image/{row}.png")
+    assert np.array_equal(np.asarray(Image.open(io.BytesIO(r.content))), new)
+    # a restart without regenerating: the cache is newer than labels.csv again -> nothing rebuilt, rank reused
+    open_data(fake_data)
+    out = capsys.readouterr().out
+    assert "[cache]" not in out and re.search(r"^\[rank\] cached", out, re.M)
+
+
+def test_params_from_another_run_are_refused(fake_data):
+    """Same file names but every tip shifted by 1 px: 409; a 5e-4 shift is float noise and passes."""
+    write_params_jsonl(fake_data, mutate=lambda row, rec: {**rec, "tip_x": rec["tip_x"] + 1.0})
+    c = open_client(fake_data)
+    r = get_params(c, 5)
+    assert r.status_code == 409 and r.json()["detail"] == "saved parameters do not match this image (dial_00005.png)"
+    write_params_jsonl(fake_data, mutate=lambda row, rec: {**rec, "tip_y": rec["tip_y"] + 1.0})
+    assert get_params(open_client(fake_data), 5).status_code == 409
+    write_params_jsonl(fake_data, mutate=lambda row, rec: {**rec, "tip_x": rec["tip_x"] + 5e-4,
+                                                           "tip_y": rec["tip_y"] - 5e-4})
+    assert get_params(open_client(fake_data), 5).status_code == 200
+
+
+def test_params_file_changed_or_deleted_under_running_viewer(fake_data):
+    path = write_params_jsonl(fake_data)
+    c = open_client(fake_data)
+    assert get_params(c, 3).status_code == 200
+    write_params_jsonl(fake_data, mutate=lambda row, rec: {**rec, "seed": 7})
+    st = os.stat(path)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+    r = get_params(c, 3)
+    assert r.status_code == 409
+    assert r.json()["detail"] == "params.jsonl changed on disk since the viewer started; restart the viewer"
+    path.unlink()
+    r = get_params(c, 3)
+    assert r.status_code == 404 and r.json()["detail"] == "no parameters saved for this dataset"
+
+
+def test_empty_train_set(fake_data):
+    """val_split 1.0 leaves no train image: the train set answers zeros / null / [] instead of a 500."""
+    c = open_client(fake_data, val_split=1.0)
+    assert c.data.n_train == 0
+    r = c.get("/api/summary", params={"set": "train"})
+    assert r.status_code == 200, r.text
+    s = r.json()
+    assert (s["n"], s["p99"], s["max_err"], s["n_over_3"], s["n_over_7"]) == (0, None, None, 0, 0)
+    assert summary(c, set="all")["n"] == 200 and summary(c, set="val")["p99"] is not None
+    for side in ("best", "worst"):
+        assert get_list(c, side, 5, "train") == []
+
+
+def test_hand_edited_params_file(fake_data):
+    def edit(row, rec):
+        if row == 3:
+            return {**rec, "row": 99}
+        if row == 4:
+            line = json.dumps(rec).replace('"gray": 104', '"gray": 1e999', 1).replace('"x": 5}', '"x": -1e999}', 1)
+            assert "1e999" in line
+            return line
+    path = write_params_jsonl(fake_data, mutate=edit)
+    c = open_client(fake_data)
+    assert get_params(c, 3).json()["row"] == 3
+    body = get_params(c, 4).json()
+    assert body["sampled"]["pointer"]["gray"] == "Infinity"
+    assert body["sampled"]["glares"]["items"][0]["x"] == "-Infinity"
+    assert body["sampled"]["glares"]["items"][1]["x"] == 6  # finite numbers stay numbers
+    path.write_bytes(b"\xef\xbb\xbf" + write_params_jsonl(fake_data).read_bytes())  # UTF-8 BOM before row 0
+    r = get_params(open_client(fake_data), 0)
+    assert r.status_code == 200 and r.json() == {"row": 0, **params_record(fake_data, 0)}

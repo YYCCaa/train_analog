@@ -107,11 +107,18 @@ class ValData:
 
         # trainer cache (decoded PNGs) next to the data dir, same default prefix as train_v9_tip.py
         prefix = os.path.abspath(data_dir).rstrip("\\/") + "_cache"     # str: trainer cache prefix
-        if not tv.cache_is_valid(self.data_dir, prefix):
+        img_path, _ = tv.cache_paths(prefix)  # str: trainer images .npy
+        valid = tv.cache_is_valid(self.data_dir, prefix)  # bool: names / labels / shape match labels.csv
+        if valid and os.stat(data_dir / "labels.csv").st_mtime_ns > os.stat(img_path).st_mtime_ns:
+            # The trainer's check cannot see a dataset regenerated in place with the same seed (labels.csv stays
+            # byte-identical, only the pixels change). The generator rewrites labels.csv on every run, before the
+            # cache is built, so a labels.csv newer than the cache means the decoded pixels may be old.
+            print(f"[cache] labels.csv is newer than {img_path}: rebuilding", flush=True)
+            valid = False
+        if not valid:
             tv.build_cache(self.data_dir, prefix)
             if not tv.cache_is_valid(self.data_dir, prefix):
                 raise RuntimeError("cache build finished but does not match labels.csv")
-        img_path, _ = tv.cache_paths(prefix)
         self._img_path: str = img_path  # trainer images .npy, opened per read (a held memmap blocks a rebuild on Windows)
         all_names, all_labels = tv.read_labels_csv(self.data_dir)  # list[str] (N,), (N, 2) float32
         self.n_total: int = len(all_names)
@@ -158,7 +165,7 @@ class ValData:
             np.savez(tmp, tip=self.tip, err=self.err, conf=self.conf, row=self._rows, label=self.label)
             os.replace(tmp, cache_file)
 
-        self.params: ParamStore = ParamStore(self.data_dir, self.names, cache_dir)  # saved parameters, if any
+        self.params: ParamStore = ParamStore(self.data_dir, self.names, cache_dir, self.label)  # saved parameters, if any
         # dict[str, (n_set,) int64]: dataset rows of each set, ascending
         self._set_rows = {"val": np.sort(self.val_idx), "train": np.sort(self.train_idx), "all": self._rows}
         # dict[(set, side), (n_set,) int64]: rows of the set ordered best = ascending (err, row),
@@ -216,11 +223,13 @@ class ValData:
 
     def summary(self, set_name: str = "val") -> dict:
         """Header numbers: run, weights file name, data_dir, set, n (images in the set), n_train, n_val, n_total,
-        p99, max_err, n_over_3, n_over_7 (of that set), device, key (rank-cache key, str),
+        p99, max_err (float | None when the set is empty), n_over_3, n_over_7 (of that set), device, key (rank-cache key, str),
         params ('saved' | 'none')."""
         err = self.err[self._set_rows[set_name]]  # (n_set,) float64
+        empty = len(err) == 0  # bool: a set with no image has no percentile / maximum
         return {"run": self.run_name, "weights": self.weights_path.name, "data_dir": self.data_dir,
                 "set": set_name, "n": len(err), "n_train": self.n_train, "n_val": self.n_val,
-                "n_total": self.n_total, "p99": float(np.percentile(err, 99)), "max_err": float(err.max()),
+                "n_total": self.n_total, "p99": None if empty else float(np.percentile(err, 99)),
+                "max_err": None if empty else float(err.max()),
                 "n_over_3": int((err > 3).sum()), "n_over_7": int((err > 7).sum()), "device": self.device,
                 "key": self.key, "params": "saved" if self.params.available else "none"}
