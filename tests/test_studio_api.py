@@ -4,6 +4,7 @@ import copy
 import csv
 import io
 import json
+import math
 import os
 import time
 
@@ -404,3 +405,124 @@ def test_not_empty_counts_params_file(client, tmp_path):
     assert r.status_code == 409
     msg = r.json()["errors"][0]
     assert "overwrite box" in msg and "params.jsonl" in msg
+
+
+# ── tri_artifacts.clear_distance: triangles kept d px off pointer, hub and hole ──
+
+# slack (float px) allowed when checking a triangle's polygon against the hole
+# circle.  The generator measures d between PIXEL CENTRES: every pixel of the
+# triangle raster vs every pixel of the drawn hole (Pillow's ellipse, whose
+# inclusive bbox makes it up to ~1.5 px larger, plus the bicubic stretch spread,
+# so the zone it measures from is never smaller than the analytic circle used
+# here).  The test measures between the EXACT shapes instead: the polygon from
+# verts and the analytic stretched hole ellipse.  Each exact shape can reach up
+# to half a pixel diagonal (~0.71 px) past the pixel centres the generator saw,
+# so the exact gap may read ~1.4 px under d; 2.5 px covers that and nothing more.
+TRI_HOLE_SLACK = 2.5
+
+
+def _hole_circle(sampled):
+    """Mounting hole of one image as the test sees it, from its sampled params.
+
+    sampled: dict, params "sampled" (geometry + derived sections).  The hub
+    centre is the canvas centre (canvas_size // 2) + the pointer displacement;
+    the hole centre is the hub centre + the hole displacement, radius
+    hole_radius; both are then stretched about the canvas centre (stretch_h,
+    stretch_v) and moved into the image by the canvas offset, like the
+    generator does.  Returns (hx, hy, rx, ry): floats, hole centre and the
+    stretched x / y radii in image px.
+    """
+    g, d = sampled["geometry"], sampled["derived"]  # dicts
+    c = g["canvas_size"] // 2  # int px, canvas centre (x = y)
+    hub_x = c + g["ptr_displacement_mag"] * math.cos(g["ptr_displacement_angle_rad"])  # float px
+    hub_y = c + g["ptr_displacement_mag"] * math.sin(g["ptr_displacement_angle_rad"])
+    hole_x = hub_x + g["hole_displacement_mag"] * math.cos(g["hole_displacement_angle_rad"])
+    hole_y = hub_y + g["hole_displacement_mag"] * math.sin(g["hole_displacement_angle_rad"])
+    hx = c + (hole_x - c) * g["stretch_h"] + d["canvas_offset_x"]  # float image px
+    hy = c + (hole_y - c) * g["stretch_v"] + d["canvas_offset_y"]
+    return hx, hy, g["hole_radius"] * g["stretch_h"], g["hole_radius"] * g["stretch_v"]
+
+
+def _point_triangle_dist(px, py, verts):
+    """float px: distance from point (px, py) to the filled triangle verts
+    (3 [x, y] floats); 0 when the point is inside it."""
+    (x1, y1), (x2, y2), (x3, y3) = verts
+    # signed areas of the point against each edge (floats); mixed signs = outside
+    s = [(px - x2) * (y1 - y2) - (x1 - x2) * (py - y2),
+         (px - x3) * (y2 - y3) - (x2 - x3) * (py - y3),
+         (px - x1) * (y3 - y1) - (x3 - x1) * (py - y1)]
+    if not (any(v < 0 for v in s) and any(v > 0 for v in s)):
+        return 0.0
+    best = math.inf  # float px, nearest edge so far
+    for (ax, ay), (bx, by) in zip(verts, verts[1:] + verts[:1]):
+        vx, vy = bx - ax, by - ay  # edge vector (floats)
+        t = max(0.0, min(1.0, ((px - ax) * vx + (py - ay) * vy) / ((vx * vx + vy * vy) or 1.0)))
+        best = min(best, math.hypot(px - (ax + t * vx), py - (ay + t * vy)))
+    return best
+
+
+def tri_hole_gaps(sampled):
+    """list[float]: per triangle item of sampled["tri_artifacts"]["items"], the
+    gap (px) between its polygon (verts) and the hole circle of _hole_circle.
+
+    The gap is distance(polygon, hole centre) - max(rx, ry): the ellipse lies
+    inside that circle, so this never overstates the true gap.  Also used by
+    tests/test_studio_e2e.py on a saved tile's params.json.
+    """
+    hx, hy, rx, ry = _hole_circle(sampled)
+    return [_point_triangle_dist(hx, hy, it["verts"]) - max(rx, ry)
+            for it in sampled["tri_artifacts"]["items"]]
+
+
+def test_clear_distance_in_schema_and_default(client):
+    # the studio builds its slider from this leaf: a float 0-80 px, default 16
+    leaf = client.get("/api/schema").json()["tri_artifacts"]["clear_distance"]  # dict
+    assert leaf["type"] == "float" and leaf["min"] == 0 and leaf["max"] == 80, leaf
+    assert leaf["help"], leaf
+    cfg = client.get("/api/config/default").json()["config"]  # dict, default config
+    assert cfg["tri_artifacts"]["clear_distance"] == 16.0
+    assert isinstance(cfg["tri_artifacts"]["clear_distance"], float)
+
+
+def test_parse_old_tri_yaml_fills_clear_distance(client):
+    # an old YAML (written before clear_distance existed) loads with the default 16
+    text = ("tri_artifacts:\n  enabled: true\n  count_range: [0, 6]\n  size_range: [15, 40]\n"
+            "  gray_range: [65, 184]\n  pixel_var: 5\n  vertex_dist_range: [0.3, 1.0]\n")
+    r = client.post("/api/config/parse", json={"text": text})
+    assert r.status_code == 200, r.json()
+    body = r.json()  # dict {config, warnings}
+    assert body["config"]["tri_artifacts"]["clear_distance"] == 16.0
+    assert not [w for w in body["warnings"] if w.startswith("tri_artifacts")], body["warnings"]
+
+
+def test_generate_keeps_triangles_off_hole(client, tmp_path):
+    # 6 triangles per image, a big hub (so a big hole) and a 40 px clear zone
+    cfg = copy.deepcopy(v7_config.default_config())  # dict, request config
+    cfg["tri_artifacts"]["count_range"] = [6, 6]
+    cfg["geometry"]["hub_ratio_range"] = [0.5, 0.5]
+    cfg["tri_artifacts"]["clear_distance"] = 40.0
+    out = str(tmp_path / "clear")  # str, absolute output folder
+    r = client.post("/api/generate", json=_gen_body(out, 4, config=cfg, save_params=True))
+    assert r.status_code == 202, r.json()
+    assert _wait_state(client, {"done", "error", "cancelled"})["state"] == "done"
+    import yaml
+    with open(os.path.join(out, "config.yaml"), encoding="utf-8") as f:
+        written = yaml.safe_load(f)  # dict, the dataset's config.yaml
+    assert written["tri_artifacts"]["clear_distance"] == 40.0
+    recs = _read_params_lines(out)  # list[dict], one per image
+    assert len(recs) == 4
+    for rec in recs:
+        tri = rec["sampled"]["tri_artifacts"]  # dict
+        assert tri["n"] == 6 and len(tri["items"]) == 6, tri
+        for it in tri["items"]:
+            assert {"tries", "trimmed", "verts"} <= set(it), it
+            assert isinstance(it["tries"], int) and isinstance(it["trimmed"], bool), it
+            assert len(it["verts"]) == 3 and all(len(v) == 2 for v in it["verts"]), it
+            assert it["placed"] is True and it["pixels"] >= 1, it
+            # a trimmed triangle used every try and is painted only up to the zone,
+            # so its full polygon may reach it; a placed-whole one may not
+            assert 1 <= it["tries"] <= 64 and (it["tries"] == 64 or not it["trimmed"]), it
+        gaps = tri_hole_gaps(rec["sampled"])  # list[float] px, one per triangle
+        for it, gap in zip(tri["items"], gaps):
+            if not it["trimmed"]:
+                assert gap >= 40.0 - TRI_HOLE_SLACK, (rec["filename"], gap, it)
