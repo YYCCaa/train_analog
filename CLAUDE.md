@@ -1,8 +1,9 @@
 # train_dial
 
 Analog-dial autocalibration: synthetic dial generators (v3..v7), tip / ellipse models, TFLite export, and four
-local web apps (`tip_webapp/`, `grayscale_webapp/`, `studio/`, and `val_viewer/`: best / worst n TipNet v9 val
-images with heatmaps). Data and training runs live outside the repo in
+local web apps (`tip_webapp/`, `grayscale_webapp/`, `studio/`, and `val_viewer/`: best / worst n TipNet v9
+images of the val / train / all set with heatmaps, plus each image's saved parameters when the dataset was
+generated with `--save-params` / the studio's "save parameters"). Data and training runs live outside the repo in
 `../train_dial_data` (`sv9_150k`, `runs/`).
 
 ## Tests
@@ -37,8 +38,8 @@ and written to tmp_path / tempfile.
 | grayscale converter | grayscale_webapp/app/converter.py | `python -m pytest -q grayscale_webapp/tests/test_converter.py` | 60 s |
 | grayscale API | grayscale_webapp/app/main.py | `python -m pytest -q grayscale_webapp/tests/test_api.py` | 60 s |
 | grayscale browser E2E | grayscale_webapp/ (server + static) | `python -m pytest -q grayscale_webapp/tests/test_e2e_browser.py` | 300 s |
-| val_viewer API | val_viewer/app/*.py, val_viewer/__main__.py, train_v9_tip.py | `python -m pytest -q val_viewer/tests/test_api.py` | 300 s |
-| val_viewer browser E2E | val_viewer/ (server + static) | `python -m pytest -q val_viewer/tests/test_e2e_browser.py` | 600 s |
+| val_viewer API | val_viewer/app/*.py, val_viewer/__main__.py, train_v9_tip.py, generate_synthetic_v7_mp.py (params.jsonl), v7_config.py | `python -m pytest -q val_viewer/tests/test_api.py` | 300 s |
+| val_viewer browser E2E | val_viewer/ (server + static), generate_synthetic_v7_mp.py (params.jsonl), v7_config.py | `python -m pytest -q val_viewer/tests/test_e2e_browser.py` | 600 s |
 
 Not parallel-safe:
 - `tests/test_studio_e2e.py` binds the fixed port 8799.
