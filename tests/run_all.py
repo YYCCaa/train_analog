@@ -40,7 +40,7 @@ from typing import IO, Callable
 # SPLIT: dict[str, int], test file (root-relative posix path) -> number of shards K it runs as (K units)
 SPLIT = {
     "tests/test_v7_render.py": 8,
-    "val_viewer/tests/test_api.py": 4,
+    "val_viewer/tests/test_api.py": 2,
     "tests/test_export_v9_tflite.py": 6,
     "tests/test_train_v9.py": 3,
     "tests/test_v7_gray_generator.py": 2,
@@ -50,15 +50,17 @@ SPLIT = {
 # NEVER_SPLIT: frozenset[str], files that must run as one process (fixed port 8799; its server may build the frontend)
 NEVER_SPLIT = frozenset({"tests/test_studio_e2e.py"})
 # WEIGHT: dict[str, float], expected seconds per test file (root-relative posix path) when run alone, whole
+# (measured 2026-10-27; a file's shards each get weight / K)
 WEIGHT = {
-    "tests/test_v7_render.py": 290,
-    "val_viewer/tests/test_api.py": 130,
-    "tests/test_export_v9_tflite.py": 90,
+    "tests/test_v7_render.py": 205,
+    "tests/test_export_v9_tflite.py": 106,
     "tests/test_studio_e2e.py": 75,
-    "tests/test_train_v9.py": 65,
+    "tests/test_train_v9.py": 62,
     "tests/test_train_gray.py": 48,
-    "val_viewer/tests/test_e2e_browser.py": 40,
+    "val_viewer/tests/test_api.py": 28,
+    "val_viewer/tests/test_e2e_browser.py": 26,
     "tip_webapp/tests/test_e2e_browser.py": 22,
+    "tests/test_run_all.py": 18,
     "tests/test_v7_look.py": 15,
     "tests/test_v7_gray_generator.py": 15,
     "tests/test_studio_api.py": 8,
