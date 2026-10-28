@@ -43,8 +43,9 @@ Render pipeline (order and semantics unchanged from the old luma-port v7):
   │    capped per image so no surviving pixel saturates              │
   │ 10 outer annulus fill, rim band                                  │
   │ 11 hierarchical (block + pixel) noise inside outer ring          │
-  │ 12 triangle artifacts: centres drawn from B minus pointer + hole │
-  │    (every triangle placed)                                       │
+  │ 12 triangle artifacts, every pixel > d = clear_distance from the │
+  │    pointer + hub + hole: centre from B minus that zone Z_d; one  │
+  │    reaching Z_d is re-centred whole (<= 64 tries, then trimmed)  │
   │ 13 black outside outer ring; erase overlay over pointer;         │
   │    composite overlay; apply shadow out = round(in * (1 - d))     │
   │    (d zeroed outside the dial face, on the rim, pointer, hole)   │
@@ -210,21 +211,40 @@ Each is one random() (random.uniform), so the jitter stream's draws are
 unchanged.  params["jitter"] records the factors, <kind>_max (None when
 unbounded) and capped (dict of bool per kind: the range was shortened).
 
-Triangle artifacts (step 12): the centre is ONE draw from the valid set
-V = inside B & off the (stretched) pointer and hole, row-major flat index
-randrange(|V|); the triangle (size, 3 vertices as before) is translated so its
-centroid sits on the centre, which is always inside it:
+Triangle artifacts (step 12), d = tri_artifacts.clear_distance.  P = the
+stretched (cut) pointer mask incl. the hub disc | the stretched hole ellipse;
+Z_d = the pixels whose centre lies within d (Euclidean, pixel centres) of a P
+pixel (clear_zone; Z_0 = P); V = inside B & ~Z_d, the centre domain and the
+paint clip.  Per triangle the draws are, in order: gray, centre (ONE draw from
+V, row-major flat index randrange(|V|)), size, 3 vertices (angle, distance);
+the triangle is translated so its centroid sits on the centre, which is always
+inside it.  With d > 0 the WHOLE raster must clear Z_d, else only the centre
+is redrawn (one more randrange, same shape) and the triangle moved there:
 
-        V (inside B, off pointer)        centre c ∈ V, centroid G := c
-       ┌──────────────────────┐               ●
-       │  ░░░░░  ▲            │              ╱ ╲
-       │ ░░░░░░ ╱█╲ pointer   │             ╱ c ╲    painted = triangle ∩ V
-       │  ░░░░ ╱███╲          │            ●──────●  (empty, sub-pixel: c alone)
-       └──────────────────────┘
+        try 1: reaches Z_d                 try k: clears Z_d, painted whole
+       ┌──────────────────────────┐        ┌──────────────────────────┐
+       │    ░░░░░░░░░░            │        │    ░░░░░░░░░░            │
+       │  ░░░░  ▲  ░░░░           │        │  ░░░░  ▲  ░░░░      ▲    │
+       │  ░░░  ╱█╲  ░░░ ▲         │        │  ░░░  ╱█╲  ░░░     ╱c╲   │
+       │  ░░  ╱███╲  ░░╱c╲        │   ──►  │  ░░  ╱███╲  ░░    ╱───╲  │
+       │  ░░░ (hub)  ░╱───╲       │        │  ░░░ (hub)  ░░░          │
+       │    ░░░░░░░░░░            │        │    ░░░░░░░░░░            │
+       └──────────────────────────┘        └──────────────────────────┘
+        █ P   ░ Z_d minus P (d px wide)   c ∈ V = B minus Z_d, centroid G := c
 
-so every triangle is placed (items[i].placed True, items[i].pixels >= 1).  V
-depends on where B sits, so triangles do not follow the displacement as a pure
-translation.  The per-triangle numpy noise is drawn for every triangle.
+    try 1 .. 64: raster ∩ Z_d = ∅ -> painted = raster ∩ B (whole, trimmed False)
+    all 64 reach Z_d             -> painted = 64th raster ∩ V (trimmed True)
+    (painted empty, sub-pixel: the centre pixel alone, which is in V)
+
+d = 0 skips the fit check: no redraws, the triangles are clipped at P, the old
+placement bit for bit.  The redraws come after the vertex draws, so only the
+tri stream changes (later triangles' draws shift); every other section is
+untouched.  Every triangle is placed (items[i].placed True, pixels >= 1),
+except when V is empty (Z_d covers B): then no centre is drawn, nothing is
+painted (placed False, pixels 0, tries 0) and its gray / size / vertex draws
+are still made.  V depends on where B sits, so triangles do not follow the
+displacement as a pure translation.  The per-triangle numpy noise is drawn for
+every triangle.
 
 Reflections and glares sit on the cover glass.  Each item takes a random
 ASCII glyph (GLYPHS = A-Z a-z 0-9) in a random available font (GLYPH_FONTS,
@@ -283,7 +303,11 @@ bool, str, list); positions are image px unless named otherwise.
                    capped {brightness, contrast, sharpness} (bool)
     hier_noise     block_min, block_max, block_std (of the block offsets)
     tri_artifacts  enabled, count_drawn, n, items[n] {gray, center_x,
-                   center_y, size, placed (always True), pixels}
+                   center_y, size, placed (False only when V is empty),
+                   pixels (painted), tries (centre draws: 1 at d = 0, <= 64,
+                   0 when V is empty), trimmed (bool: all 64 tries reached
+                   Z_d, the last one painted trimmed), verts (3 [x, y], the
+                   triangle's vertices at its final centre)}
     reflections    active, count_drawn, n, items[n] {char, font, size,
                    rotation, aspect, shear, P, px, py, warp_strength, g,
                    center_x, center_y, darken}
@@ -323,6 +347,9 @@ NUM_DIGITS = 10  # digits on the dial face (int)
 DEG_PER_DIGIT = 360.0 / NUM_DIGITS  # angular pitch of the digits (float, deg)
 SHADOW_ARC_LEVEL = 128  # mask level (int, of 255) of the dial-circle shadow arc: 0.5 x the pointer
 SHADOW_HUB_SLICES = 8  # K (int): slices of the hub-shadow sweep, each blurred with its own sigma
+# centre draws (int) a triangle artifact gets to clear the zone Z_d (first one
+# included); when all fail, the last try is drawn trimmed at Z_d
+TRI_MAX_TRIES = 64
 
 # RNG stream names (tuple[str, ...]): every config section that draws random
 # values, plus "angle" for the pointer angle (canvas/dataset draw nothing).
@@ -1777,6 +1804,77 @@ def _glass_effects(img, cfg, rngs, inside_outer, bcx, bcy, b_radius, tip, xs, ys
     return Image.fromarray(np.clip(np.rint(work), 0, 255).astype(np.uint8))
 
 
+# ── triangle artifacts (step 12) ──────────────────────────────────────────
+
+def clear_zone(blocked, d):
+    """Z_d: the pixels whose centre lies within Euclidean distance d of the
+    centre of a blocked pixel.
+
+    blocked: (H, W) bool, the set P; d: float px >= 0.  Returns a new (H, W)
+    bool, Z_d = {q : min over p in P of |q - p| <= d}; Z_d == P for d < 1.
+    Exact disc dilation in numpy: the disc of radius d is a stack of
+    horizontal runs, row offset dy in [-r, r] (r = floor(d)) with half-width
+    k(dy) = floor(sqrt(d^2 - dy^2)):
+
+        dy -2   · · ▓ ▓ ▓ · ·   k = 1        (d = 2.5: every (dx, dy) with
+        dy -1   · ▓ ▓ ▓ ▓ ▓ ·   k = 2         dx^2 + dy^2 <= 6.25)
+        dy  0   · ▓ ▓ ● ▓ ▓ ·   k = 2
+        dy +1   · ▓ ▓ ▓ ▓ ▓ ·   k = 2
+        dy +2   · · ▓ ▓ ▓ · ·   k = 1
+
+    so Z_d = OR over dy of (P grown along x by k(dy), one row-cumsum
+    difference per distinct k) shifted by dy rows.  The work is confined to
+    P's bounding box grown by r.
+    """
+    zone = blocked.copy()  # (H, W) bool, Z_d; starts as P
+    r = int(math.floor(d))  # int px, largest row / column offset inside the disc
+    if r < 1 or not blocked.any():
+        return zone
+    H, W = blocked.shape
+    rows = np.flatnonzero(blocked.any(axis=1))  # (n,) int64, rows holding P
+    cols = np.flatnonzero(blocked.any(axis=0))  # (m,) int64, columns holding P
+    y0, y1 = max(int(rows[0]) - r, 0), min(int(rows[-1]) + r + 1, H)  # int, crop rows [y0, y1)
+    x0, x1 = max(int(cols[0]) - r, 0), min(int(cols[-1]) + r + 1, W)  # int, crop cols [x0, x1)
+    sub = blocked[y0:y1, x0:x1]  # (h, w) bool, P inside the crop
+    h, w = sub.shape
+    # row prefix counts of sub padded with r empty columns on each side,
+    # (h, w + 2r + 1) int32: cs[:, j] = # P pixels in padded columns [0, j)
+    cs = np.zeros((h, w + 2 * r + 1), dtype=np.int32)
+    cs[:, r + 1:r + 1 + w] = np.cumsum(sub, axis=1, dtype=np.int32)
+    cs[:, r + 1 + w:] = cs[:, r + w:r + w + 1]
+    grown = np.zeros((h, w), dtype=bool)  # (h, w) bool, Z_d inside the crop
+    runs = {}  # dict[int, (h, w) bool]: P grown along x by half-width k
+    d2 = float(d) * float(d)  # float px^2
+    for dy in range(-r, r + 1):
+        if abs(dy) >= h:  # row offset past the crop (a mask shorter than r rows)
+            continue
+        k = math.isqrt(int(math.floor(d2 - dy * dy)))  # int px, run half-width at this row offset
+        if k not in runs:
+            # a P pixel within [x - k, x + k] of column x, on the same row
+            runs[k] = (cs[:, r + k + 1:r + k + 1 + w] - cs[:, r - k:r - k + w]) > 0
+        run = runs[k]
+        if dy >= 0:  # Z row y gets P row y - dy
+            grown[dy:] |= run[:h - dy]
+        else:
+            grown[:h + dy] |= run[-dy:]
+    zone[y0:y1, x0:x1] = grown
+    return zone
+
+
+def _tri_raster(offs, gx, gy, tcx, tcy, size2):
+    """One artifact triangle with its centroid on the centre (tcx, tcy).
+
+    offs: list of 3 (dx, dy) float vertex offsets from the draw point; (gx, gy):
+    float, their centroid; (tcx, tcy): int canvas px; size2: canvas (C, C).
+    Returns (verts, raster): verts, list of 3 (x, y) float canvas px; raster,
+    (C, C) bool, Pillow's polygon fill of verts (no clipping).
+    """
+    verts = [(tcx + dx - gx, tcy + dy - gy) for dx, dy in offs]  # 3 (x, y) float vertices
+    tri_mask = Image.new("L", size2, 0)  # "L" (C, C) polygon mask
+    ImageDraw.Draw(tri_mask).polygon(verts, fill=255)
+    return verts, np.array(tri_mask) > 127
+
+
 def render_image(cfg, image_seed):
     """Render one dial from cfg and an image seed. Pure: no I/O, no global RNG.
 
@@ -2094,9 +2192,10 @@ def render_image(cfg, image_seed):
     ch[inside_outer] += combined[inside_outer]
     arr = np.clip(ch, 0, 255).astype(np.uint8)
 
-    # --- 12 adversarial triangle artifacts (avoid pointer + hole) ---
+    # --- 12 adversarial triangle artifacts (kept clear of pointer + hub + hole) ---
     ptr_mask_s = ptr_mask.transform(size2, Image.AFFINE, affine, resample=Image.NEAREST)
-    ptr_blocked = np.array(ptr_mask_s) > 127  # (C, C) bool, stretched pointer
+    # P, (C, C) bool: stretched (cut) pointer incl. the hub disc, | the hole
+    ptr_blocked = np.array(ptr_mask_s) > 127
     s_hole_cx = cx + (hole_cx - cx) * stretch_h
     s_hole_cy = cy + (hole_cy - cy) * stretch_v
     ptr_blocked |= (((xs - s_hole_cx) / max(hole_r * stretch_h, 1)) ** 2
@@ -2108,19 +2207,29 @@ def render_image(cfg, image_seed):
     rec["tri_artifacts"] = {"enabled": bool(T["enabled"]), "count_drawn": n_tris}
     if not T["enabled"]:
         n_tris = 0
-    tri_items = []  # list[dict], one record per triangle (gray, centre, size, placed, pixels)
+    # list[dict], one record per triangle (gray, centre, size, placed, pixels,
+    # tries, trimmed, verts)
+    tri_items = []
     rec["tri_artifacts"].update(n=n_tris, items=tri_items)
     tv = T["pixel_var"]
-    # V, (C, C) bool: inside B and off the pointer + hole.  B sits where the
-    # displacement puts it, so the centres depend on the displacement: the
-    # triangles are the one content layer that is not a pure translation
-    allowed = inside_outer & ~ptr_blocked
+    clear = float(T["clear_distance"])  # float px, d: no triangle pixel within d of P
+    # Z_d, (C, C) bool: pixels within d (pixel-centre Euclidean) of P; d = 0 is
+    # P itself (the old placement, no fit check)
+    zone = clear_zone(ptr_blocked, clear) if clear > 0 else ptr_blocked
+    # V, (C, C) bool: inside B and off Z_d, the centre domain and the paint
+    # clip.  B sits where the displacement puts it, so the centres depend on
+    # the displacement: the triangles are the one content layer that is not a
+    # pure translation
+    allowed = inside_outer & ~zone
     v_idx = np.flatnonzero(allowed)  # (|V|,) int64, row-major flat indices of V
     for _ in range(n_tris):
         tri_gray = trng.randint(*T["gray_range"])  # int mean gray
-        # centre drawn from V (ONE draw); row-major flat index -> (row, col)
+        # centre drawn from V (ONE draw); row-major flat index -> (row, col).
+        # V empty (Z_d covers B): no draw, the canvas centre is recorded and
+        # nothing is painted (allowed is empty)
         flat = int(v_idx[trng.randrange(len(v_idx))]) if len(v_idx) else \
             cy * canvas_size + cx  # int, flat canvas index of the centre
+        tries = 1 if len(v_idx) else 0  # int, centre draws used
         tcy, tcx = divmod(flat, canvas_size)  # int px, centre row / column
         sz = trng.randint(*T["size_range"])  # int px
         offs = []  # list of 3 (dx, dy) float tuples, vertex offsets from the draw point
@@ -2131,15 +2240,29 @@ def render_image(cfg, image_seed):
         # translate so the triangle's CENTROID sits on the centre (the centroid
         # is always inside the triangle, so the centre pixel is a valid spot)
         gx, gy = sum(o[0] for o in offs) / 3.0, sum(o[1] for o in offs) / 3.0  # float, centroid offset
-        verts = [(tcx + dx - gx, tcy + dy - gy) for dx, dy in offs]  # 3 (x, y) float vertices
-        tri_mask = Image.new("L", size2, 0)
-        ImageDraw.Draw(tri_mask).polygon(verts, fill=255)
-        valid = (np.array(tri_mask) > 127) & allowed  # (C, C) bool
+        # 3 (x, y) float vertices, (C, C) bool unclipped raster
+        verts, tri_px = _tri_raster(offs, gx, gy, tcx, tcy, size2)
+        trimmed = False  # bool, all TRI_MAX_TRIES centres reached Z_d: last one trimmed
+        if clear > 0 and len(v_idx):
+            # the WHOLE raster must clear Z_d; otherwise redraw only the centre
+            # (one randrange per retry, after the vertex draws) and move the
+            # same shape there
+            hit = bool((tri_px & zone).any())  # bool, the raster reaches Z_d
+            while hit and tries < TRI_MAX_TRIES:
+                flat = int(v_idx[trng.randrange(len(v_idx))])
+                tries += 1
+                tcy, tcx = divmod(flat, canvas_size)
+                verts, tri_px = _tri_raster(offs, gx, gy, tcx, tcy, size2)
+                hit = bool((tri_px & zone).any())
+            trimmed = hit
+        valid = tri_px & allowed  # (C, C) bool, painted pixels (= tri_px & B when it fits)
         if not valid.any():  # sub-pixel triangle: paint the centre pixel alone
             valid[tcy, tcx] = bool(allowed[tcy, tcx])
         tri_items.append({"gray": tri_gray, "center_x": tcx, "center_y": tcy, "size": sz,
-                          # always True (V is never empty: B minus the pointer)
-                          "placed": bool(valid.any()), "pixels": int(valid.sum())})
+                          # False only when V is empty (Z_d covers B)
+                          "placed": bool(valid.any()), "pixels": int(valid.sum()),
+                          "tries": tries, "trimmed": trimmed,
+                          "verts": [list(v) for v in verts]})
         # drawn for every triangle, so the numpy stream's draw count is fixed
         noise = tnp.integers(-tv, tv + 1, size2, dtype=np.int16)  # (C, C) int16 per-pixel fill noise
         arr[valid] = np.clip(tri_gray + noise, 0, 255).astype(np.uint8)[valid]
@@ -2198,6 +2321,8 @@ def render_image(cfg, image_seed):
         for it in rec[name]["items"]:
             it["center_x"] += off_x
             it["center_y"] += off_y
+    for it in rec["tri_artifacts"]["items"]:
+        it["verts"] = [[x + off_x, y + off_y] for x, y in it["verts"]]  # 3 [x, y] float image px
     rec["derived"] = {"img_size": img_size, "canvas_offset_x": off_x, "canvas_offset_y": off_y,
                       "dial_rx": dial_rx, "dial_ry": dial_ry,
                       "outer_rx": outer_rx, "outer_ry": outer_ry,
