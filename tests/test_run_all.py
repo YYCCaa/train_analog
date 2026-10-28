@@ -109,7 +109,11 @@ def load_runner_module():
     """Import tests/run_all.py by path (module object), to read its SPLIT table without running anything."""
     spec = importlib.util.spec_from_file_location("run_all_under_test", RUNNER)
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    sys.modules[spec.name] = mod  # dataclasses resolve their (postponed) annotations through sys.modules
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.modules.pop(spec.name, None)
     return mod
 
 
