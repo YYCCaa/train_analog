@@ -3,7 +3,9 @@
 Covers:
   - pick_viable_ink_color picks dark on bright BG, bright on dark BG
   - pick_viable_ink_color avoids dominant hues
-  - sample_params matches v3 byte-for-byte under the same seed
+  - sample_params stays inside v4's own ranges (2000 seeds)
+  - sample_params keeps the rotated bezel inside the image (AABB + outline)
+  - the ranges v4 shares with v3 are equal; v4's A_RANGE is narrower
 """
 
 import math
@@ -67,24 +69,86 @@ def test_pick_viable_ink_color_empty_falls_back():
     assert color == (128, 128, 128)
 
 
-def test_sample_params_geometry_matches_v3():
-    """v4's sample_params is verbatim from v3 by design.  This regression
-    test fails if anyone touches the geometric sampler in either copy."""
+# Number of seeds swept by the sample_params tests.  int.
+N_SEEDS = 2000
+# Float slack for range / containment comparisons (px or rad).  float.
+EPS = 1e-6
+
+
+def _samples():
+    """Draw one sample_params() dict per seed in range(N_SEEDS).
+
+    Returns: list[dict[str, float]] of length N_SEEDS, keys cx, cy, a, b,
+    theta, phi_0, pointer_value, outer_scale.
+    """
+    out = []
+    for seed in range(N_SEEDS):
+        random.seed(seed)
+        np.random.seed(seed)
+        out.append(v4.sample_params())
+    return out
+
+
+def test_sample_params_within_v4_ranges():
+    """Every drawn parameter lies in v4's own *_RANGE constants; the centre
+    clamp only moves cx / cy toward the image middle, so the displacement
+    stays inside CX_DISP_RANGE / CY_DISP_RANGE."""
+    half = v4.IMG_SIZE / 2  # float, image centre coordinate (px)
+    for p in _samples():
+        assert v4.A_RANGE[0] - EPS <= p["a"] <= v4.A_RANGE[1] + EPS
+        ratio = p["b"] / p["a"]  # float, b / a
+        assert v4.B_RATIO_RANGE[0] - EPS <= ratio <= v4.B_RATIO_RANGE[1] + EPS
+        for key, rng in (("theta", v4.THETA_RANGE),
+                         ("phi_0", v4.PHI_0_RANGE),
+                         ("pointer_value", v4.POINTER_VALUE_RANGE),
+                         ("outer_scale", v4.OUTER_SCALE_RANGE)):
+            assert rng[0] - EPS <= p[key] <= rng[1] + EPS, (key, p[key])
+        assert v4.CX_DISP_RANGE[0] - EPS <= p["cx"] - half <= v4.CX_DISP_RANGE[1] + EPS
+        assert v4.CY_DISP_RANGE[0] - EPS <= p["cy"] - half <= v4.CY_DISP_RANGE[1] + EPS
+
+
+def test_sample_params_bezel_fits_inside_image():
+    """The documented guarantee: the rotated bezel ellipse lies fully inside
+    [0, IMG_SIZE] on each axis whenever it can (AABB extent <= IMG_SIZE),
+    checked by the independent AABB formula and by 64 outline points.
+
+    On an axis where the bezel is wider than the image (half-extent >
+    IMG_SIZE / 2; true for ~half the seeds with v4's A_RANGE) no centre can
+    satisfy it; v4 then pins the centre so the bezel's low edge is flush
+    with 0 (centre == half-extent) and it overflows the high side only.
+    Both regimes must actually occur in the sweep."""
+    size = v4.IMG_SIZE  # int, image side (px)
+    t = np.linspace(0, 2 * np.pi, 64, endpoint=False)  # (64,) outline angles
+    n_fit = 0  # int, axis-samples whose bezel fits the image
+    n_wide = 0  # int, axis-samples wider than the image
+    for p in _samples():
+        A = p["a"] * p["outer_scale"]  # float, bezel semi-major (px)
+        B = p["b"] * p["outer_scale"]  # float, bezel semi-minor (px)
+        c, s = math.cos(p["theta"]), math.sin(p["theta"])
+        hx = abs(A * c) + abs(B * s)  # float, AABB half-width (px)
+        hy = abs(A * s) + abs(B * c)  # float, AABB half-height (px)
+        # (64,) outline coordinates of the rotated ellipse
+        xs = p["cx"] + A * np.cos(t) * c - B * np.sin(t) * s
+        ys = p["cy"] + A * np.cos(t) * s + B * np.sin(t) * c
+        for centre, half, coords in ((p["cx"], hx, xs), (p["cy"], hy, ys)):
+            if 2 * half <= size:
+                n_fit += 1
+                assert centre - half >= -EPS and centre + half <= size + EPS, p
+                assert coords.min() >= -EPS and coords.max() <= size + EPS, p
+            else:
+                n_wide += 1
+                assert centre == pytest.approx(half), p  # flush with low edge
+                assert coords.min() >= -EPS, p
+    assert n_fit > 0 and n_wide > 0, (n_fit, n_wide)
+
+
+def test_geometry_ranges_shared_with_v3():
+    """The seven ranges v4 did not narrow are identical to v3's; v4's A_RANGE
+    is deliberately narrower and sits inside v3's."""
     import generate_synthetic_v3 as v3
-    import generate_synthetic_v4 as v4_mod
 
-    SEED = 42
-    GEOMETRIC_KEYS = ["cx", "cy", "a", "b", "theta", "phi_0", "outer_scale"]
-
-    random.seed(SEED)
-    np.random.seed(SEED)
-    v3_params = v3.sample_params()
-
-    random.seed(SEED)
-    np.random.seed(SEED)
-    v4_params = v4_mod.sample_params()
-
-    for key in GEOMETRIC_KEYS:
-        assert v4_params[key] == pytest.approx(v3_params[key]), (
-            f"v4 sample_params drifted from v3 on key {key!r}: "
-            f"v3={v3_params[key]} v4={v4_params[key]}")
+    for name in ("CX_DISP_RANGE", "CY_DISP_RANGE", "B_RATIO_RANGE",
+                 "THETA_RANGE", "PHI_0_RANGE", "POINTER_VALUE_RANGE",
+                 "OUTER_SCALE_RANGE"):
+        assert getattr(v4, name) == getattr(v3, name), name
+    assert v3.A_RANGE[0] <= v4.A_RANGE[0] < v4.A_RANGE[1] <= v3.A_RANGE[1]
