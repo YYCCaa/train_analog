@@ -40,6 +40,7 @@ and written to tmp_path / tempfile.
 | grayscale browser E2E | grayscale_webapp/ (server + static) | `python -m pytest -q grayscale_webapp/tests/test_e2e_browser.py` | 300 s |
 | val_viewer API | val_viewer/app/*.py, val_viewer/__main__.py, train_v9_tip.py, generate_synthetic_v7_mp.py (params.jsonl), v7_config.py | `python -m pytest -q val_viewer/tests/test_api.py` | 300 s |
 | val_viewer browser E2E | val_viewer/ (server + static), generate_synthetic_v7_mp.py (params.jsonl), v7_config.py | `python -m pytest -q val_viewer/tests/test_e2e_browser.py` | 600 s |
+| suite runner | tests/run_all.py, tests/shard.py | `python -m pytest -q tests/test_run_all.py` | 300 s |
 
 Not parallel-safe:
 - `tests/test_studio_e2e.py` binds the fixed port 8799.
