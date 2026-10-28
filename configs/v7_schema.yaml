@@ -134,8 +134,9 @@ hier_noise:
 
 tri_artifacts:
   enabled: {type: bool, min: 0, max: 1, step: 1, help: "Draw adversarial triangle artifacts."}
-  count_range: {type: int_range, min: 0, max: 20, step: 1, help: "Triangles per image. Every triangle is placed: its centre is drawn inside the boundary, off the pointer and hole."}
+  count_range: {type: int_range, min: 0, max: 20, step: 1, help: "Triangles per image. Every triangle is placed whole: its centre is drawn inside the boundary, more than clear_distance from the pointer, hub circle and mounting hole, and redrawn (shape kept, up to 64 tries) until the whole triangle is that far; if all 64 fail, the last try is drawn trimmed at that distance. None is drawn when that zone covers the whole boundary."}
   size_range: {type: int_range, min: 3, max: 80, step: 1, help: "Triangle base length (px)."}
   gray_range: {type: int_range, min: 0, max: 255, step: 1, help: "Triangle mean gray level."}
   pixel_var: {type: int, min: 0, max: 32, step: 1, help: "Per-pixel noise around the triangle mean (+/-)."}
   vertex_dist_range: {type: float_range, min: 0.1, max: 1.5, step: 0.01, help: "Vertex distance as a fraction of the triangle size."}
+  clear_distance: {type: float, min: 0, max: 80, step: 0.5, help: "No triangle pixel within this distance of the pointer, hub circle or mounting hole (px); 0 = only off them."}

@@ -357,6 +357,228 @@ def test_triangles_paint_off_pointer_inside_boundary():
         assert not (foot & _erode(ptr, 2)).any(), seed  # never on the pointer body (2 px: bicubic stretch spread)
 
 
+# ── C2: triangles keep tri_artifacts.clear_distance from the pointer ───────
+#
+#   ░ Z_d = pointer + hub + hole, grown by d
+#       ┌──────────────────────────────┐
+#       │ B      ░░░░░░░░░░            │    a triangle whose raster reaches Z_d
+#       │      ░░░░  ▲  ░░░░      ▲    │    is moved WHOLE to a new centre (same
+#       │     ░░░   ╱█╲   ░░░    ╱ ╲   │    shape), not bitten; after 64 failed
+#       │     ░░░  (hub)  ░░░   ╱───╲  │    tries the 64th is drawn trimmed at
+#       │      ░░░░░░░░░░░░░           │    Z_d.  Right: > d away, ok
+#       └──────────────────────────────┘
+
+# "section.key" -> value pins (dict): six triangles, no exposure jitter, no blur,
+# so the gray-0 / gray-255 pixel difference is exactly the painted triangle set
+_TRI_CLEAR = {"tri_artifacts.count_range": [6, 6], **_NO_JITTER,
+              "background.dial_circle_blur": False}
+# px (float) the RENDERED pointer footprint may reach past the set P_d the
+# generator measures from for d > 0 (P | P_drawn: the pointer + hub + hole as
+# drawn, stretched bicubic like the image, any coverage).  What is left is the
+# bicubic kernel's negative lobes: a pixel 1-2 px outside an edge gets a small
+# overshoot (it differs between pointer gray 0 and 255) while its coverage is
+# <= 0.  Measured worst over 40 seeds: 2.24 px (offset (2, 1)) with the default
+# stretch, 0.00 px with the stretch off (tmp_smoke/testlogs/tri-clear-gen,
+# label spread2); + 0.25 px margin
+_PTR_SPREAD = 2.5
+
+
+def _tri_footprint(cfg, seed):
+    """Triangle pixels of one render and that render.
+
+    cfg is rendered with tri gray_range [0, 0] and [255, 255]: both ranges have
+    width 1, so the tri stream makes the same draws and places the same
+    triangles, and the pixels that differ are the painted triangle pixels
+    (exact when blur and jitter are off).  Returns (foot (256, 256) bool,
+    RenderResult of the gray-0 render)."""
+    lo, hi = copy.deepcopy(cfg), copy.deepcopy(cfg)
+    lo["tri_artifacts"]["gray_range"] = [0, 0]
+    hi["tri_artifacts"]["gray_range"] = [255, 255]
+    a, b = g7.render_image(lo, seed), g7.render_image(hi, seed)
+    return a.image != b.image, a
+
+
+def _min_dist(a, b):
+    """Smallest pixel-centre Euclidean distance (float px) between a pixel of a
+    and a pixel of b, both (H, W) bool; 0.0 when they overlap, inf when either
+    is empty.  The pixel of b nearest an outside point always has a 4-neighbour
+    outside b, so only b's 4-boundary is searched."""
+    if not a.any() or not b.any():
+        return math.inf
+    if (a & b).any():
+        return 0.0
+    by, bx = np.nonzero(b & ~_erode(b, 1))  # (m,) int64 each, b's boundary pixels
+    ay, ax = np.nonzero(a)  # (n,) int64 each
+    best = math.inf  # float, smallest squared distance so far
+    for i in range(0, len(ay), 512):
+        d2 = (ay[i:i + 512, None] - by[None]) ** 2 + (ax[i:i + 512, None] - bx[None]) ** 2
+        best = min(best, float(d2.min()))
+    return math.sqrt(best)
+
+
+def _check_clear(cfg, seeds, d):
+    """Render cfg for every seed; assert no triangle pixel within d (float px)
+    of the rendered pointer + hub + hole (minus _PTR_SPREAD).  Returns the list
+    of tri_artifacts item dicts of all renders."""
+    items = []  # list[dict], tri_artifacts.items of every render
+    for seed in seeds:
+        foot, res = _tri_footprint(cfg, seed)  # (256, 256) bool, RenderResult
+        lo = copy.deepcopy(cfg)
+        lo["tri_artifacts"]["gray_range"] = [0, 0]
+        ptr = _pointer_footprint(lo, seed)  # (256, 256) bool, pointer + hub + hole
+        dist = _min_dist(foot, ptr)  # float px
+        assert dist > d - _PTR_SPREAD, (seed, dist)
+        items += res.params["tri_artifacts"]["items"]
+    return items
+
+
+def test_triangles_keep_default_clear_distance():
+    # default clear_distance 16 -> every triangle pixel more than 16 px from the pointer
+    cfg = _cfg(**_TRI_CLEAR)
+    items = _check_clear(cfg, range(30), 16.0)
+    assert cfg["tri_artifacts"]["clear_distance"] == 16.0
+    assert len(items) == 30 * 6
+    assert all(it["placed"] is True and it["pixels"] >= 1 for it in items)
+    # the rule did work: some first centres were inside the zone and were redrawn
+    assert any(it["tries"] > 1 for it in items)
+
+
+def test_triangles_keep_large_clear_distance_all_placed():
+    # a wide zone (40 px around a big hub) still leaves room: all six placed
+    cfg = _cfg(**_TRI_CLEAR, **{"tri_artifacts.clear_distance": 40.0,
+                                "geometry.hub_ratio_range": [0.5, 0.5]})
+    items = _check_clear(cfg, range(10), 40.0)
+    assert len(items) == 10 * 6
+    for it in items:
+        assert it["placed"] is True and it["pixels"] >= 1, it
+
+
+def _poly_raster(verts):
+    """Pillow's raster of the polygon verts (3 [x, y] float image px), the way
+    the generator rasterises a triangle; (256, 256) bool."""
+    from PIL import Image, ImageDraw
+    m = Image.new("L", (IMG, IMG), 0)
+    ImageDraw.Draw(m).polygon([tuple(v) for v in verts], fill=255)
+    return np.array(m) > 127
+
+
+def _inside_b(p):
+    """Boundary B of a render as an image mask, (256, 256) bool, from its params."""
+    bx = p["derived"]["canvas_offset_x"] + p["geometry"]["canvas_size"] // 2 \
+        - p["geometry"]["displacement_x"]  # int px, B centre x (image)
+    by = p["derived"]["canvas_offset_y"] + p["geometry"]["canvas_size"] // 2 \
+        - p["geometry"]["displacement_y"]  # int px, B centre y (image)
+    orx, ory = p["derived"]["outer_rx"], p["derived"]["outer_ry"]  # float px, B radii
+    ys, xs = np.mgrid[:IMG, :IMG]
+    return ((xs - bx) / max(orx, 1)) ** 2 + ((ys - by) / max(ory, 1)) ** 2 <= 1
+
+
+def test_moved_triangle_is_painted_whole():
+    # a triangle whose first centre put it in the zone is moved, not bitten: the
+    # painted pixels are its full polygon at the final centre, clipped by B only.
+    # One triangle per image and no digits / ticks (their overlay is drawn over
+    # triangles), so the footprint is exactly that triangle.  The record read is
+    # the footprint render's own (a gray range of another width draws other
+    # triangles)
+    cfg = _cfg(**{**_TRI_CLEAR, "tri_artifacts.count_range": [1, 1], "digits.show_prob": 0.0})
+    found = 0  # int, moved triangles checked
+    for seed in range(300):
+        foot, res = _tri_footprint(cfg, seed)  # (256, 256) bool, RenderResult
+        p = res.params
+        it = p["tri_artifacts"]["items"][0]  # dict, the triangle's record
+        if it["tries"] == 1 or it["trimmed"]:
+            continue
+        whole = _poly_raster(it["verts"]) & _inside_b(p)  # (256, 256) bool, full polygon in B
+        assert whole.sum() >= 20, (seed, it)
+        assert np.array_equal(foot, whole), (seed, int(foot.sum()), int(whole.sum()))
+        assert it["pixels"] == int(whole.sum()), seed
+        found += 1
+        if found == 4:
+            break
+    assert found == 4, found
+
+
+# "section.key" -> value pins (dict): a centred dial of radius 85 in a boundary
+# B of radius 110.5, hub 42.5 px, hole 44.6 px on the hub, no stretch; with
+# clear_distance 65 the room left, V = B minus Z_d, is a ~1 px ring at B's edge
+_THIN_RING = {"geometry.stretch_h_range": [1.0, 1.0], "geometry.stretch_v_range": [1.0, 1.0],
+              "geometry.scale_range": [1.0, 1.0], "outer.scale_range": [1.3, 1.3],
+              "geometry.hub_ratio_range": [0.5, 0.5], "geometry.hole_ratio_range": [1.05, 1.05],
+              "geometry.ptr_displacement_range": [0.0, 0.0],
+              "geometry.hole_disp_range": [0.0, 0.0], "geometry.displacement_range": [0.0, 0.0]}
+
+
+def test_no_room_trims_or_skips_and_keeps_clear():
+    big = {"tri_artifacts.size_range": [80, 80]}  # dict, 80 px triangles
+    # 1) clear_distance 80 around a big hub: Z_d covers all of B, so nothing is
+    #    drawn (placed False, no centre drawn) and rendering still works
+    cfg = _cfg(**_TRI_CLEAR, **big, **{"tri_artifacts.clear_distance": 80.0,
+                                       "geometry.hub_ratio_range": [0.5, 0.5]})
+    for seed in range(5):
+        foot, res = _tri_footprint(cfg, seed)  # (256, 256) bool, RenderResult
+        assert res.image.shape == (IMG, IMG)
+        assert not foot.any(), seed
+        for it in res.params["tri_artifacts"]["items"]:
+            assert it["placed"] is False and it["trimmed"] is False, (seed, it)
+            assert it["pixels"] == 0 and it["tries"] == 0, (seed, it)
+    # 2) room left, but no whole triangle fits it: each one is trimmed after 64
+    #    tries, painted only where the zone allows (vertices 80 px from the draw
+    #    point).  Seeds 0 and 1 are left out: each holds a triangle whose three
+    #    vertex angles bunch together, so small it fits even this ring (the
+    #    angles are uniform, so no config rules such a shape out)
+    d = 65.0  # float px
+    cfg = _cfg(**_TRI_CLEAR, **big, **_THIN_RING,
+               **{"tri_artifacts.vertex_dist_range": [1.0, 1.0],
+                  "tri_artifacts.clear_distance": d})
+    items = _check_clear(cfg, range(2, 7), d)  # list[dict]
+    assert len(items) == 5 * 6
+    for it in items:
+        assert it["trimmed"] is True and it["tries"] == 64, it
+        assert it["placed"] is True and it["pixels"] >= 1, it
+
+
+def test_clear_distance_changes_only_triangles():
+    # d 0 vs 16 on the default config: same labels, every other section's params
+    # identical, d 0 never redraws.  Pixels: compared with the blur and the
+    # tick / digit overlay off, where the footprint below is exact (a probe
+    # footprint misses 1-level rounding flips in the blur tail, even dilated
+    # 2 px, and under near-opaque overlay pixels)
+    def pair(**extra):
+        """(cfg d = 0, cfg d = 16) dicts, defaults + extra overrides."""
+        return (_cfg(**extra, **{"tri_artifacts.clear_distance": 0.0}),
+                _cfg(**extra, **{"tri_artifacts.clear_distance": 16.0}))
+
+    flat, clear = pair()
+    sharp_flat, sharp_clear = pair(**{"background.dial_circle_blur": False,
+                                      "digits.show_prob": 0.0})
+    # footprint probes: the default gray range width at the extremes (same draws)
+    w = flat["tri_artifacts"]["gray_range"][1] - flat["tri_artifacts"]["gray_range"][0]  # int
+
+    def foot(cfg, seed):
+        """(256, 256) bool, pixels cfg's triangles paint (exact with the blur off)."""
+        lo, hi = copy.deepcopy(cfg), copy.deepcopy(cfg)
+        lo["tri_artifacts"]["gray_range"] = [0, w]
+        hi["tri_artifacts"]["gray_range"] = [255 - w, 255]
+        return g7.render_image(lo, seed).image != g7.render_image(hi, seed).image
+
+    moved = 0  # int, seeds whose image changed
+    for seed in range(40):
+        a, b = g7.render_image(flat, seed), g7.render_image(clear, seed)
+        assert _same_labels(a, b), seed
+        assert set(a.params) == set(b.params)
+        for sec in a.params:
+            if sec != "tri_artifacts":
+                assert a.params[sec] == b.params[sec], (seed, sec)
+        for it in a.params["tri_artifacts"]["items"]:
+            assert it["tries"] == 1 and it["trimmed"] is False, (seed, it)
+        sa, sb = g7.render_image(sharp_flat, seed), g7.render_image(sharp_clear, seed)
+        keep = ~(foot(sharp_flat, seed) | foot(sharp_clear, seed))  # (256, 256) bool
+        assert keep.sum() > 0.5 * IMG * IMG
+        assert np.array_equal(sa.image[keep], sb.image[keep]), seed
+        moved += not np.array_equal(sa.image, sb.image)
+    assert moved > 0
+
+
 # ── B: exposure jitter never saturates (capped factors) ────────────────────
 
 # "section.key" -> value pins (dict): the brief's stressed jitter config
@@ -578,7 +800,8 @@ _DEFAULT_HASHES = {
 
 def test_default_render_unchanged_by_contrast_key():
     import hashlib
-    cfg = _cfg(**{"digits.show_prob": 0.0})
+    # clear_distance 0 = the old triangle placement, so the pins hold bit for bit
+    cfg = _cfg(**{"digits.show_prob": 0.0, "tri_artifacts.clear_distance": 0.0})
     assert cfg["pointer"]["min_bg_contrast"] == 0
     for seed, want in _DEFAULT_HASHES.items():
         got = hashlib.sha256(g7.render_image(cfg, seed).image.tobytes()).hexdigest()
@@ -588,7 +811,9 @@ def test_default_render_unchanged_by_contrast_key():
 def test_edge_max_frac_one_reproduces_old_pixels():
     # edge_max_frac = 1 skips the clamp: the pre-clamp pins hold bit for bit
     import hashlib
-    cfg = _cfg(**{"digits.show_prob": 0.0, "pointer.edge_max_frac": 1.0})
+    # clear_distance 0 = the old triangle placement, so the pins hold bit for bit
+    cfg = _cfg(**{"digits.show_prob": 0.0, "pointer.edge_max_frac": 1.0,
+                  "tri_artifacts.clear_distance": 0.0})
     for seed, want in _PRE_CONTRAST_HASHES.items():
         got = hashlib.sha256(g7.render_image(cfg, seed).image.tobytes()).hexdigest()
         assert got == want, f"seed {seed}: frac-1 render changed"
