@@ -118,21 +118,21 @@ def test_heatmap_brightest_at_argmax(shared_client, shared_fake_data):
         assert np.unravel_index(lum.argmax(), lum.shape) == np.unravel_index(z.argmax(), z.shape)
 
 
-def test_rank_cache(fake_data):
-    first = open_data(fake_data)
-    second = open_data(fake_data)
+def test_rank_cache(small_fake_data):
+    first = open_data(small_fake_data)
+    second = open_data(small_fake_data)
     assert not first.cache_hit and second.cache_hit
     np.testing.assert_array_equal(first.err, second.err)
-    make_model_file(fake_data.run_dir / "tip.pth", 99)
-    third = open_data(fake_data)
+    make_model_file(small_fake_data.run_dir / "tip.pth", 99)
+    third = open_data(small_fake_data)
     assert not third.cache_hit and not np.array_equal(third.err, first.err)
-    assert open_data(fake_data).cache_hit
+    assert open_data(small_fake_data).cache_hit
     # labels.csv edit: the images file (size, mtime) is NOT touched here, so only the key can notice
-    data = open_data(fake_data)
+    data = open_data(small_fake_data)
     key_args = (data.data_dir, 0.15, data._img_path, data.weights_path, "cpu")
     stat = (os.stat(data._img_path).st_size, os.stat(data._img_path).st_mtime_ns)
     key_before = vdata.rank_key(*key_args)
-    csv = fake_data.data_dir / "labels.csv"
+    csv = small_fake_data.data_dir / "labels.csv"
     lines = csv.read_text().splitlines()
     name, x, y = lines[1].split(",")
     lines[1] = f"{name},{float(x) + 1:.3f},{y}"
@@ -141,14 +141,14 @@ def test_rank_cache(fake_data):
     assert vdata.rank_key(*key_args) != key_before
 
 
-def test_weights_fallback_and_summary(fake_data):
-    (fake_data.run_dir / "tip.pth").rename(fake_data.run_dir / "best_p99.pth")
-    assert open_data(fake_data).summary()["weights"] == "best_p99.pth"
-    shutil.copy(fake_data.run_dir / "best_p99.pth", fake_data.run_dir / "tip.pth")
-    data = open_data(fake_data)
+def test_weights_fallback_and_summary(small_fake_data):
+    (small_fake_data.run_dir / "tip.pth").rename(small_fake_data.run_dir / "best_p99.pth")
+    assert open_data(small_fake_data).summary()["weights"] == "best_p99.pth"
+    shutil.copy(small_fake_data.run_dir / "best_p99.pth", small_fake_data.run_dir / "tip.pth")
+    data = open_data(small_fake_data)
     s = data.summary()
-    err = data.err[fake_data.val_idx]  # (30,) float64 errors of the val rows
-    assert s["weights"] == "tip.pth" and s["run"] == "fake_run" and s["n_val"] == 30 and s["n"] == 30
+    err = data.err[small_fake_data.val_idx]  # (n_val,) float64 errors of the val rows
+    assert s["weights"] == "tip.pth" and s["run"] == "fake_run" and s["n_val"] == len(small_fake_data.val_idx) and s["n"] == len(small_fake_data.val_idx)
     assert s["n_over_3"] == int((err > 3).sum()) and s["n_over_7"] == int((err > 7).sum())
     assert s["p99"] == pytest.approx(np.percentile(err, 99)) and s["max_err"] == err.max()
 
@@ -176,19 +176,19 @@ def assert_error_exit(proc):
     assert len(lines) == 1 and lines[0].startswith("error:"), proc.stderr
 
 
-def test_cli(fake_data, tmp_path, capsys):
+def test_cli(small_fake_data, tmp_path, capsys):
     common = ["--cache-dir", tmp_path / "cc", "--device", "cpu"]
-    assert_error_exit(run_cli("--data-dir", tmp_path / "nope", "--run", fake_data.run_dir, *common))
+    assert_error_exit(run_cli("--data-dir", tmp_path / "nope", "--run", small_fake_data.run_dir, *common))
     empty_run = tmp_path / "empty_run"
     empty_run.mkdir()
-    assert_error_exit(run_cli("--data-dir", fake_data.data_dir, "--run", empty_run, *common))
+    assert_error_exit(run_cli("--data-dir", small_fake_data.data_dir, "--run", empty_run, *common))
     no_csv = tmp_path / "no_csv"
     no_csv.mkdir()
-    assert_error_exit(run_cli("--data-dir", no_csv, "--run", fake_data.run_dir, *common))
+    assert_error_exit(run_cli("--data-dir", no_csv, "--run", small_fake_data.run_dir, *common))
     capsys.readouterr()
-    open_data(fake_data)
-    assert re.search(r"\[rank\] 200/200", capsys.readouterr().out)
-    open_data(fake_data)
+    open_data(small_fake_data)
+    assert re.search(rf"\[rank\] {small_fake_data.n}/{small_fake_data.n}", capsys.readouterr().out)
+    open_data(small_fake_data)
     assert re.search(r"^\[rank\] cached", capsys.readouterr().out, re.M)
 
 
@@ -199,20 +199,20 @@ def only_cache_file(fd):
     return files[0]
 
 
-def test_summary_key_changes_with_weights(fake_data):
+def test_summary_key_changes_with_weights(small_fake_data):
     """Restart with the same inputs -> same key; retrained weights -> a different key."""
     from fastapi.testclient import TestClient
     from val_viewer.app.main import create_app
-    key = lambda: TestClient(create_app(open_data(fake_data))).get("/api/summary").json()["key"]
+    key = lambda: TestClient(create_app(open_data(small_fake_data))).get("/api/summary").json()["key"]
     k1 = key()
     assert isinstance(k1, str) and k1 and key() == k1
-    make_model_file(fake_data.run_dir / "tip.pth", 99)
+    make_model_file(small_fake_data.run_dir / "tip.pth", 99)
     assert key() != k1
 
 
-def test_rank_key_inputs(fake_data, tmp_path):
+def test_rank_key_inputs(small_fake_data, tmp_path):
     """The key reacts to labels.csv bytes (images file size + mtime fixed), device and trainer code."""
-    data = open_data(fake_data)
+    data = open_data(small_fake_data)
     img = data._img_path
     st = os.stat(img)
     args = dict(data_dir=data.data_dir, val_split=0.15, img_path=img, weights_path=data.weights_path)
@@ -224,37 +224,37 @@ def test_rank_key_inputs(fake_data, tmp_path):
     t1 = vdata.rank_key(device="cpu", trainer_file=trainer, **args)
     trainer.write_text("a = 2\n")
     assert vdata.rank_key(device="cpu", trainer_file=trainer, **args) != t1
-    csv = fake_data.data_dir / "labels.csv"
+    csv = small_fake_data.data_dir / "labels.csv"
     csv.write_text(csv.read_text().replace("dial_00000.png,", "dial_00000.png, ", 1))
     assert (os.stat(img).st_size, os.stat(img).st_mtime_ns) == (st.st_size, st.st_mtime_ns)
     assert vdata.rank_key(device="cpu", **args) != base
 
 
-def test_rank_cache_with_wrong_row_is_recomputed(fake_data):
-    first = open_data(fake_data)
-    f = only_cache_file(fake_data)
+def test_rank_cache_with_wrong_row_is_recomputed(small_fake_data):
+    first = open_data(small_fake_data)
+    f = only_cache_file(small_fake_data)
     with np.load(f) as z:
         arrays = {k: z[k] for k in z.files}
     assert {"tip", "err", "conf", "row", "label"} <= set(arrays)
     arrays["row"] = arrays["row"][::-1].copy()
     arrays["err"] = arrays["err"] + 100.0
     np.savez(f, **arrays)
-    again = open_data(fake_data)
+    again = open_data(small_fake_data)
     assert not again.cache_hit
     np.testing.assert_array_equal(again.err, first.err)
-    assert open_data(fake_data).cache_hit
+    assert open_data(small_fake_data).cache_hit
 
 
-def test_corrupt_rank_cache_is_recomputed(fake_data):
-    first = open_data(fake_data)
-    only_cache_file(fake_data).write_bytes(b"PK" + b"garbage" * 50)
-    again = open_data(fake_data)
+def test_corrupt_rank_cache_is_recomputed(small_fake_data):
+    first = open_data(small_fake_data)
+    only_cache_file(small_fake_data).write_bytes(b"PK" + b"garbage" * 50)
+    again = open_data(small_fake_data)
     assert not again.cache_hit
     np.testing.assert_array_equal(again.err, first.err)
     # a real npz cut in half (starts with PK, numpy raises zipfile.BadZipFile)
-    f = only_cache_file(fake_data)
+    f = only_cache_file(small_fake_data)
     f.write_bytes(f.read_bytes()[:f.stat().st_size // 2])
-    cut = open_data(fake_data)
+    cut = open_data(small_fake_data)
     assert not cut.cache_hit
     np.testing.assert_array_equal(cut.err, first.err)
 
@@ -268,9 +268,9 @@ def test_render_emits_no_deprecation_warning(shared_client):
     assert [w for w in rec if issubclass(w.category, DeprecationWarning)] == []
 
 
-def test_trainer_cache_prefix_is_abspath(fake_data):
-    open_data(fake_data)
-    prefix = os.path.abspath(fake_data.data_dir) + "_cache"
+def test_trainer_cache_prefix_is_abspath(small_fake_data):
+    open_data(small_fake_data)
+    prefix = os.path.abspath(small_fake_data.data_dir) + "_cache"
     assert all(os.path.exists(p) for p in tv.cache_paths(prefix))
 
 
@@ -296,21 +296,22 @@ def summary(client, **params):
     return r.json()
 
 
-def test_summary_per_set(client, fake_data):
-    default, val = summary(client), summary(client, set="val")
-    assert default == val and val["n"] == 30 and val["set"] == "val"
-    err = client.data.err[fake_data.val_idx]
+def test_summary_per_set(small_client, small_fake_data):
+    n_val, n_train, n_total = len(small_fake_data.val_idx), len(small_fake_data.train_idx), small_fake_data.n  # int sizes (6, 34, 40)
+    default, val = summary(small_client), summary(small_client, set="val")
+    assert default == val and val["n"] == n_val and val["set"] == "val"
+    err = small_client.data.err[small_fake_data.val_idx]
     assert val["n_over_3"] == int((err > 3).sum()) and val["p99"] == pytest.approx(np.percentile(err, 99))
-    tr, al = summary(client, set="train"), summary(client, set="all")
-    assert (tr["n"], al["n"]) == (170, 200) and (tr["set"], al["set"]) == ("train", "all")
+    tr, al = summary(small_client, set="train"), summary(small_client, set="all")
+    assert (tr["n"], al["n"]) == (n_train, n_total) and (tr["set"], al["set"]) == ("train", "all")
     for s in (val, tr, al):
-        assert (s["n_train"], s["n_val"], s["n_total"]) == (170, 30, 200)
+        assert (s["n_train"], s["n_val"], s["n_total"]) == (n_train, n_val, n_total)
     for k in ("n_over_3", "n_over_7"):
         assert al[k] == val[k] + tr[k]
-    assert al["max_err"] == client.data.err.max()
+    assert al["max_err"] == small_client.data.err.max()
     assert val["params"] == "none"
-    write_params_jsonl(fake_data)
-    assert summary(open_client(fake_data))["params"] == "saved"
+    write_params_jsonl(small_fake_data)
+    assert summary(open_client(small_fake_data))["params"] == "saved"
 
 
 def test_bad_set_422(shared_client):
@@ -348,19 +349,19 @@ def test_rows_address_images(shared_client, shared_fake_data):
     assert shared_client.get(f"/api/image/{row}.png").headers["cache-control"] == "max-age=3600"
 
 
-def test_rank_cache_all_rows(fake_data, capsys):
-    first = open_data(fake_data)
-    assert "[rank] 200/200" in capsys.readouterr().out and not first.cache_hit
-    assert first.err.shape == (N_IMAGES,) and (first.err > 0).all()
-    second = open_data(fake_data)
+def test_rank_cache_all_rows(small_fake_data, capsys):
+    first = open_data(small_fake_data)
+    assert f"[rank] {small_fake_data.n}/{small_fake_data.n}" in capsys.readouterr().out and not first.cache_hit
+    assert first.err.shape == (small_fake_data.n,) and (first.err > 0).all()
+    second = open_data(small_fake_data)
     assert second.cache_hit and re.search(r"^\[rank\] cached", capsys.readouterr().out, re.M)
     np.testing.assert_array_equal(first.err, second.err)
-    f = only_cache_file(fake_data)  # a v1-style file (val rows only) under the current name is ignored
+    f = only_cache_file(small_fake_data)  # a v1-style file (val rows only) under the current name is ignored
     with np.load(f) as z:
-        v1 = {k: z[k][fake_data.val_idx] for k in ("tip", "err", "conf", "label")}
-    np.savez(f, row=fake_data.val_idx, **v1)
-    third = open_data(fake_data)
-    assert not third.cache_hit and third.err.shape == (N_IMAGES,)
+        v1 = {k: z[k][small_fake_data.val_idx] for k in ("tip", "err", "conf", "label")}
+    np.savez(f, row=small_fake_data.val_idx, **v1)
+    third = open_data(small_fake_data)
+    assert not third.cache_hit and third.err.shape == (small_fake_data.n,)
     np.testing.assert_array_equal(third.err, first.err)
 
 
@@ -369,24 +370,25 @@ def get_params(client, row):
     return client.get(f"/api/params/{row}")
 
 
-def test_params_outcomes(fake_data):
-    c = open_client(fake_data)
+def test_params_outcomes(small_fake_data):
+    c = open_client(small_fake_data)
     r = get_params(c, 5)
     assert r.status_code == 404 and r.json()["detail"] == "no parameters saved for this dataset"
 
-    write_params_jsonl(fake_data)
-    c = open_client(fake_data)
-    for row in (0, 5, 199):
+    write_params_jsonl(small_fake_data)
+    c = open_client(small_fake_data)
+    last = small_fake_data.n - 1  # int: the last dataset row (199 for 200 rows)
+    for row in (0, 5, last):
         r = get_params(c, row)
         assert r.status_code == 200, r.text
-        assert r.json() == {"row": row, **params_record(fake_data, row)}
-    assert r.json()["sampled"]["pointer"]["gray"] == 100 + 199
+        assert r.json() == {"row": row, **params_record(small_fake_data, row)}
+    assert r.json()["sampled"]["pointer"]["gray"] == 100 + last
 
     # a file lacking the last two rows: only those rows are "no parameters for this image"
-    write_params_jsonl(fake_data, rows=range(198))
-    c = open_client(fake_data)
-    assert get_params(c, 197).status_code == 200
-    for row in (198, 199):
+    write_params_jsonl(small_fake_data, rows=range(last - 1))
+    c = open_client(small_fake_data)
+    assert get_params(c, last - 2).status_code == 200
+    for row in (last - 1, last):
         r = get_params(c, row)
         assert r.status_code == 404 and r.json()["detail"] == "no parameters saved for this image"
 
@@ -395,26 +397,26 @@ def test_params_outcomes(fake_data):
         if row == 9:
             rec["filename"] = "dial_00008.png"
             return rec
-    write_params_jsonl(fake_data, mutate=wrong_name)
-    c = open_client(fake_data)
+    write_params_jsonl(small_fake_data, mutate=wrong_name)
+    c = open_client(small_fake_data)
     r = get_params(c, 9)
     assert r.status_code == 409 and "dial_00008.png" in r.json()["detail"]
     assert get_params(c, 8).status_code == 200
 
     # last line cut mid-JSON (hard kill): 404 for that row, 200 for the others
-    path = write_params_jsonl(fake_data)
+    path = write_params_jsonl(small_fake_data)
     path.write_bytes(path.read_bytes().rstrip(b"\n")[:-40])
-    c = open_client(fake_data)
-    r = get_params(c, 199)
+    c = open_client(small_fake_data)
+    r = get_params(c, last)
     assert r.status_code == 404 and r.json()["detail"] == "no parameters saved for this image"
-    assert all(get_params(c, row).status_code == 200 for row in (0, 100, 198))
+    assert all(get_params(c, row).status_code == 200 for row in (0, last // 2, last - 1))
 
     # CRLF endings and a trailing blank line
-    path = write_params_jsonl(fake_data)
+    path = write_params_jsonl(small_fake_data)
     path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n") + b"\r\n")
-    c = open_client(fake_data)
-    assert all(get_params(c, row).status_code == 200 for row in range(200))
-    assert get_params(c, 199).json()["sampled"]["pointer"]["gray"] == 299
+    c = open_client(small_fake_data)
+    assert all(get_params(c, row).status_code == 200 for row in range(small_fake_data.n))
+    assert get_params(c, last).json()["sampled"]["pointer"]["gray"] == 100 + last
 
     # non-finite values are strings in the file and stay strings; a bare NaN token is returned as a string too
     def nan_value(row, rec):
@@ -423,21 +425,21 @@ def test_params_outcomes(fake_data):
             rec["sampled"]["glares"] = "Infinity"
             return rec
         if row == 4:
-            return json.dumps(params_record(fake_data, 4)).replace('"gray": 104', '"gray": NaN', 1)
-    write_params_jsonl(fake_data, mutate=nan_value)
-    c = open_client(fake_data)
+            return json.dumps(params_record(small_fake_data, 4)).replace('"gray": 104', '"gray": NaN', 1)
+    write_params_jsonl(small_fake_data, mutate=nan_value)
+    c = open_client(small_fake_data)
     body = get_params(c, 3).json()
     assert body["sampled"]["pointer"]["gray"] == "NaN" and body["sampled"]["glares"] == "Infinity"
     assert get_params(c, 4).json()["sampled"]["pointer"]["gray"] == "NaN"
 
 
-def test_params_index_is_cached(fake_data):
+def test_params_index_is_cached(small_fake_data):
     from val_viewer.app.params import ParamStore
-    write_params_jsonl(fake_data)
-    store = ParamStore(fake_data.data_dir, fake_data.names, fake_data.cache_dir)
+    write_params_jsonl(small_fake_data)
+    store = ParamStore(small_fake_data.data_dir, small_fake_data.names, small_fake_data.cache_dir)
     assert store.get(7)["sampled"]["pointer"]["gray"] == 107
-    assert len(list(fake_data.cache_dir.glob("params_*.npy"))) == 1
-    again = ParamStore(fake_data.data_dir, fake_data.names, fake_data.cache_dir)  # warm: reads the cached index
+    assert len(list(small_fake_data.cache_dir.glob("params_*.npy"))) == 1
+    again = ParamStore(small_fake_data.data_dir, small_fake_data.names, small_fake_data.cache_dir)  # warm: reads the cached index
     assert again.get(7) == store.get(7)
 
 
@@ -466,49 +468,49 @@ def test_generated_params_reach_viewer(tmp_path):
 
 # ---------------- review fixes: stale cache, foreign records, file changes, empty set, hand edits ----------------
 
-def test_regenerated_dataset_rebuilds_image_cache(fake_data, capsys):
+def test_regenerated_dataset_rebuilds_image_cache(small_fake_data, capsys):
     """Same names and same labels.csv text, new pixels: a newer labels.csv makes the viewer re-decode the PNGs."""
-    open_data(fake_data)
+    open_data(small_fake_data)
     capsys.readouterr()
     row = 3
-    old = np.asarray(Image.open(fake_data.data_dir / fake_data.names[row])).copy()  # (256,256) uint8
+    old = np.asarray(Image.open(small_fake_data.data_dir / small_fake_data.names[row])).copy()  # (256,256) uint8
     new = (255 - old).astype(np.uint8)  # (256,256) uint8, different pixels
-    Image.fromarray(new).save(fake_data.data_dir / fake_data.names[row])
-    img_cache = tv.cache_paths(os.path.abspath(fake_data.data_dir) + "_cache")[0]  # str: decoded-image .npy
+    Image.fromarray(new).save(small_fake_data.data_dir / small_fake_data.names[row])
+    img_cache = tv.cache_paths(os.path.abspath(small_fake_data.data_dir) + "_cache")[0]  # str: decoded-image .npy
     t_cache = time.time() - 100  # float s: the cache was built a while ago ...
     t_csv = t_cache + 50         # float s: ... and the generator rewrote labels.csv after that (but before now)
     os.utime(img_cache, (t_cache, t_cache))
-    os.utime(fake_data.data_dir / "labels.csv", (t_csv, t_csv))
-    c = open_client(fake_data)
+    os.utime(small_fake_data.data_dir / "labels.csv", (t_csv, t_csv))
+    c = open_client(small_fake_data)
     out = capsys.readouterr().out
-    assert "[cache] labels.csv is newer than" in out and img_cache in out and "[rank] 200/200" in out
+    assert "[cache] labels.csv is newer than" in out and img_cache in out and f"[rank] {small_fake_data.n}/{small_fake_data.n}" in out
     assert not c.data.cache_hit
     r = c.get(f"/api/image/{row}.png")
     assert np.array_equal(np.asarray(Image.open(io.BytesIO(r.content))), new)
     # a restart without regenerating: the cache is newer than labels.csv again -> nothing rebuilt, rank reused
-    open_data(fake_data)
+    open_data(small_fake_data)
     out = capsys.readouterr().out
     assert "[cache]" not in out and re.search(r"^\[rank\] cached", out, re.M)
 
 
-def test_params_from_another_run_are_refused(fake_data):
+def test_params_from_another_run_are_refused(small_fake_data):
     """Same file names but every tip shifted by 1 px: 409; a 5e-4 shift is float noise and passes."""
-    write_params_jsonl(fake_data, mutate=lambda row, rec: {**rec, "tip_x": rec["tip_x"] + 1.0})
-    c = open_client(fake_data)
+    write_params_jsonl(small_fake_data, mutate=lambda row, rec: {**rec, "tip_x": rec["tip_x"] + 1.0})
+    c = open_client(small_fake_data)
     r = get_params(c, 5)
     assert r.status_code == 409 and r.json()["detail"] == "saved parameters do not match this image (dial_00005.png)"
-    write_params_jsonl(fake_data, mutate=lambda row, rec: {**rec, "tip_y": rec["tip_y"] + 1.0})
-    assert get_params(open_client(fake_data), 5).status_code == 409
-    write_params_jsonl(fake_data, mutate=lambda row, rec: {**rec, "tip_x": rec["tip_x"] + 5e-4,
+    write_params_jsonl(small_fake_data, mutate=lambda row, rec: {**rec, "tip_y": rec["tip_y"] + 1.0})
+    assert get_params(open_client(small_fake_data), 5).status_code == 409
+    write_params_jsonl(small_fake_data, mutate=lambda row, rec: {**rec, "tip_x": rec["tip_x"] + 5e-4,
                                                            "tip_y": rec["tip_y"] - 5e-4})
-    assert get_params(open_client(fake_data), 5).status_code == 200
+    assert get_params(open_client(small_fake_data), 5).status_code == 200
 
 
-def test_params_file_changed_or_deleted_under_running_viewer(fake_data):
-    path = write_params_jsonl(fake_data)
-    c = open_client(fake_data)
+def test_params_file_changed_or_deleted_under_running_viewer(small_fake_data):
+    path = write_params_jsonl(small_fake_data)
+    c = open_client(small_fake_data)
     assert get_params(c, 3).status_code == 200
-    write_params_jsonl(fake_data, mutate=lambda row, rec: {**rec, "seed": 7})
+    write_params_jsonl(small_fake_data, mutate=lambda row, rec: {**rec, "seed": 7})
     st = os.stat(path)
     os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
     r = get_params(c, 3)
@@ -519,20 +521,20 @@ def test_params_file_changed_or_deleted_under_running_viewer(fake_data):
     assert r.status_code == 404 and r.json()["detail"] == "no parameters saved for this dataset"
 
 
-def test_empty_train_set(fake_data):
+def test_empty_train_set(small_fake_data):
     """val_split 1.0 leaves no train image: the train set answers zeros / null / [] instead of a 500."""
-    c = open_client(fake_data, val_split=1.0)
+    c = open_client(small_fake_data, val_split=1.0)
     assert c.data.n_train == 0
     r = c.get("/api/summary", params={"set": "train"})
     assert r.status_code == 200, r.text
     s = r.json()
     assert (s["n"], s["p99"], s["max_err"], s["n_over_3"], s["n_over_7"]) == (0, None, None, 0, 0)
-    assert summary(c, set="all")["n"] == 200 and summary(c, set="val")["p99"] is not None
+    assert summary(c, set="all")["n"] == small_fake_data.n and summary(c, set="val")["p99"] is not None
     for side in ("best", "worst"):
         assert get_list(c, side, 5, "train") == []
 
 
-def test_hand_edited_params_file(fake_data):
+def test_hand_edited_params_file(small_fake_data):
     def edit(row, rec):
         if row == 3:
             return {**rec, "row": 99}
@@ -540,14 +542,14 @@ def test_hand_edited_params_file(fake_data):
             line = json.dumps(rec).replace('"gray": 104', '"gray": 1e999', 1).replace('"x": 5}', '"x": -1e999}', 1)
             assert "1e999" in line
             return line
-    path = write_params_jsonl(fake_data, mutate=edit)
-    c = open_client(fake_data)
+    path = write_params_jsonl(small_fake_data, mutate=edit)
+    c = open_client(small_fake_data)
     assert get_params(c, 3).json()["row"] == 3
     body = get_params(c, 4).json()
     assert body["sampled"]["pointer"]["gray"] == "Infinity"
     assert body["sampled"]["glares"]["items"][0]["x"] == "-Infinity"
     assert body["sampled"]["glares"]["items"][1]["x"] == 6  # finite numbers stay numbers
-    path.write_bytes(b"\xef\xbb\xbf" + write_params_jsonl(fake_data).read_bytes())  # UTF-8 BOM before row 0
-    r = get_params(open_client(fake_data), 0)
-    assert r.status_code == 200 and r.json() == {"row": 0, **params_record(fake_data, 0)}
+    path.write_bytes(b"\xef\xbb\xbf" + write_params_jsonl(small_fake_data).read_bytes())  # UTF-8 BOM before row 0
+    r = get_params(open_client(small_fake_data), 0)
+    assert r.status_code == 200 and r.json() == {"row": 0, **params_record(small_fake_data, 0)}
 
