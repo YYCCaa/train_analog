@@ -47,10 +47,10 @@ CLI_TIMEOUT_S = 900  # int: seconds allowed for the CLI subprocess (conversion ~
 # ── fixtures ─────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="module")
-def exported(tmp_path_factory):
-    """Random-init tipnet -> ONNX -> convert(float16=True), built once for the module.
+def onnx_only(tmp_path_factory):
+    """Random-init tipnet exported to ONNX (seed 0) and checked; no TFLite conversion.
 
-    Returns dict: dir Path, onnx Path, tflite Path (float32), conv dict (convert() result).
+    Returns dict: dir Path (scratch folder), onnx Path (model.onnx).
     """
     d = tmp_path_factory.mktemp("export_v9")                       # Path: scratch folder
     torch.manual_seed(0)
@@ -59,6 +59,16 @@ def exported(tmp_path_factory):
     samples = torch.rand(2, 1, tv.IMG_SIZE, tv.IMG_SIZE)           # (2, 1, 256, 256) float32
     ok, diff, _ = tv.export_and_check_onnx(model, str(onnx_path), samples)
     assert ok, diff
+    return {"dir": d, "onnx": onnx_path}
+
+
+@pytest.fixture(scope="module")
+def exported(onnx_only):
+    """ONNX of `onnx_only` -> convert(float16=True), built once for the module.
+
+    Returns dict: dir Path, onnx Path, tflite Path (float32), conv dict (convert() result).
+    """
+    d, onnx_path = onnx_only["dir"], onnx_only["onnx"]
     conv = ev.convert(str(onnx_path), str(d / "model.tflite"), float16=True)
     return {"dir": d, "onnx": onnx_path, "tflite": d / "model.tflite", "conv": conv}
 
@@ -116,7 +126,7 @@ def _v9_config():
     return None
 
 
-def test_cli_smoke_tiny_dataset(exported, tmp_path):
+def test_cli_smoke_tiny_dataset(onnx_only, tmp_path):
     cfg_path = _v9_config()
     if cfg_path is None:
         pytest.skip("v9_config.yaml not found (set TRAIN_V9_CONFIG)")
@@ -129,7 +139,7 @@ def test_cli_smoke_tiny_dataset(exported, tmp_path):
     assert res["completed"]
     out = tmp_path / "m.tflite"          # Path: --out
     proc = subprocess.run(
-        [sys.executable, "export_v9_tflite.py", "--onnx", str(exported["onnx"]),
+        [sys.executable, "export_v9_tflite.py", "--onnx", str(onnx_only["onnx"]),
          "--out", str(out), "--data-dir", str(data), "--check", "all", "--threads", "2"],
         cwd=REPO, capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
     log = proc.stdout[-4000:] + "\n" + proc.stderr[-3000:]
@@ -159,11 +169,11 @@ def test_cli_smoke_tiny_dataset(exported, tmp_path):
     assert abs(j["onnx"]["mean"] - j["tflite"]["mean"]) < ev.TIP_DMAX_LIMIT_PX
 
 
-def test_cli_check_zero_only_converts(exported, tmp_path):
+def test_cli_check_zero_only_converts(onnx_only, tmp_path):
     """--check 0 converts, never touches --data-dir, exits 0 with no TFLITE OK line."""
     out = tmp_path / "only.tflite"
     proc = subprocess.run(
-        [sys.executable, "export_v9_tflite.py", "--onnx", str(exported["onnx"]),
+        [sys.executable, "export_v9_tflite.py", "--onnx", str(onnx_only["onnx"]),
          "--out", str(out), "--data-dir", str(tmp_path / "does_not_exist"), "--check", "0"],
         cwd=REPO, capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
     log = proc.stdout[-3000:] + "\n" + proc.stderr[-3000:]
