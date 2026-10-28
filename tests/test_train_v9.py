@@ -244,3 +244,70 @@ def test_cli_smoke_two_epochs():
         assert "FINAL best_p99=" in proc.stdout, log
     finally:
         shutil.rmtree(SMOKE_DIR, ignore_errors=True)
+
+
+# ── stale cache after an in-place regeneration ───────────────────────────
+
+def _run_trainer_cli(data, out):
+    """Run train_v9_tip.py for 1 epoch on `data` -> (returncode int, stdout+stderr str)."""
+    proc = subprocess.run(
+        [sys.executable, "train_v9_tip.py", "--data-dir", str(data), "--epochs", "1",
+         "--batch-size", "8", "--out", str(out)],
+        cwd=REPO, capture_output=True, text=True, timeout=900)
+    return proc.returncode, proc.stdout + "\n" + proc.stderr
+
+
+def test_cli_rebuilds_cache_after_in_place_regeneration(tmp_path):
+    data = tmp_path / "ds"                       # Path: tiny 16-image dataset
+    prefix = str(data) + "_cache"                # str: the CLI's default cache prefix
+    img_path, _ = tv.cache_paths(prefix)         # str: cache images .npy
+    imgs, _ = _write_pngs(data, 16)
+    rc, log = _run_trainer_cli(data, tmp_path / "run1")
+    assert rc == 0, log
+    assert "[cache] building" in log
+    assert tv.cache_is_valid(str(data), prefix) and not tv.cache_is_stale(str(data), prefix)
+    assert np.array_equal(np.load(img_path), imgs)
+
+    # untouched dataset: the next run reuses the cache silently
+    rc, log = _run_trainer_cli(data, tmp_path / "run2")
+    assert rc == 0, log
+    assert "[cache] building" not in log and "labels.csv is newer" not in log
+
+    # regenerate in place: identical labels.csv text, new pixels, labels.csv newer than the cache
+    labels_text = (data / "labels.csv").read_bytes()
+    new_imgs, _ = _write_pngs(data, 16)          # same seed -> same labels, same names
+    rng = np.random.default_rng(99)
+    new_imgs = rng.integers(0, 256, size=new_imgs.shape, dtype=np.uint8)
+    for i in range(16):
+        Image.fromarray(new_imgs[i]).save(data / f"dial_{i:04d}.png")
+    assert (data / "labels.csv").read_bytes() == labels_text
+    t = os.stat(img_path).st_mtime_ns + 1_000_000      # int ns: 1 ms after the cache (newer, yet older than any rebuild)
+    os.utime(data / "labels.csv", ns=(t, t))
+    assert tv.cache_is_stale(str(data), prefix) and not tv.cache_is_valid(str(data), prefix)
+    rc, log = _run_trainer_cli(data, tmp_path / "run3")
+    assert rc == 0, log
+    assert "[cache] labels.csv is newer than" in log and "[cache] building" in log
+    assert np.array_equal(np.load(img_path), new_imgs)
+
+    # right after the rebuild the cache is fresh again and a further run does not rebuild
+    assert tv.cache_is_valid(str(data), prefix) and not tv.cache_is_stale(str(data), prefix)
+    rc, log = _run_trainer_cli(data, tmp_path / "run4")
+    assert rc == 0, log
+    assert "[cache] building" not in log
+
+
+def test_ensure_cache_reports_labels_dated_in_the_future(tmp_path, capsys):
+    data = tmp_path / "ds"                       # Path: tiny 6-image dataset
+    prefix = str(data) + "_cache"                # str: cache prefix
+    _write_pngs(data, 6)
+    tv.ensure_cache(str(data), prefix)
+    img_path, _ = tv.cache_paths(prefix)                 # str: cache images .npy
+    before = os.stat(img_path).st_mtime_ns               # int ns: cache mtime before the failing call
+    capsys.readouterr()                                  # drop the output of the first build
+    t = os.stat(data / "labels.csv").st_mtime_ns + 3600 * 10**9   # int ns: one hour ahead
+    os.utime(data / "labels.csv", ns=(t, t))
+    with pytest.raises(RuntimeError, match="labels.csv is dated in the future"):
+        tv.ensure_cache(str(data), prefix)
+    # the error comes before any decoding: no rebuild started, the npy is untouched
+    assert "[cache] building" not in capsys.readouterr().out
+    assert os.stat(img_path).st_mtime_ns == before
