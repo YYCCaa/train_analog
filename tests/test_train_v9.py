@@ -281,7 +281,7 @@ def test_cli_rebuilds_cache_after_in_place_regeneration(tmp_path):
     for i in range(16):
         Image.fromarray(new_imgs[i]).save(data / f"dial_{i:04d}.png")
     assert (data / "labels.csv").read_bytes() == labels_text
-    t = os.stat(img_path).st_mtime_ns + 5_000_000_000      # int ns: 5 s after the cache
+    t = os.stat(img_path).st_mtime_ns + 1_000_000      # int ns: 1 ms after the cache (newer, yet older than any rebuild)
     os.utime(data / "labels.csv", ns=(t, t))
     assert tv.cache_is_stale(str(data), prefix) and not tv.cache_is_valid(str(data), prefix)
     rc, log = _run_trainer_cli(data, tmp_path / "run3")
@@ -294,3 +294,14 @@ def test_cli_rebuilds_cache_after_in_place_regeneration(tmp_path):
     rc, log = _run_trainer_cli(data, tmp_path / "run4")
     assert rc == 0, log
     assert "[cache] building" not in log
+
+
+def test_ensure_cache_reports_labels_dated_in_the_future(tmp_path):
+    data = tmp_path / "ds"                       # Path: tiny 6-image dataset
+    prefix = str(data) + "_cache"                # str: cache prefix
+    _write_pngs(data, 6)
+    tv.ensure_cache(str(data), prefix)
+    t = os.stat(data / "labels.csv").st_mtime_ns + 3600 * 10**9   # int ns: one hour ahead
+    os.utime(data / "labels.csv", ns=(t, t))
+    with pytest.raises(RuntimeError, match="labels.csv is dated in the future"):
+        tv.ensure_cache(str(data), prefix)

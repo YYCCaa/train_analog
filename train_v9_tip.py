@@ -236,6 +236,12 @@ def ensure_cache(data_dir, cache_prefix, workers=None):
         print(f"[cache] labels.csv is newer than {img_path}: rebuilding", flush=True)
     if not cache_is_valid(data_dir, cache_prefix):
         build_cache(data_dir, cache_prefix, workers=workers)
+        if cache_is_stale(data_dir, cache_prefix):
+            # labels.csv is still newer than the cache written just now: its mtime lies in the future
+            ns = os.stat(os.path.join(data_dir, "labels.csv")).st_mtime_ns   # int: labels.csv mtime in ns
+            when = datetime.datetime.fromtimestamp(ns / 1e9).isoformat(timespec="seconds")  # str: local ISO time
+            raise RuntimeError(f"labels.csv is dated in the future ({when}); "
+                               "fix the clock or touch labels.csv, then start again")
         if not cache_is_valid(data_dir, cache_prefix):
             raise RuntimeError("cache build finished but does not match labels.csv")
 
