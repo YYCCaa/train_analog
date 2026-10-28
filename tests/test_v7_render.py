@@ -2515,26 +2515,58 @@ def test_max_strength_cdf_matches_grid():
     assert g7._max_strength_cdf(0.7, s_lo, s_hi, j) == 1.0
 
 
-def test_gray_warnings_predict_render_rates():
-    """2000 seeds through render_image: the empirical headroom_ok == False and
-    gray_fallback rates agree with the predictions within sampling error.
-    (a) is all-or-nothing given the worst-case H (here every image's H rounds
-    to the same band, so 100 %).  (c) uses the user's wide face range
+# int, worker processes used by _pointer_flags
+POOL_WORKERS = 4
+
+
+def _flags_chunk(args):
+    """Worker: render seeds of one chunk, return the pointer-param flag per seed.
+
+    args: (cfg dict, list[int] seeds, str key in params["pointer"]); returns list[bool].
+    Module-level so the spawn start method (Windows) can import it."""
+    cfg, seeds, key = args
+    return [bool(g7.render_image(cfg, s).params["pointer"][key]) for s in seeds]
+
+
+def _pointer_flags(cfg, seeds, key):
+    """params["pointer"][key] of render_image(cfg, s) for every s in seeds, in order.
+
+    cfg: dict (passed by value); seeds: list[int]; key: str; returns list[bool].
+    Rendering is spread over POOL_WORKERS processes in interleaved chunks."""
+    from concurrent.futures import ProcessPoolExecutor
+    seeds = list(seeds)
+    chunks = [seeds[i::POOL_WORKERS] for i in range(POOL_WORKERS)]  # list[list[int]]
+    with ProcessPoolExecutor(max_workers=POOL_WORKERS) as ex:
+        parts = list(ex.map(_flags_chunk, [(cfg, c, key) for c in chunks]))
+    out = {}  # dict[int, bool], seed -> flag
+    for c, part in zip(chunks, parts):
+        out.update(zip(c, part))
+    return [out[s] for s in seeds]
+
+
+def test_gray_warnings_predict_headroom_rate():
+    """2000 seeds through render_image: the empirical headroom_ok == False rate
+    agrees with the prediction.  (a) is all-or-nothing given the worst-case H
+    (here every image's H rounds to the same band, so 100 %)."""
+    n = 2000  # int, seeds per config
+    cfg_a = _cfg(**{"pointer.gray_range": [230, 255]})
+    no_room = sum(not ok for ok in _pointer_flags(cfg_a, range(n), "headroom_ok"))  # int, images without headroom
+    print("no headroom: predicted 1.0, empirical %.4f" % (no_room / n))
+    assert no_room == n
+
+
+def test_gray_warnings_predict_fallback_rate():
+    """2000 seeds through render_image: the empirical gray_fallback rate agrees
+    with the prediction within sampling error.  (c) uses the user's wide face range
     (bg 63-255) with c = 60, I = [51, 204]: for bg >= 145 the empty band
     s* < s_max < s2 cuts the shadow strength distribution [0.45, 0.67] from
     below for 54 bg values and from above for 76, so both CDF terms of the
     enumeration are exercised; predicted share ~0.164 (the old one-interval
     rule: ~0.271, the middle band between the faces rescues the rest)."""
     n = 2000  # int, seeds per config
-    cfg_a = _cfg(**{"pointer.gray_range": [230, 255]})
-    no_room = sum(not g7.render_image(cfg_a, s).params["pointer"]["headroom_ok"]
-                  for s in range(n))  # int, images without headroom
-    print("no headroom: predicted 1.0, empirical %.4f" % (no_room / n))
-    assert no_room == n
     cfg_c = _cfg(**{"pointer.min_bg_contrast": 60, "palette.bg_gray_range": [63, 255]})
     p = g7.pointer_fallback_share(cfg_c)  # float, predicted share
-    fb = sum(g7.render_image(cfg_c, s).params["pointer"]["gray_fallback"]
-             for s in range(n))  # int, fallback images
+    fb = sum(_pointer_flags(cfg_c, range(n), "gray_fallback"))  # int, fallback images
     print("fallback: predicted %.4f, empirical %.4f" % (p, fb / n))
     assert 0.1 < p < 0.9
     assert abs(fb / n - p) < 4 * math.sqrt(p * (1 - p) / n)
