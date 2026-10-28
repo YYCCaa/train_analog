@@ -293,7 +293,7 @@ def test_auto_workers_leave_one_core_free(tmp_path):
     with TestClient(create_app(), base_url=BASE_URL) as c:
         seen = {}  # args JobRunner.start received (dict[str, object])
 
-        def fake_start(cfg, output_dir, num_images, seed, workers, overwrite):
+        def fake_start(cfg, output_dir, num_images, seed, workers, overwrite, save_params=False):
             """Stand-in for JobRunner.start: record workers, start nothing."""
             seen["workers"] = workers
 
