@@ -1,0 +1,1 @@
+{"verify": ["cmd", "/c", "python", "tests/run_all.py"], "verify_timeout": 900}

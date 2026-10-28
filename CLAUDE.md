@@ -17,6 +17,14 @@ interpreter's absolute path in agent worktrees: wrap the command in cmd so PATH 
 Run every command from the repo root. No test needs a GPU, the network, or the real dataset; datasets are synthetic
 and written to tmp_path / tempfile.
 
+Whole suite: `python tests/run_all.py` (under `testlog`: `... testlog <task> suite -- cmd /c python tests/run_all.py`).
+It runs every `tests/test_*.py` and `*/tests/test_*.py` as parallel `python -m pytest` processes (16 at a time, slow
+files split into round-robin shards by its `SPLIT` table, longest first by its `WEIGHT` table), one log per process
+in `tmp_smoke/testlogs/run_all/<timestamp>/`, and ends with one line `run_all: ... in <s> s ... -> PASS | FAIL`.
+`--list` shows the processes without running them; positional files run only those; `--split FILE=K`, `--jobs N`,
+`--timeout S`, `--threads T` override the defaults. Plain `python -m pytest` still works but runs serially (~11 min).
+`.wtflow.json` makes `WT verify` run the whole suite this way.
+
 | area | source files | test command | timeout |
 |---|---|---|---|
 | v7 config parse/validate | v7_config.py, tests/data/*.yaml | `python -m pytest -q tests/test_v7_config.py` | 60 s |
@@ -42,8 +50,9 @@ and written to tmp_path / tempfile.
 | val_viewer browser E2E | val_viewer/ (server + static), generate_synthetic_v7_mp.py (params.jsonl), v7_config.py | `python -m pytest -q val_viewer/tests/test_e2e_browser.py` | 600 s |
 | suite runner | tests/run_all.py, tests/run_all_shard.py | `python -m pytest -q tests/test_run_all.py` | 300 s |
 
-Not parallel-safe:
-- `tests/test_studio_e2e.py` binds the fixed port 8799.
+Not parallel-safe (the runner runs each of these once per run, so one `run_all.py` is fine; two runs at once in the
+same checkout, or one of these next to a `run_all.py` run, are not):
+- `tests/test_studio_e2e.py` binds the fixed port 8799 (never split: its server may also build the frontend).
 - `tests/test_train_v9.py::test_cli_smoke_two_epochs` uses the fixed folder `tmp_smoke/test_train_v9/`.
 - `tests/test_train_gray.py` writes and removes the fixed folder `diag/m_gray/`.
 - The v7 generator, look, studio and training tests start 2-4 worker pools each; running them together can exceed
