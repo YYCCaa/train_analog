@@ -340,7 +340,7 @@ def test_plugin_shard_and_no_shard(tmp_path):
     res = run_plugin(root, "tests/test_f.py")
     assert res.returncode == 0, res.stdout
     assert re.search(r"\b3 passed\b", res.stdout) and "deselected" not in res.stdout, res.stdout
-    res = run_plugin(root, "--shard", "1/2", "-v", "tests/test_f.py")
+    res = run_plugin(root, "--shard", "1/2", "-vv", "tests/test_f.py")  # -q -vv: one line per test
     assert res.returncode == 0, res.stdout
     assert re.search(r"\b1 passed, 2 deselected\b", res.stdout), res.stdout
     assert "test_two PASSED" in res.stdout and "test_one" not in res.stdout, res.stdout
@@ -348,21 +348,24 @@ def test_plugin_shard_and_no_shard(tmp_path):
 
 # ── usage errors ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("args", [
-    ["--split", "tests/test_a.py"],          # no =K
-    ["--split", "tests/test_a.py=0"],        # K < 1
-    ["--split", "tests/test_a.py=x"],        # K not an int
-    ["--split", "tests/test_nope.py=2"],     # file does not exist
-    ["--split", "tests/test_studio_e2e.py=2"],  # never split (fixed port 8799)
-    ["tests/test_nope.py"],                  # positional file does not exist
-    ["--jobs", "0"],
-    ["--timeout", "0"],
+@pytest.mark.parametrize("args, named", [
+    (["--split", "tests/test_a.py"], "--split"),                        # no =K
+    (["--split", "tests/test_a.py=0"], "--split"),                      # K < 1
+    (["--split", "tests/test_a.py=x"], "--split"),                      # K not an int
+    (["--split", "tests/test_nope.py=2"], "tests/test_nope.py"),        # file does not exist
+    (["--split", "tests/test_studio_e2e.py=2"], "tests/test_studio_e2e.py"),  # never split (fixed port 8799)
+    (["tests/test_nope.py"], "tests/test_nope.py"),                     # positional file does not exist
+    (["--jobs", "0"], "--jobs"),
+    (["--timeout", "0"], "--timeout"),
 ], ids=["split-no-k", "split-zero", "split-nan", "split-missing", "split-studio", "missing-file", "jobs0", "timeout0"])
-def test_usage_errors_exit_2(tmp_path, args):
-    """User passes a malformed option -> exit 2, a message naming the problem, nothing run (no log folder)."""
+def test_usage_errors_exit_2(tmp_path, args, named):
+    """User passes a malformed option -> exit 2, a usage message naming the problem (`named`, str), nothing run
+    (no log folder)."""
     root = make_root(tmp_path, {"tests/test_a.py": PASSING_A, "tests/test_studio_e2e.py": PASSING_B})
     log_dir = tmp_path / "logs"
     res = run_runner("--root", str(root), "--log-dir", str(log_dir), *args, timeout=60)
     assert res.returncode == 2, res.stdout
-    assert res.stdout.strip(), "no message"
+    assert "usage:" in res.stdout and "error:" in res.stdout, res.stdout
+    error_line = next(ln for ln in res.stdout.splitlines() if "error:" in ln)  # str, argparse's error line
+    assert named in error_line, res.stdout
     assert not log_dir.exists(), res.stdout
