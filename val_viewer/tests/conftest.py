@@ -32,8 +32,9 @@ def make_model_file(path, seed: int) -> None:
     torch.save(tv.build_model("tipnet").state_dict(), path)
 
 
-def build_fake_data(tmp_path) -> SimpleNamespace:
-    """Write the fake dataset + run under tmp_path (Path); returns SimpleNamespace(data_dir: Path, run_dir: Path, cache_dir: Path, val_idx: (30,) int64 ndarray,
+def build_fake_data(tmp_path, n: int = N_IMAGES) -> SimpleNamespace:
+    """Write the fake dataset + run under tmp_path (Path) with `n` (int, >= 20 so there are >= 3 val rows) images;
+    returns SimpleNamespace(n: int, data_dir: Path, run_dir: Path, cache_dir: Path, val_idx: (30,) int64 ndarray,
     train_idx: (170,) int64 ndarray (dataset row of each train position), labels: (200, 2) float32 (as read back from labels.csv), names: list[str] (200,))."""
     rng = np.random.default_rng(7)
     np.random.seed(7)
@@ -43,13 +44,13 @@ def build_fake_data(tmp_path) -> SimpleNamespace:
     run_dir.mkdir(parents=True)
     cache_dir = tmp_path / "vv_cache"
 
-    train_idx, val_idx = (t.numpy() for t in tv.split_indices(N_IMAGES, 0.15))  # (170,), (30,) int64 dataset rows
-    imgs = rng.integers(0, 256, size=(N_IMAGES, 256, 256), dtype=np.uint8)  # (200, 256, 256) uint8
-    labels = rng.uniform(5, 250, size=(N_IMAGES, 2)).round(3)  # (200, 2) float64 tip x, y
+    train_idx, val_idx = (t.numpy() for t in tv.split_indices(n, 0.15))  # (n_train,), (n_val,) int64 dataset rows
+    imgs = rng.integers(0, 256, size=(n, 256, 256), dtype=np.uint8)  # (n, 256, 256) uint8
+    labels = rng.uniform(5, 250, size=(n, 2)).round(3)  # (n, 2) float64 tip x, y
     imgs[val_idx[1]] = imgs[val_idx[0]]      # val positions 0 and 1: identical image ...
     labels[val_idx[1]] = labels[val_idx[0]]  # ... and label -> exact error tie
     labels[val_idx[2]] = (2.0, 3.0)          # val position 2: tip near the corner
-    names = [f"dial_{i:05d}.png" for i in range(N_IMAGES)]  # list[str] (200,)
+    names = [f"dial_{i:05d}.png" for i in range(n)]  # list[str] (n,)
     for name, img in zip(names, imgs):
         Image.fromarray(img).save(data_dir / name)
     with open(data_dir / "labels.csv", "w", newline="") as f:
@@ -58,7 +59,7 @@ def build_fake_data(tmp_path) -> SimpleNamespace:
             f.write(f"{name},{x:.3f},{y:.3f}\n")
     make_model_file(run_dir / "tip.pth", 1234)
     _, csv_labels = tv.read_labels_csv(str(data_dir))
-    return SimpleNamespace(data_dir=data_dir, run_dir=run_dir, cache_dir=cache_dir,
+    return SimpleNamespace(n=n, data_dir=data_dir, run_dir=run_dir, cache_dir=cache_dir,
                            train_idx=train_idx, val_idx=val_idx, labels=csv_labels, names=names)
 
 
@@ -74,11 +75,11 @@ def params_record(fd, row: int) -> dict:
 def write_params_jsonl(fd, rows=None, mutate=None) -> Path:
     """Write <fd.data_dir>/params.jsonl, one JSON line per dataset row -> its Path.
 
-    rows: iterable[int] | None, the rows that get a line (default all 200; the others are left out, so later
+    rows: iterable[int] | None, the rows that get a line (default all fd.n; the others are left out, so later
     lines shift up); mutate: callable(row: int, rec: dict) -> dict | str | None, may replace a record (dict) or its
     whole line (str), returning None keeps the record."""
     lines = []  # list[str]: one text line per written row
-    for row in (range(N_IMAGES) if rows is None else rows):
+    for row in (range(getattr(fd, "n", N_IMAGES)) if rows is None else rows):
         rec = params_record(fd, row)
         out = mutate(row, rec) if mutate else None
         lines.append(out if isinstance(out, str) else json.dumps(out if out is not None else rec))
@@ -91,6 +92,22 @@ def write_params_jsonl(fd, rows=None, mutate=None) -> Path:
 def fake_data(tmp_path):
     """Function-scoped fake dataset: see build_fake_data."""
     return build_fake_data(tmp_path)
+
+
+@pytest.fixture
+def small_fake_data(tmp_path):
+    """Function-scoped SMALL fake dataset (SimpleNamespace, see build_fake_data) with n=40 images (6 val, 34 train):
+    ranking it costs a fraction of the 200-image set. For tests that do not depend on the 200-row layout."""
+    return build_fake_data(tmp_path, n=40)
+
+
+@pytest.fixture
+def small_client(small_fake_data):
+    """Function-scoped TestClient on a fresh app over small_fake_data (cpu); `.data` is the ValData behind it."""
+    data = open_data(small_fake_data)
+    c = TestClient(create_app(data))
+    c.data = data
+    return c
 
 
 def open_data(fd, **kw) -> ValData:
