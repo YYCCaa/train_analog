@@ -949,9 +949,50 @@ def parse_args(argv=None):
                         "loss 'ce' only (0 = off)")
     p.add_argument("--hard-weight-max", type=float, default=10.0,
                    help="clamp of the --hard-weight sample weights before renormalising")
+    p.add_argument("--ws-cap-gb", type=float, default=0.0,
+                   help="hard process working-set cap in GB (Windows; needs --mmap-cache): mapped "
+                        "image pages beyond it are trimmed to the standby list and soft-fault "
+                        "back (0 = off)")
     p.add_argument("--no-amp", action="store_true", help="disable bf16 autocast")
     p.add_argument("--cpu", action="store_true", help="force CPU")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.ws_cap_gb > 0 and not args.mmap_cache:
+        p.error("--ws-cap-gb requires --mmap-cache (a hard cap on a RAM copy would page "
+                "private memory out)")
+    return args
+
+
+def set_working_set_cap(gb):
+    """Hard-cap this process's working set at gb (float) GiB; True on success.
+
+    Windows: SetProcessWorkingSetSizeEx(min 256 MiB, max gb GiB, hard max on, hard min off),
+    then one EmptyWorkingSet.  Mapped file pages trimmed this way go to the standby list
+    and soft-fault back.  Off Windows or on failure: print one note, return False.
+    """
+    if sys.platform != "win32":
+        print("[mem] working-set cap needs Windows; ignored")
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.SetProcessWorkingSetSizeEx.argtypes = [wintypes.HANDLE, ctypes.c_size_t,
+                                                   ctypes.c_size_t, wintypes.DWORD]
+        k32.SetProcessWorkingSetSizeEx.restype = wintypes.BOOL
+        psapi.EmptyWorkingSet.argtypes = [wintypes.HANDLE]
+        psapi.EmptyWorkingSet.restype = wintypes.BOOL
+        h = k32.GetCurrentProcess()
+        flags = 0x2 | 0x4   # QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_ENABLE
+        if not k32.SetProcessWorkingSetSizeEx(h, 256 * 2**20, int(gb * 2**30), flags):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not psapi.EmptyWorkingSet(h):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return True
+    except Exception as e:   # noqa: BLE001 - training must continue without the cap
+        print(f"[mem] working-set cap failed: {e}")
+        return False
 
 
 def seed_everything(seed):
@@ -1000,6 +1041,9 @@ def main(argv=None):
     cache = args.cache or (os.path.abspath(args.data_dir).rstrip("\\/") + "_cache")
     images, labels, names = load_cache(args.data_dir, cache, args.limit, args.cache_workers,
                                        mmap=args.mmap_cache)
+    if args.ws_cap_gb > 0:
+        ok_cap = set_working_set_cap(args.ws_cap_gb)
+        print(f"[mem] working-set cap {args.ws_cap_gb:g} GB -> {'ok' if ok_cap else 'unavailable'}")
     n = len(names)
     train_idx, val_idx = split_indices(n, args.val_split)
     print(f"data: {n} images  train={len(train_idx)}  val={len(val_idx)}  device={dev} "

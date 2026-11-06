@@ -488,3 +488,63 @@ def test_tip_loss_hard_weight():
     w = tv.hard_sample_weights(kl, 1.0, 2.0)
     assert torch.allclose(w, torch.tensor([0.25, 0.25, 2.0]) / (2.5 / 3))
     assert torch.allclose(tv.hard_sample_weights(kl, 0.0, 2.0), torch.ones(3))
+
+
+# ── --ws-cap-gb: hard working-set cap for a memmap run (Windows) ──────────
+
+def _ws_limits():
+    """(min_bytes, max_bytes, flags) of this process's working-set quota (ints), via ctypes."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.GetProcessWorkingSetSizeEx.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_size_t),
+                                               ctypes.POINTER(ctypes.c_size_t),
+                                               ctypes.POINTER(wintypes.DWORD)]
+    lo, hi, fl = ctypes.c_size_t(), ctypes.c_size_t(), wintypes.DWORD()
+    assert k32.GetProcessWorkingSetSizeEx(k32.GetCurrentProcess(), ctypes.byref(lo),
+                                          ctypes.byref(hi), ctypes.byref(fl))
+    return lo.value, hi.value, fl.value
+
+
+def _ws_release():
+    """Drop the hard working-set max set by a test (QUOTA_LIMITS_HARDWS_MAX_DISABLE = 0x8)."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.SetProcessWorkingSetSizeEx.argtypes = [wintypes.HANDLE, ctypes.c_size_t,
+                                               ctypes.c_size_t, wintypes.DWORD]
+    k32.SetProcessWorkingSetSizeEx(k32.GetCurrentProcess(), 256 << 20, 1 << 40, 0x2 | 0x8)
+
+
+def test_cli_ws_cap_with_mmap_cache(tmp_path):
+    data, out = tmp_path / "ds", tmp_path / "run"
+    _write_pngs(data, 16)
+    proc = _run_cli(["--data-dir", data, "--mmap-cache", "--ws-cap-gb", "2", "--epochs", "1",
+                     "--batch-size", "8", "--cpu", "--out", out])
+    log = proc.stdout[-4000:] + "\n" + proc.stderr[-3000:]
+    assert proc.returncode == 0, log
+    with open(out / "metrics.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1 and np.isfinite(float(rows[0]["p99"])), log
+    want = "ok" if sys.platform == "win32" else "unavailable"
+    assert f"[mem] working-set cap 2 GB -> {want}" in proc.stdout, log
+
+
+def test_cli_ws_cap_needs_mmap_cache():
+    proc = _run_cli(["--ws-cap-gb", "2"])
+    assert proc.returncode == 2
+    err = proc.stderr.splitlines()[-1]               # the argparse "error: ..." line
+    assert "--ws-cap-gb" in err and "--mmap-cache" in err and "requires" in err, proc.stderr
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows working-set API")
+def test_set_working_set_cap_sets_a_hard_max():
+    try:
+        assert tv.set_working_set_cap(64) is True
+        lo, hi, fl = _ws_limits()
+        assert hi == 64 * 2**30
+        assert fl & 0x4                      # QUOTA_LIMITS_HARDWS_MAX_ENABLE
+    finally:
+        _ws_release()
