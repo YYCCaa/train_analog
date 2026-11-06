@@ -9,14 +9,18 @@ CPU-friendly; the CLI smoke uses CUDA when present.  What is covered:
     decode     sub-pixel Gaussian peaks decode to < 0.15 image px, also at the border
     model      tipnet params <= 115k, best_p99.pth < 500 KB, ONNX export == ORT
     CLI        a user runs `python train_v9_tip.py ...` on a 96-image v9 dataset
+    TipNetX    tipnet_d2x / tipnet_m32d2x presets (param counts + key/shape fingerprints),
+               --max-pth-kb, --mmap-cache, --decode-win, --hard-weight (tiny tmp_path datasets)
 """
 
 import csv
+import hashlib
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -311,3 +315,176 @@ def test_ensure_cache_reports_labels_dated_in_the_future(tmp_path, capsys):
     # the error comes before any decoding: no rebuild started, the npy is untouched
     assert "[cache] building" not in capsys.readouterr().out
     assert os.stat(img_path).st_mtime_ns == before
+
+
+# ── TipNetX presets, --max-pth-kb, --mmap-cache, --decode-win, --hard-weight ──
+
+def _fingerprint(model):
+    """sha256 hex (str) of every state_dict key + shape, sorted by key."""
+    text = "\n".join(f"{k} {tuple(t.shape)}" for k, t in sorted(model.state_dict().items()))
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _run_cli(args, timeout=900):
+    """Run `python train_v9_tip.py <args>` from the repo root -> CompletedProcess (text output)."""
+    return subprocess.run([sys.executable, "train_v9_tip.py", *map(str, args)],
+                          cwd=REPO, capture_output=True, text=True, timeout=timeout)
+
+
+def _argline(text):
+    """The 'args: k=v ...' line (str) of a train.log / stdout."""
+    return next(ln for ln in text.splitlines() if ln.startswith("args: "))
+
+
+def test_cli_tipnetx_with_every_new_flag(tmp_path):
+    data, out = tmp_path / "ds", tmp_path / "run"       # Path: 16-image dataset, --out
+    _write_pngs(data, 16)
+    proc = _run_cli(["--data-dir", data, "--arch", "tipnet_d2x", "--max-pth-kb", "0",
+                     "--mmap-cache", "--decode-win", "7", "--hard-weight", "1",
+                     "--epochs", "1", "--batch-size", "8", "--cpu", "--out", out])
+    log = proc.stdout[-5000:] + "\n" + proc.stderr[-3000:]
+    assert proc.returncode == 0, log
+    with open(out / "metrics.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1 and np.isfinite(float(rows[0]["p99"])), log
+    args_line = _argline((out / "train.log").read_text(encoding="utf-8"))
+    for want in ("arch=tipnet_d2x", "mmap_cache=True", "decode_win=7", "hard_weight=1.0"):
+        assert want in args_line, args_line
+    best = out / "best_p99.pth"
+    assert os.path.getsize(best) > tv.PTH_LIMIT_BYTES
+    m = tv.build_model("tipnet_d2x")
+    m.load_state_dict(torch.load(best, map_location="cpu", weights_only=True))
+    assert "-> OK" in next(ln for ln in proc.stdout.splitlines() if ln.startswith("ONNX:")), log
+
+
+def test_cli_big_arch_refused_without_max_pth_kb(tmp_path):
+    data, out = tmp_path / "ds", tmp_path / "run"
+    _write_pngs(data, 16)
+    proc = _run_cli(["--data-dir", data, "--arch", "tipnet_d2x", "--epochs", "1",
+                     "--batch-size", "8", "--cpu", "--out", out])
+    log = proc.stdout + "\n" + proc.stderr
+    assert proc.returncode == 2, log
+    refused = next((ln for ln in log.splitlines() if ln.startswith("REFUSED")), "")
+    assert "KB" in refused and "--max-pth-kb" in refused, log
+    rows = []
+    if (out / "metrics.csv").exists():
+        with open(out / "metrics.csv", newline="") as f:
+            rows = list(csv.DictReader(f))
+    assert rows == []
+
+
+@pytest.mark.parametrize("bad", ["4", "0"])
+def test_cli_decode_win_must_be_odd_and_positive(bad):
+    proc = _run_cli(["--decode-win", bad])
+    assert proc.returncode == 2
+    assert "--decode-win" in proc.stderr and "odd" in proc.stderr, proc.stderr
+
+
+def test_tipnetx_presets_match_the_trained_prototype():
+    want = {"tipnet_d2x": (546_993, "bb6423b5b196da904653e0df6e6c06cffd61628feec15d6991cf968a626f1e01"),
+            "tipnet_m32d2x": (556_273, "b5517d17184c160ffe00fdaf7727b6ff77a105944ed851902ff1c8b7e4622116")}
+    for arch, (n_params, digest) in want.items():
+        m = tv.build_model(arch)
+        assert tv.count_params(m) == n_params, arch
+        assert _fingerprint(m) == digest, arch
+        with torch.no_grad():
+            assert m.eval()(torch.rand(2, 1, 256, 256)).shape == (2, 1, 128, 128)
+    # the old archs keep their keys: tipnet is still the 100k model
+    assert tv.count_params(tv.build_model("tipnet")) <= tv.PARAM_BUDGET
+
+
+def test_tipnetx_onnx_export_matches_ort(tmp_path):
+    pytest.importorskip("onnxruntime")
+    torch.manual_seed(0)
+    m = tv.build_model("tipnet_m32d2x").eval()
+    ok, diff, _ = tv.export_and_check_onnx(m, str(tmp_path / "x.onnx"), torch.rand(2, 1, 256, 256))
+    assert ok and diff < 1e-3, diff
+
+
+def test_load_cache_mmap_is_a_view_of_the_npy(tmp_path):
+    data = tmp_path / "ds"
+    imgs, labels = _write_pngs(data, 6)
+    prefix = str(tmp_path / "ds_cache")
+    ram = tv.load_cache(str(data), prefix)
+    mm = tv.load_cache(str(data), prefix, mmap=True)
+    assert mm[0].dtype == torch.uint8 and mm[0].shape == (6, 256, 256)
+    assert np.array_equal(mm[0].numpy(), ram[0].numpy())
+    assert torch.equal(mm[1], ram[1]) and mm[2] == ram[2]
+    # backed by the file, not a copy: a byte written to the .npy shows in the tensor
+    img_path, _ = tv.cache_paths(prefix)
+    writer = np.load(img_path, mmap_mode="r+")
+    writer[2, 5, 7] = 255 - int(imgs[2, 5, 7])
+    writer.flush()
+    assert int(mm[0][2, 5, 7]) == int(writer[2, 5, 7]) != int(ram[0][2, 5, 7])
+    del writer
+    first3 = tv.load_cache(str(data), prefix, limit=3, mmap=True)
+    assert first3[0].shape == (3, 256, 256) and len(first3[2]) == 3 and first3[1].shape == (3, 2)
+    assert np.array_equal(first3[0].numpy()[:2], mm[0].numpy()[:2])
+
+
+def test_batchfeeder_runs_on_a_mmap_cache(tmp_path):
+    data = tmp_path / "ds"
+    imgs, labels = _write_pngs(data, 6)
+    x, y, _ = tv.load_cache(str(data), str(tmp_path / "ds_cache"), mmap=True)
+    feeder = tv.BatchFeeder(x, y, torch.device("cpu"), 4)
+    got = list(feeder.batches(torch.tensor([5, 1, 3, 0, 2])))
+    assert [b[0].shape[0] for b in got] == [4, 1]
+    assert np.array_equal(got[0][0].numpy(), imgs[[5, 1, 3, 0]])
+    assert np.allclose(got[1][1].numpy(), labels[[2]])
+
+
+class _FixedLogits(torch.nn.Module):
+    """Stub model: ignores the image, returns the same (1, 1, 128, 128) logit map for every sample."""
+
+    def __init__(self, logits):
+        super().__init__()
+        self.logits = logits                              # (1, 1, 128, 128) float32
+
+    def forward(self, x):
+        return self.logits.expand(x.shape[0], -1, -1, -1)
+
+
+def test_evaluate_uses_decode_win():
+    # a peak at (40, 40) plus a lower shoulder 4 cells to its right: invisible to a 5x5
+    # window (+-2), inside a 9x9 window (+-4)
+    uv = torch.tensor([[40.0, 40.0]])
+    g = torch.arange(tv.HM_SIZE, dtype=torch.float32)
+    shoulder = -(((g[None, None, :] - 44.0) ** 2 + (g[None, :, None] - 40.0) ** 2) / 8.0)
+    logits = _peak_logits(uv, sigma=3.0) + 2.0 * shoulder.exp()[:, None] - 0.5
+    images = torch.zeros(2, 256, 256, dtype=torch.uint8)
+    labels = torch.tensor([[80.5, 80.5], [10.0, 20.0]])
+    feeder = tv.BatchFeeder(images, labels, torch.device("cpu"), 2)
+    idx = torch.tensor([0, 1])
+    errs = {}
+    for win in (5, 9):
+        args = SimpleNamespace(loss="ce", sigma=1.0, coord_weight=0.1, decode_win=win)
+        res = tv.evaluate(_FixedLogits(logits), feeder, idx, args, amp=False)
+        want = (tv.decode_logits(logits.expand(2, -1, -1, -1), win=win) - labels).norm(dim=1)
+        assert np.allclose(res["err"], want.numpy(), atol=1e-5), win
+        errs[win] = res["err"]
+    assert not np.allclose(errs[5], errs[9], atol=1e-3)
+
+
+def test_tip_loss_hard_weight():
+    xy = torch.tensor([[100.3, 60.8], [30.0, 200.0]])
+    easy_hard = _peak_logits(tv.image_to_heatmap(xy + torch.tensor([[0.0, 0.0], [14.0, 14.0]])))
+    old = tv.tip_loss(easy_hard, xy)
+    assert torch.equal(tv.tip_loss(easy_hard, xy, hard_weight=0.0), old)      # G=0: bit-identical
+    assert torch.equal(tv.tip_loss(easy_hard, xy, "ce", 1.0, 0.1, 0.0, 10.0), old)
+
+    def share(g):   # fraction of the gradient norm that lands on the hard sample (index 1)
+        lg = easy_hard.clone().requires_grad_(True)
+        tv.tip_loss(lg, xy, hard_weight=g).backward()
+        n = lg.grad.flatten(1).norm(dim=1)
+        return float(n[1] / n.sum())
+    assert share(1.0) > share(0.0) + 0.01
+    assert tv.tip_loss(easy_hard, xy, hard_weight=1.0) != old
+
+    # weights: batch mean 1, the harder sample larger, clamped at hard_weight_max
+    kl = torch.tensor([0.0, 1.0, 5.0])
+    w = tv.hard_sample_weights(kl, 1.0, 10.0)
+    assert float(w.mean()) == pytest.approx(1.0) and w[0] < w[1] < w[2]
+    kl = torch.tensor([1.0, 1.0, 10.0])               # ratios 0.25, 0.25, 2.5 -> clamp 2 -> /mean
+    w = tv.hard_sample_weights(kl, 1.0, 2.0)
+    assert torch.allclose(w, torch.tensor([0.25, 0.25, 2.0]) / (2.5 / 3))
+    assert torch.allclose(tv.hard_sample_weights(kl, 0.0, 2.0), torch.ones(3))

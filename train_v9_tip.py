@@ -59,6 +59,7 @@ import random
 import sys
 import tempfile
 import time
+import warnings
 
 import numpy as np
 import torch
@@ -256,17 +257,27 @@ def ensure_cache(data_dir, cache_prefix, workers=None):
             raise RuntimeError("cache build finished but does not match labels.csv")
 
 
-def load_cache(data_dir, cache_prefix, limit=None, workers=None):
-    """Build the cache if missing/stale, then load it into RAM.
+def load_cache(data_dir, cache_prefix, limit=None, workers=None, mmap=False):
+    """Build the cache if missing/stale, then load it into RAM (or map it).
 
     Returns (images uint8 torch (n, S, S) CPU, labels float32 torch (n, 2),
     filenames list[str] (n,)), n = min(N, limit).  One RAM copy of the images.
+    mmap=True (bool): no RAM copy; images is a torch view of np.load(images .npy,
+    mmap_mode="r") (read-only pages), so parallel runs share the OS page cache.
     """
     ensure_cache(data_dir, cache_prefix, workers=workers)
     img_path, meta_path = cache_paths(cache_prefix)
     meta = np.load(meta_path)
     mm = np.load(img_path, mmap_mode="r")             # (N, S, S) uint8 memmap
     n = len(mm) if not limit else min(int(limit), len(mm))
+    if mmap:
+        with warnings.catch_warnings():               # numpy: "array is not writable"
+            warnings.simplefilter("ignore", UserWarning)
+            images = torch.from_numpy(mm[:n])         # (n, S, S) uint8, shares the mapped pages
+        labels = torch.from_numpy(np.array(meta["labels"][:n], dtype=np.float32))  # (n, 2)
+        names = [str(s) for s in meta["filenames"][:n]]
+        print(f"[cache] mapped {n} images ({n * IMG_SIZE * IMG_SIZE / 2**30:.2f} GiB, mmap, no RAM copy)")
+        return images, labels, names
     need = n * IMG_SIZE * IMG_SIZE                    # int: bytes for the RAM copy
     try:
         import psutil
@@ -506,6 +517,79 @@ class TipNet(nn.Module):
         return self.head(p)
 
 
+class TopDownX(nn.Module):
+    """FPN decoder step of TipNetX: project + x2 bilinear the coarse map, add the lateral
+    skip (1x1 projected if its width differs), refine with n_refine InvRes blocks.
+
+    coarse (B, cc, h, w) + skip (B, cs, 2h, 2w) -> (B, co, 2h, 2w).
+    """
+
+    def __init__(self, cc, cs, co, n_refine):
+        super().__init__()
+        self.proj = conv_bn(cc, co)                                     # 1x1 before upsampling
+        self.lateral = nn.Identity() if cs == co else conv_bn(cs, co)   # 1x1 skip projection
+        self.refine = nn.Sequential(*[InvRes(co, co, 1, 2) for _ in range(n_refine)])
+
+    def forward(self, coarse, skip):
+        up = F.interpolate(self.proj(coarse), scale_factor=2, mode="bilinear",
+                           align_corners=False)                          # (B, co, 2h, 2w)
+        return self.refine(up + self.lateral(skip))
+
+
+class TipNetX(nn.Module):
+    """TipNet with capacity at 1/8..1/32 resolution (the 128x128 layers stay cheap).
+
+    Input (B, 1, 256, 256) float32 in [0, 1] -> logits (B, 1, 128, 128), like TipNet.
+    enc    : (c1..c5) channel widths of the stages at 1/2 .. 1/32
+    dec    : (d5..d1) decoder widths from 1/32 up to 1/2
+    extra  : (e3, e4, e5) extra InvRes blocks in encoder stages 3, 4, 5
+    refine : (r4, r3, r2) InvRes blocks in the refine of up4, up3, up2 (up1 has 1)
+    Every channel count goes through _ch(c, width), so width 1.0 is exact.
+    """
+
+    def __init__(self, enc, dec, extra, refine, width=1.0):
+        super().__init__()
+        c1, c2, c3, c4, c5 = (_ch(c, width) for c in enc)
+        d5, d4, d3, d2, d1 = (_ch(c, width) for c in dec)
+        e3, e4, e5 = extra
+        r4, r3, r2 = refine
+        self.stem = conv_bn(1, c1, k=3, stride=2, act=True)
+        self.enc1 = InvRes(c1, c1, 1, 2)
+        self.enc2 = nn.Sequential(InvRes(c1, c2, 2, 3), InvRes(c2, c2, 1, 3))
+        self.enc3 = nn.Sequential(InvRes(c2, c3, 2, 3),
+                                  *[InvRes(c3, c3, 1, 3) for _ in range(1 + e3)])
+        self.enc4 = nn.Sequential(InvRes(c3, c4, 2, 3),
+                                  *[InvRes(c4, c4, 1, 2) for _ in range(1 + e4)])
+        self.enc5 = nn.Sequential(InvRes(c4, c5, 2, 2),
+                                  *[InvRes(c5, c5, 1, 2) for _ in range(1 + e5)])
+        self.ctx = nn.Sequential(nn.Conv2d(c5, c5 // 4, 1), nn.ReLU6(inplace=True),
+                                 nn.Conv2d(c5 // 4, c5, 1))
+        self.fuse = conv_bn(c5 + 2, d5, act=True)
+        self.up4 = TopDownX(d5, c4, d4, r4)
+        self.up3 = TopDownX(d4, c3, d3, r3)
+        self.up2 = TopDownX(d3, c2, d2, r2)
+        self.up1 = TopDownX(d2, c1, d1, 1)
+        self.head = nn.Conv2d(d1, 1, 1)
+        g = torch.linspace(-1.0, 1.0, IMG_SIZE // 32)
+        yy, xx = torch.meshgrid(g, g, indexing="ij")
+        self.register_buffer("coords", torch.stack([xx, yy])[None], persistent=False)
+
+    def forward(self, x):
+        e1 = self.enc1(self.stem(x))
+        e2 = self.enc2(e1)
+        e3 = self.enc3(e2)
+        e4 = self.enc4(e3)
+        e5 = self.enc5(e4)
+        e5 = e5 + self.ctx(e5.mean(dim=(2, 3), keepdim=True))
+        coords = self.coords.to(e5.dtype).expand(e5.shape[0], -1, -1, -1)
+        p = self.fuse(torch.cat([e5, coords], dim=1))
+        p = self.up4(p, e4)
+        p = self.up3(p, e3)
+        p = self.up2(p, e2)
+        p = self.up1(p, e1)
+        return self.head(p)
+
+
 class InvResNetGrayLogits(nn.Module):
     """Adapter for arch 'e': the existing InvResNetGray (half-res) without its sigmoid.
 
@@ -534,6 +618,10 @@ class InvResNetGrayLogits(nn.Module):
 ARCHS = {
     "tipnet": lambda width: TipNet(width=width),
     "e": lambda width: InvResNetGrayLogits(),
+    "tipnet_d2x": lambda width: TipNetX((16, 24, 64, 96, 128), (96, 80, 64, 24, 16),
+                                        (1, 2, 1), (2, 2, 1), width),
+    "tipnet_m32d2x": lambda width: TipNetX((16, 32, 64, 96, 128), (96, 80, 64, 32, 16),
+                                           (1, 2, 1), (2, 2, 1), width),
 }  # dict[str, callable(width float) -> nn.Module]: --arch registry
 
 
@@ -602,11 +690,30 @@ def soft_argmax(logp):
     return torch.stack([(p.sum(1) * xs).sum(1), (p.sum(2) * ys).sum(1)], dim=1)
 
 
-def tip_loss(logits, xy, kind="ce", sigma=1.0, coord_weight=0.1):
+def hard_sample_weights(kl, g, w_max):
+    """Per-sample loss weights (B,) float32, detached, batch mean 1, from kl (B,) >= 0.
+
+    w_i = clamp((kl_i / mean(kl)) ** g, max=w_max), then divided by its batch mean;
+    g <= 0 or an all-zero kl gives all ones.
+    """
+    kl = kl.detach().float().clamp_min(0.0)
+    if g <= 0:
+        return torch.ones_like(kl)
+    mean = kl.mean()                                    # scalar; no host sync below
+    w = (kl / mean.clamp_min(1e-12)).pow(g).clamp(max=w_max)
+    w = w / w.mean().clamp_min(1e-12)
+    return torch.where(mean > 1e-12, w, torch.ones_like(w))
+
+
+def tip_loss(logits, xy, kind="ce", sigma=1.0, coord_weight=0.1,
+             hard_weight=0.0, hard_weight_max=10.0):
     """Training loss for logits (B, 1, h, w) and float labels xy (B, 2) image px -> scalar.
 
     kind 'ce' : spatial-softmax CE vs a normalised Gaussian (sigma heatmap px)
                 + coord_weight * L1(DSNT expectation, label) in heatmap px.
+                hard_weight G > 0: each sample's CE + coord term is scaled by
+                hard_sample_weights(kl_i, G, hard_weight_max), kl_i = CE_i - H(target_i)
+                (focus on badly localised samples); G = 0 is the plain mean.
     kind 'mse': old weighted MSE of sigmoid(logits) vs a peak-1 Gaussian (w_pos 10).
     """
     logits = logits.float()[:, 0]                       # (B, h, w) float32
@@ -618,7 +725,15 @@ def tip_loss(logits, xy, kind="ce", sigma=1.0, coord_weight=0.1):
         return (weight * (torch.sigmoid(logits) - target) ** 2).mean()
     logp = F.log_softmax(logits.reshape(b, -1), dim=1)  # (B, h*w)
     target = gaussian_target(uv, h, w, sigma).reshape(b, -1)
-    ce = -(target * logp).sum(1).mean()
+    ce_i = -(target * logp).sum(1)                      # (B,) per-sample CE
+    if hard_weight > 0:
+        ent = -(target * target.clamp_min(1e-30).log()).sum(1)       # (B,) H(target_i)
+        wts = hard_sample_weights(ce_i - ent, hard_weight, hard_weight_max)   # (B,)
+        if coord_weight > 0:
+            l1_i = (soft_argmax(logp.reshape(b, h, w)) - uv).abs().sum(1)    # (B,)
+            return (wts * (ce_i + coord_weight * l1_i)).mean()
+        return (wts * ce_i).mean()
+    ce = ce_i.mean()
     if coord_weight <= 0:
         return ce
     l1 = (soft_argmax(logp.reshape(b, h, w)) - uv).abs().sum(1).mean()
@@ -716,7 +831,7 @@ def evaluate(model, feeder, indices, args, amp):
         with torch.autocast(device_type=dev.type, dtype=torch.bfloat16, enabled=amp):
             logits = model(x)
         loss_sum += tip_loss(logits, xy, args.loss, args.sigma, args.coord_weight) * len(idx)
-        pred = decode_logits(logits)               # (B, 2) image px
+        pred = decode_logits(logits, win=args.decode_win)   # (B, 2) image px
         errs.append(torch.linalg.vector_norm(pred - xy, dim=1))
         preds.append(pred)
         labs.append(xy)
@@ -778,6 +893,17 @@ def export_and_check_onnx(model, path, samples):
 
 # ── training ─────────────────────────────────────────────────────────────
 
+def _odd_pos_int(text):
+    """argparse type for --decode-win: odd int >= 1."""
+    try:
+        v = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not an integer (need an odd value >= 1)")
+    if v < 1 or v % 2 == 0:
+        raise argparse.ArgumentTypeError(f"{v} must be odd and >= 1")
+    return v
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Fast tip-heatmap trainer for the v9 dataset")
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR,
@@ -809,6 +935,20 @@ def parse_args(argv=None):
     p.add_argument("--resume", default=None, help="<out>/last.pth of an earlier run")
     p.add_argument("--export-tflite", action="store_true",
                    help="also convert model.onnx to TFLite (slow; needs onnx2tf)")
+    p.add_argument("--max-pth-kb", type=float, default=PTH_LIMIT_BYTES / 1024,
+                   help="refuse to train when the state_dict .pth would be this many KB or more "
+                        "(default 500; 0 = no limit)")
+    p.add_argument("--mmap-cache", action="store_true",
+                   help="map the image cache read-only instead of copying it into RAM "
+                        "(parallel runs share the OS page cache)")
+    p.add_argument("--decode-win", type=_odd_pos_int, default=5,
+                   help="odd window (cells) of the softmax centroid decode used by every "
+                        "evaluation (default 5)")
+    p.add_argument("--hard-weight", type=float, default=0.0,
+                   help="G >= 0: weight training samples by (KL_i / mean KL) ** G, "
+                        "loss 'ce' only (0 = off)")
+    p.add_argument("--hard-weight-max", type=float, default=10.0,
+                   help="clamp of the --hard-weight sample weights before renormalising")
     p.add_argument("--no-amp", action="store_true", help="disable bf16 autocast")
     p.add_argument("--cpu", action="store_true", help="force CPU")
     return p.parse_args(argv)
@@ -845,18 +985,21 @@ def main(argv=None):
     model = build_model(args.arch, args.width)
     n_params = count_params(model)                  # int
     pth_bytes = state_dict_bytes(model)             # int
+    limit_kb = args.max_pth_kb                      # float: size limit in KB, 0 = none
     print(f"model: arch={args.arch} width={args.width}  params={n_params:,} "
           f"(budget {PARAM_BUDGET:,})  pth={pth_bytes / 1024:.1f} KB "
-          f"(limit {PTH_LIMIT_BYTES / 1024:.0f} KB)")
-    if pth_bytes >= PTH_LIMIT_BYTES:
-        print(f"REFUSED: state_dict .pth would be {pth_bytes / 1024:.1f} KB >= 500 KB")
+          f"(limit {f'{limit_kb:g} KB' if limit_kb > 0 else 'none'})")
+    if limit_kb > 0 and pth_bytes >= limit_kb * 1024:
+        print(f"REFUSED: state_dict .pth would be {pth_bytes / 1024:.1f} KB >= {limit_kb:g} KB "
+              f"(--max-pth-kb {limit_kb:g}); raise --max-pth-kb or pass --max-pth-kb 0 for no limit")
         sys.exit(2)
-    if n_params > PARAM_BUDGET:
+    if limit_kb > 0 and n_params > PARAM_BUDGET:
         print(f"WARNING: {n_params:,} params exceeds the {PARAM_BUDGET:,} budget")
 
     # ---- data ----
     cache = args.cache or (os.path.abspath(args.data_dir).rstrip("\\/") + "_cache")
-    images, labels, names = load_cache(args.data_dir, cache, args.limit, args.cache_workers)
+    images, labels, names = load_cache(args.data_dir, cache, args.limit, args.cache_workers,
+                                       mmap=args.mmap_cache)
     n = len(names)
     train_idx, val_idx = split_indices(n, args.val_split)
     print(f"data: {n} images  train={len(train_idx)}  val={len(val_idx)}  device={dev} "
@@ -917,7 +1060,8 @@ def main(argv=None):
                 g["lr"] = lr
             with torch.autocast(device_type=dev.type, dtype=torch.bfloat16, enabled=amp):
                 logits = model(x)
-            loss = tip_loss(logits, xy, args.loss, args.sigma, args.coord_weight)
+            loss = tip_loss(logits, xy, args.loss, args.sigma, args.coord_weight,
+                            args.hard_weight, args.hard_weight_max)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
