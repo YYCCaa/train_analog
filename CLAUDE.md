@@ -40,6 +40,7 @@ still works but runs serially (~11 min).
 | autocal dataset | autocal_utils.py | `python -m pytest -q tests/test_autocal_dataset.py` | 120 s |
 | v9 TipNet training | train_v9_tip.py, generate_synthetic_v7_mp.py, v7_config.py | `python -m pytest -q tests/test_train_v9.py` | 1200 s |
 | v9 TFLite export | export_v9_tflite.py, train_v9_tip.py | `python -m pytest -q tests/test_export_v9_tflite.py` | 1200 s |
+| v9 CPU batch check | bench_v9_cpu.py, train_v9_tip.py | `python -m pytest -q tests/test_bench_v9_cpu.py` | 300 s |
 | gray InvResNet training | train_e_inv_res_gray.py, train_utils_v2_gray.py | `python -m pytest -q tests/test_train_gray.py` | 900 s |
 | studio API | studio/backend/*.py, generate_synthetic_v7_mp.py | `python -m pytest -q tests/test_studio_api.py` | 600 s |
 | studio browser E2E | studio/run_studio.py, studio/backend/*, studio/frontend | `python -m pytest -q tests/test_studio_e2e.py` | 1200 s |
