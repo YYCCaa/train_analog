@@ -134,6 +134,17 @@ def fail(msg):
     return 1
 
 
+def load_batch(data_dir, names, rows, buf):
+    """Read the PNGs of dataset rows `rows` into buf (B,1,256,256) float32 = gray/255, zero-padding the rest.
+
+    rows: int64 ndarray (m,), m <= B.  Returns buf.  Only one batch is ever in memory, whatever n_val is.
+    """
+    buf.fill(0.0)
+    for j, i in enumerate(rows):
+        buf[j, 0] = tv._load_png(data_dir, names[int(i)]).astype(np.float32) / np.float32(255.0)
+    return buf
+
+
 def pct(a, q):
     return float(np.percentile(np.asarray(a, dtype=np.float64), q))
 
@@ -172,15 +183,13 @@ def main(argv=None):
     val_idx = tv.split_indices(len(names), a.val_split)[1].numpy()   # (n_val,) int64 dataset rows
     n_val = len(val_idx)
     n_check = n_val if a.check is None else min(a.check, n_val)       # int: images scored for accuracy
-    n_load = min(n_val, max(a.batch, n_check))                        # int: images actually read
-    try:
-        imgs = np.stack([tv._load_png(a.data_dir, names[int(i)]) for i in val_idx[:n_load]])   # (n_load,256,256) u8
+    buf = np.zeros((a.batch, 1, tv.IMG_SIZE, tv.IMG_SIZE), dtype=np.float32)   # reused batch input in [0, 1]
+    n_batches = -(-n_check // a.batch)                                # int: batches the accuracy pass runs
+    print(f"val: {n_val} images, scoring {n_check}, {n_batches} batch(es) of {a.batch}")
+    try:   # (B,1,256,256) float32: first val batch (parity check + latency input), kept apart from buf
+        first = load_batch(a.data_dir, names, val_idx[:a.batch], np.empty_like(buf))
     except Exception as e:  # noqa: BLE001
         return fail(f"CPU FAIL cannot read val images from {a.data_dir}: {type(e).__name__}: {e}")
-    n_pad = -(-n_load // a.batch) * a.batch                           # int: n_load rounded up to a batch multiple
-    x_all = np.zeros((n_pad, 1, tv.IMG_SIZE, tv.IMG_SIZE), dtype=np.float32)   # zero-padded inputs in [0, 1]
-    x_all[:n_load, 0] = imgs.astype(np.float32) / np.float32(255.0)
-    print(f"val: {n_val} images, scoring {n_check}, {n_pad // a.batch} batch(es) of {a.batch}")
 
     # 2. ONNX with a fixed batch dim + parity with torch on the first batch
     import onnx
@@ -195,7 +204,6 @@ def main(argv=None):
     so.intra_op_num_threads = a.threads
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     sess = ort.InferenceSession(onnx_path, sess_options=so, providers=["CPUExecutionProvider"])
-    first = np.ascontiguousarray(x_all[:a.batch])                     # (B,1,256,256) float32: first val batch
     with torch.no_grad():
         lg_t = model(torch.from_numpy(first)).numpy()                 # (B,1,128,128)
     lg_o = sess.run(["logits"], {"input": first})[0]                  # (B,1,128,128)
@@ -224,9 +232,13 @@ def main(argv=None):
     if n_check > 0:
         errs = []   # list[ndarray (<=B,)]: per-batch |tip - label| (image px)
         for s in range(0, n_check, a.batch):
-            lg = sess.run(["logits"], {"input": np.ascontiguousarray(x_all[s:s + a.batch])})[0]
+            m = min(a.batch, n_check - s)    # rows that are real, scored images (rest is zero padding)
+            try:
+                load_batch(a.data_dir, names, val_idx[s:s + m], buf)
+            except Exception as e:  # noqa: BLE001
+                return fail(f"CPU FAIL cannot read val images from {a.data_dir}: {type(e).__name__}: {e}")
+            lg = sess.run(["logits"], {"input": buf})[0]
             tips = decode_np(lg, a.decode_win)
-            m = min(a.batch, n_check - s)    # rows that are real, scored images (rest is padding)
             lab = xy[val_idx[s:s + m]]       # (m, 2) float32
             errs.append(np.linalg.norm(tips[:m] - lab, axis=1))
         err = np.concatenate(errs)
