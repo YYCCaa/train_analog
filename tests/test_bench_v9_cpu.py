@@ -35,7 +35,10 @@ import train_v9_tip as tv  # noqa: E402
 
 N_DIALS = 40          # int: synthetic dataset size -> 6 val images
 CLI_TIMEOUT_S = 240   # int: seconds allowed for one CLI subprocess
-FAST = ["--threads", "2", "--runs", "3", "--warmup", "1"]  # list[str]: keep latency loops short
+SHORT = ["--threads", "2", "--runs", "3", "--warmup", "1"]  # list[str]: keep latency loops short
+# list[str]: SHORT + a huge latency limit, so flow / JSON / accuracy cases never depend on CPU load
+# (only test_cli_limit_ms_fails_on_latency tests the limit itself)
+FAST = SHORT + ["--limit-ms", "1e9"]
 JSON_KEYS = {"run_dir", "pth", "arch", "width", "params", "batch", "threads", "decode_win", "onnx_path",
              "onnx_vs_torch_max_dlogit", "onnx_vs_torch_tip_dmax_px", "latency_ms", "limit_ms",
              "latency_ok", "n_checked", "n_val", "accuracy", "p99_max", "passed"}  # set[str]
@@ -128,7 +131,7 @@ def test_cli_weights_not_fitting_arch(dataset, tmp_path):
 
 def test_cli_limit_ms_fails_on_latency(dataset, tmp_path):
     run = make_run(tmp_path / "run")
-    cp = run_cli(run, dataset, *FAST, "--limit-ms", "0.001")
+    cp = run_cli(run, dataset, *SHORT, "--limit-ms", "0.001")
     assert cp.returncode == 1
     assert last_line(cp).startswith("CPU FAIL") and "latency" in last_line(cp)
     js = json.loads((run / "cpu_check.json").read_text())
